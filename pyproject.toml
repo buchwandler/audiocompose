@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utterrender"
+version = "0.1.0"
+description = "Execute utterplan plans through pluggable TTS engines and assemble final audio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "UtterRender contributors"}]
+dependencies = [
+  "numpy>=1.23",
+  "utterplan>=0.1,<0.2",
+]
+keywords = ["tts", "text-to-speech", "audio", "rendering", "utterplan", "onnx"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+prosody = ["audiosig>=0.1.4,<0.2"]
+piper = ["pipersynth>=0.2,<0.3"]
+kokoro = ["pykokoro>=0.9,<1.0"]
+all = ["audiosig>=0.1.4,<0.2", "pipersynth>=0.2,<0.3", "pykokoro>=0.9,<1.0"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "audiosig>=0.1.4,<0.2"]
+
+[project.scripts]
+utterrender = "utterrender.cli:main"
+
+[project.entry-points."utterrender.plugins"]
+# Third-party packages can register plugins here.
+
+[project.urls]
+Homepage = "https://github.com/buchwandler/utterrender"
+Repository = "https://github.com/buchwandler/utterrender"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["utterrender*"]
+
+[tool.setuptools.package-data]
+utterrender = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
