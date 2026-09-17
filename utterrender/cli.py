@@ -4,8 +4,7 @@ import argparse
 from pathlib import Path
 
 from ._plan import Plan
-
-from .runtime import Renderer, TTS
+from .runtime import TTS, Renderer
 
 
 def main(argv: list[str] | None = None) -> None:

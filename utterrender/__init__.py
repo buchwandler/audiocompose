@@ -1,7 +1,10 @@
+from .alignment import AlignmentKind, AudioTextSpan
 from .assembler import assemble, samples_for_duration, silence
+from .assets import AssetProgressCallback, AssetProgressEvent
 from .calibration import VoiceCalibration, VoiceCalibrationRegistry
 from .capabilities import RenderCapabilities
-from .effects import AudioSigProsodyProcessor
+from .diagnostics import DiagnosticSeverity, RenderDiagnostic
+from .effects import AudioSigProsodyProcessor, apply_emphasis
 from .errors import (
     AssemblyError,
     FragmentValidationError,
@@ -9,24 +12,46 @@ from .errors import (
     UtterRenderError,
     VoiceRoutingError,
 )
+from .loudness import LoudnessPolicy, LoudnessResult, apply_complete_output_loudness
 from .model import AudioFragment, RenderedMarker, RenderedSegment, RenderedUnit, RenderResult
-from .plugins import KokoroPlugin, PiperPlugin, PluginRegistry, RenderPlugin, RenderRequest
+from .models import ModelInfo
+from .plugins import (
+    KokoroPlugin,
+    PiperPlugin,
+    PluginAvailability,
+    PluginRegistry,
+    RenderPlugin,
+    RenderRequest,
+    SegmentRenderContext,
+)
 from .prosody import ResolvedProsody, parse_pitch, parse_rate, parse_volume, resolve_prosody
-from .runtime import Renderer, TTS
+from .runtime import TTS, Renderer
 from .voices import VoiceBindings, VoiceInfo
-from .wav import write_wav
+from .wav import prepare_output, write_wav
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "AlignmentKind",
     "AssemblyError",
+    "AssetProgressCallback",
+    "AssetProgressEvent",
     "AudioFragment",
     "AudioSigProsodyProcessor",
+    "apply_emphasis",
+    "AudioTextSpan",
+    "DiagnosticSeverity",
+    "LoudnessPolicy",
+    "LoudnessResult",
     "FragmentValidationError",
+    "PluginAvailability",
     "KokoroPlugin",
+    "ModelInfo",
     "PiperPlugin",
     "PluginRegistry",
+    "PluginStatus",
     "RenderCapabilities",
+    "RenderDiagnostic",
     "RenderedMarker",
     "RenderedSegment",
     "RenderedUnit",
@@ -36,6 +61,7 @@ __all__ = [
     "RenderResult",
     "Renderer",
     "ResolvedProsody",
+    "SegmentRenderContext",
     "TTS",
     "UtterRenderError",
     "VoiceBindings",
@@ -48,7 +74,9 @@ __all__ = [
     "parse_rate",
     "parse_volume",
     "resolve_prosody",
+    "apply_complete_output_loudness",
     "samples_for_duration",
     "silence",
+    "prepare_output",
     "write_wav",
 ]

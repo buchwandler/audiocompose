@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-import numpy as np
 from dataclasses import replace
-import utterplan
-from utterplan import PlannerConfig, ProsodyDirective, SegmentDirectives, VoiceDirective
 
-Planner = getattr(utterplan, "UtterPlanner", getattr(utterplan, "TTSPlanner"))
+import numpy as np
+import pytest
+from utterplan import (
+    PlannerConfig,
+    ProsodyDirective,
+    SegmentDirectives,
+    UtterancePlanner,
+    VoiceDirective,
+)
 from utterplan.hashing import semantic_hash, unit_hash_payload
 
-from utterrender import AudioFragment, RenderCapabilities, Renderer, VoiceInfo
+from utterrender import AudioFragment, RenderCapabilities, Renderer, RenderPluginError, VoiceInfo
 from utterrender.plugins.base import RenderRequest
+
+Planner = UtterancePlanner
 
 
 class _HashUnit:
@@ -185,3 +192,64 @@ def test_voice_calibration_is_applied_before_assembly() -> None:
     # +6.0206 dB = 2x amplitude.
     span = result.segments[0]
     assert np.allclose(result.audio[span.audio_start_sample:span.audio_end_sample], 0.2)
+
+
+def test_request_contains_plan_context() -> None:
+    plan = Planner(
+        PlannerConfig(language="en-us", document_format="plain", text_preparation="identity")
+    ).plan("Hello.")
+    plugin = FakePlugin(
+        "fake",
+        (VoiceInfo("fake:one", "fake", "one", ("en-us",)),),
+        0.1,
+        24000,
+    )
+
+    Renderer(plugins=(plugin,), default_voice="fake:one", apply_prosody=False).render(plan)
+
+    context = plugin.requests[0].plan_context
+    assert context.plan is plan
+    assert context.segment is plan.segments[0]
+    assert context.tokens[0].text == "Hello."
+
+
+def test_realized_prosody_must_match_capabilities() -> None:
+    class InvalidPlugin(FakePlugin):
+        def render(self, request: RenderRequest) -> AudioFragment:
+            return AudioFragment(
+                segment_id=request.segment.id,
+                audio=np.ones(2, dtype=np.float32),
+                sample_rate=self.rate,
+                realized_prosody=frozenset({"rate"}),
+            )
+
+    plan = Planner(
+        PlannerConfig(language="en-us", document_format="plain", text_preparation="identity")
+    ).plan("Hello.")
+    plugin = InvalidPlugin(
+        "fake",
+        (VoiceInfo("fake:one", "fake", "one", ("en-us",)),),
+        0.1,
+        24000,
+    )
+    with pytest.raises(RenderPluginError, match="unsupported prosody"):
+        Renderer(plugins=(plugin,), default_voice="fake:one", apply_prosody=False).render(plan)
+
+
+def test_backend_errors_include_render_context() -> None:
+    class BrokenPlugin(FakePlugin):
+        def render(self, request: RenderRequest) -> AudioFragment:
+            raise RuntimeError("backend exploded")
+
+    plan = Planner(
+        PlannerConfig(language="en-us", document_format="plain", text_preparation="identity")
+    ).plan("Hello.")
+    plugin = BrokenPlugin(
+        "fake",
+        (VoiceInfo("fake:one", "fake", "one", ("en-us",)),),
+        0.1,
+        24000,
+    )
+    with pytest.raises(RenderPluginError, match="plugin=fake.*segment=.*language=en-us") as error:
+        Renderer(plugins=(plugin,), default_voice="fake:one", apply_prosody=False).render(plan)
+    assert isinstance(error.value.__cause__, RuntimeError)

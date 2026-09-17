@@ -1,10 +1,10 @@
 """One utterance plan using logical voices backed by different engines."""
 
-import utterplan
+from utterplan import PlannerConfig, UtterancePlanner
+
 from utterrender import Renderer
 
-Planner = getattr(utterplan, "UtterPlanner", getattr(utterplan, "TTSPlanner"))
-PlannerConfig = utterplan.PlannerConfig
+Planner = UtterancePlanner
 
 text = '''
 [Hello from the narrator.]{voice="narrator"}

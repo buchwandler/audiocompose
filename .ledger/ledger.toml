@@ -1,0 +1,18 @@
+schema_version = 3
+
+[project]
+uuid = "585f9250-92fc-4d44-ad79-7dadf29c2c66"
+name = "utterrender"
+
+[ledgers.taskledger.mounts.data]
+storage = "external"
+root = "../ledger"
+
+[ledgers.taskledger.mounts.runtime]
+storage = "user-data"
+
+[ledgers.taskledger.mounts.logs]
+storage = "user-data"
+
+[ledgers.taskledger.mounts.indexes]
+storage = "cache"

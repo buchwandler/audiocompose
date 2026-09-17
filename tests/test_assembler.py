@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
-import utterplan
+from utterplan import UtterancePlan as Plan
 
-Plan = getattr(utterplan, "UtterPlan", getattr(utterplan, "TTSPlan"))
-
-from utterrender import AudioFragment, AssemblyError, assemble, samples_for_duration
-
+from utterrender import AssemblyError, AudioFragment, AudioTextSpan, assemble, samples_for_duration
 
 FIXTURE = Path(__file__).parent / "fixtures" / "markers.utterplan.json"
 
@@ -21,6 +19,27 @@ def load_plan() -> Plan:
 
 def test_samples_for_duration_uses_nearest_sample() -> None:
     assert samples_for_duration(0.0015, 1000) == 2
+
+
+def test_internal_marker_uses_fragment_alignment() -> None:
+    plan = load_plan()
+    plan = replace(plan, markers=(replace(plan.markers[0], spoken_position=2),))
+    result = assemble(
+        plan,
+        [
+            AudioFragment(
+                "seg-000000",
+                np.ones(4, dtype=np.float32),
+                10,
+                alignment=(AudioTextSpan(0, 4, 0, 4, "word"),),
+            ),
+            AudioFragment("seg-000001", np.ones(3, dtype=np.float32), 10),
+        ],
+        validate_plan=False,
+    )
+
+    assert result.markers[0].timing == "resolved"
+    assert result.markers[0].sample_offset == 2
     assert samples_for_duration(0.6, 10) == 6
 
 

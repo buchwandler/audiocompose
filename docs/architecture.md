@@ -21,19 +21,17 @@ synthesis, shared DSP, sample-rate normalization, timeline assembly and WAV outp
 9. Insert plan pauses, build segment/unit spans and resolve safe marker offsets.
 10. Return `RenderResult` or write WAV.
 
-## Migration rule
+## Direct backend ownership
 
-The 0.1 MVP uses bridges to existing PyKokoro/PiperSynth implementations. Moving their
-code physically into `utterrender.plugins.kokoro` and `utterrender.plugins.piper` must not
-change the `RenderPlugin`, `VoiceInfo`, `RenderRequest`, `AudioFragment`, `Renderer` or
-`TTS` public contracts.
+The built-in plugins are direct implementations. Kokoro owns Kokoro G2P, voice styles, short-sentence
+workarounds, model timing extraction, and ONNX sessions. Piper owns Piper G2P, config and speaker
+resolution, native length scale, and ONNX sessions. Neither plugin invokes a planner or parser.
 
-Kokoro short-sentence optimization remains a Kokoro plugin implementation detail. The
-runtime may expose common policy knobs such as `quality="balanced"`, but must not pretend
-that model-specific algorithms are portable between plugins.
+Kokoro short-sentence optimization remains a Kokoro plugin implementation detail. It is not moved into
+`utterplan` or generalized into the shared renderer.
 
-## Plan rename compatibility
+## Canonical plan API
 
-The runtime imports the `utterplan` package through a small internal compatibility layer.
-It prefers `UtterPlan`/`UtterPlanner` when present and accepts legacy
-`TTSPlan`/`TTSPlanner` names if the package rename retained them.
+The runtime imports the current public `utterplan` API directly: `UtterancePlan`, `UtterancePlanner`,
+`PlannerConfig`, `PlanSegment` and `ProsodyDirective`. Legacy `UtterPlan` and `UtterPlanner` names are
+not required.

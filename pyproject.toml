@@ -31,9 +31,14 @@ classifiers = [
 
 [project.optional-dependencies]
 prosody = ["audiosig>=0.1.4,<0.2"]
-piper = ["pipersynth>=0.2,<0.3"]
-kokoro = ["pykokoro>=0.9,<1.0"]
-all = ["audiosig>=0.1.4,<0.2", "pipersynth>=0.2,<0.3", "pykokoro>=0.9,<1.0"]
+piper = ["piperg2p", "onnxruntime>=1.17,<2"]
+kokoro = ["kokorog2p[espeak,en]>=0.9,<1.0", "onnxruntime>=1.17,<2"]
+all = [
+  "audiosig>=0.1.4,<0.2",
+  "piperg2p",
+  "kokorog2p[espeak,en]>=0.9,<1.0",
+  "onnxruntime>=1.17,<2",
+]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "audiosig>=0.1.4,<0.2"]
 
 [project.scripts]
@@ -52,6 +57,9 @@ include = ["utterrender*"]
 
 [tool.setuptools.package-data]
 utterrender = ["py.typed"]
+
+[tool.mypy]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

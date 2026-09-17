@@ -1,219 +1,219 @@
 {
+  "format": "utterplan",
+  "schema_version": 1,
+  "producer": {
+    "name": "utterplan",
+    "version": "0.1.1"
+  },
+  "plan_id": "sha256:6ce544f215dd98369140ad9c66ebee113201692e976e42f76e13d3dc1ac2f6c6",
+  "source": {
+    "format": "ssmd",
+    "text": "One. @mark Two."
+  },
+  "config": {
+    "language": "en-us",
+    "document_format": "ssmd",
+    "text_preparation": "spokenform",
+    "unit": "sentence",
+    "pauses": {
+      "mode": "tts",
+      "weak": 0.15,
+      "clause": 0.3,
+      "sentence": 0.6,
+      "paragraph": 1.0,
+      "parenthetical": 0.15,
+      "voice_change": 0.15,
+      "enabled": true
+    },
+    "linguistics": {
+      "use_spacy": null,
+      "spacy_model": null,
+      "spacy_model_size": null,
+      "require_spacy": false
+    },
+    "ssmd": {
+      "parse_header": true,
+      "strict_header": true,
+      "unknown_header": "warn",
+      "pause_defaults": null
+    },
+    "overlap_mode": "snap",
+    "language_aliases": {},
+    "diagnostics": true
+  },
+  "texts": {
+    "structural": "One. Two.",
+    "spoken": "One. Two."
+  },
+  "preparation": {
+    "backend": "spokenform",
+    "version": "0.4.4.dev0+g71feb9cb4.d19800101",
+    "languages": [
+      "en-us"
+    ],
+    "replacements": [],
+    "warnings": []
+  },
+  "languages": [
+    {
+      "id": "lang-0",
+      "spoken_start": 0,
+      "spoken_end": 9,
+      "language": "en-us",
+      "source": "explicit-span"
+    }
+  ],
   "annotations": [
     {
+      "id": "annotation-000000",
+      "kind": "language",
       "attrs": {
         "lang": "en-us"
       },
-      "id": "annotation-000000",
-      "kind": "language",
-      "spoken_end": 9,
-      "spoken_start": 0,
+      "structural_start": 0,
       "structural_end": 9,
-      "structural_start": 0
+      "spoken_start": 0,
+      "spoken_end": 9
     }
   ],
   "boundaries": [
     {
+      "id": "boundary-000000",
+      "position": 4,
+      "kind": "sentence",
+      "seconds": null,
+      "origin": "planner",
+      "strength": "sentence",
       "attrs": {
         "automatic": true
-      },
-      "id": "boundary-000000",
-      "kind": "sentence",
-      "origin": "planner",
-      "position": 4,
-      "seconds": null,
-      "strength": "sentence"
+      }
     }
   ],
-  "config": {
-    "diagnostics": true,
-    "document_format": "ssmd",
-    "language": "en-us",
-    "language_aliases": {},
-    "linguistics": {
-      "require_spacy": false,
-      "spacy_model": null,
-      "spacy_model_size": null,
-      "use_spacy": null
-    },
-    "overlap_mode": "snap",
-    "pauses": {
-      "clause": 0.3,
-      "enabled": true,
-      "mode": "tts",
-      "paragraph": 1.0,
-      "parenthetical": 0.15,
-      "sentence": 0.6,
-      "voice_change": 0.15,
-      "weak": 0.15
-    },
-    "ssmd": {
-      "parse_header": true,
-      "pause_defaults": null,
-      "strict_header": true,
-      "unknown_header": "warn"
-    },
-    "text_preparation": "spokenform",
-    "unit": "sentence"
-  },
-  "diagnostics": [
+  "tokens": [
     {
-      "code": "planning.complete",
-      "message": "Plan compiled without renderer or audio processing",
-      "path": null,
-      "severity": "info"
+      "spoken_start": 0,
+      "spoken_end": 4,
+      "text": "One.",
+      "lemma": "one.",
+      "language": "en-us",
+      "id": "token-0"
+    },
+    {
+      "spoken_start": 5,
+      "spoken_end": 9,
+      "text": "Two.",
+      "lemma": "two.",
+      "language": "en-us",
+      "id": "token-1"
+    }
+  ],
+  "segments": [
+    {
+      "id": "seg-000000",
+      "text": "One.",
+      "spoken_start": 0,
+      "spoken_end": 4,
+      "language": "en-us",
+      "paragraph": 0,
+      "sentence": 0,
+      "clause": 0,
+      "pause_before": {
+        "seconds": 0.0,
+        "events": []
+      },
+      "pause_after": {
+        "seconds": 0.6,
+        "events": [
+          "boundary-000000"
+        ]
+      },
+      "directives": {},
+      "token_indices": [
+        0
+      ],
+      "annotation_ids": [
+        "annotation-000000"
+      ]
+    },
+    {
+      "id": "seg-000001",
+      "text": "Two.",
+      "spoken_start": 5,
+      "spoken_end": 9,
+      "language": "en-us",
+      "paragraph": 0,
+      "sentence": 1,
+      "clause": 0,
+      "pause_before": {
+        "seconds": 0.0,
+        "events": []
+      },
+      "pause_after": {
+        "seconds": 0.0,
+        "events": []
+      },
+      "directives": {},
+      "token_indices": [
+        1
+      ],
+      "annotation_ids": [
+        "annotation-000000"
+      ]
+    }
+  ],
+  "units": [
+    {
+      "id": "unit-0000",
+      "index": 0,
+      "kind": "sentence",
+      "spoken_start": 0,
+      "spoken_end": 4,
+      "segment_ids": [
+        "seg-000000"
+      ],
+      "marker_ids": [],
+      "content_hash": "sha256:2331e548d1b1d34f1b4538cd689a80596b7939d64cd37ae858304fc6bc657148"
+    },
+    {
+      "id": "unit-0001",
+      "index": 1,
+      "kind": "sentence",
+      "spoken_start": 5,
+      "spoken_end": 9,
+      "segment_ids": [
+        "seg-000001"
+      ],
+      "marker_ids": [
+        "marker-000000"
+      ],
+      "content_hash": "sha256:16846267be8586f05733916c94416ab1573c4ae66320674f27f9928b1f742618"
+    }
+  ],
+  "markers": [
+    {
+      "id": "marker-000000",
+      "name": "mark",
+      "spoken_position": 4,
+      "attrs": {
+        "name": "mark"
+      }
     }
   ],
   "document_metadata": {
     "header": {},
     "planning": {
-      "engine_independent": true,
       "linguistic_passes": 2,
+      "engine_independent": true,
       "pass_a_tokens": 2
     }
   },
-  "format": "utterplan",
-  "languages": [
+  "warnings": [],
+  "diagnostics": [
     {
-      "id": "lang-0",
-      "language": "en-us",
-      "source": "explicit-span",
-      "spoken_end": 9,
-      "spoken_start": 0
+      "code": "planning.complete",
+      "message": "Plan compiled without renderer or audio processing",
+      "severity": "info",
+      "path": null
     }
-  ],
-  "markers": [
-    {
-      "attrs": {
-        "name": "mark"
-      },
-      "id": "marker-000000",
-      "name": "mark",
-      "spoken_position": 4
-    }
-  ],
-  "plan_id": "sha256:db684931a06efb1c4ab7fdfab0e3b7ed9bbd034126730478e0196042f5904f71",
-  "preparation": {
-    "backend": "spokenform",
-    "languages": [
-      "en-us"
-    ],
-    "replacements": [],
-    "version": "0.4.4.dev0+g71feb9cb4.d19800101",
-    "warnings": []
-  },
-  "producer": {
-    "name": "utterplan",
-    "version": "0.0.dev5+gd834970f9.d19800101"
-  },
-  "schema_version": 1,
-  "segments": [
-    {
-      "annotation_ids": [
-        "annotation-000000"
-      ],
-      "clause": 0,
-      "directives": {},
-      "id": "seg-000000",
-      "language": "en-us",
-      "paragraph": 0,
-      "pause_after": {
-        "events": [
-          "boundary-000000"
-        ],
-        "seconds": 0.6
-      },
-      "pause_before": {
-        "events": [],
-        "seconds": 0.0
-      },
-      "sentence": 0,
-      "spoken_end": 4,
-      "spoken_start": 0,
-      "text": "One.",
-      "token_indices": [
-        0
-      ]
-    },
-    {
-      "annotation_ids": [
-        "annotation-000000"
-      ],
-      "clause": 0,
-      "directives": {},
-      "id": "seg-000001",
-      "language": "en-us",
-      "paragraph": 0,
-      "pause_after": {
-        "events": [],
-        "seconds": 0.0
-      },
-      "pause_before": {
-        "events": [],
-        "seconds": 0.0
-      },
-      "sentence": 1,
-      "spoken_end": 9,
-      "spoken_start": 5,
-      "text": "Two.",
-      "token_indices": [
-        1
-      ]
-    }
-  ],
-  "source": {
-    "format": "ssmd",
-    "text": "One. @mark Two."
-  },
-  "texts": {
-    "spoken": "One. Two.",
-    "structural": "One. Two."
-  },
-  "tokens": [
-    {
-      "id": "token-0",
-      "language": "en-us",
-      "lemma": "one.",
-      "spoken_end": 4,
-      "spoken_start": 0,
-      "text": "One."
-    },
-    {
-      "id": "token-1",
-      "language": "en-us",
-      "lemma": "two.",
-      "spoken_end": 9,
-      "spoken_start": 5,
-      "text": "Two."
-    }
-  ],
-  "units": [
-    {
-      "content_hash": "sha256:441750ab70db7c3651816472d8e0f71fecfe7e6a7c4141e0978cb20dc5d64289",
-      "id": "unit-0000",
-      "index": 0,
-      "kind": "sentence",
-      "marker_ids": [],
-      "segment_ids": [
-        "seg-000000"
-      ],
-      "spoken_end": 4,
-      "spoken_start": 0
-    },
-    {
-      "content_hash": "sha256:6e4541f760f57f8920269d547c0a58dca30dee5d5a3770f42899b31f5c83e425",
-      "id": "unit-0001",
-      "index": 1,
-      "kind": "sentence",
-      "marker_ids": [
-        "marker-000000"
-      ],
-      "segment_ids": [
-        "seg-000001"
-      ],
-      "spoken_end": 9,
-      "spoken_start": 5
-    }
-  ],
-  "warnings": []
+  ]
 }

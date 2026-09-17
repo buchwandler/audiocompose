@@ -5,8 +5,9 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 import numpy as np
-from ._plan import Plan
 
+from ._plan import Plan
+from .diagnostics import RenderDiagnostic
 from .errors import AssemblyError
 from .model import (
     AudioFragment,
@@ -127,6 +128,7 @@ def assemble(
     parts: list[np.ndarray] = []
     rendered_segments: list[RenderedSegment] = []
     position_offsets: dict[int, set[int]] = defaultdict(set)
+    diagnostics: list[RenderDiagnostic] = []
     cursor = 0
 
     for segment in plan.segments:
@@ -141,6 +143,14 @@ def assemble(
 
         audio_start = cursor
         position_offsets[segment.spoken_start].add(audio_start)
+        diagnostics.extend(fragment.diagnostics)
+        for alignment in fragment.alignment:
+            if alignment.spoken_length == 0:
+                continue
+            for spoken_position in range(alignment.spoken_start, alignment.spoken_end + 1):
+                ratio = (spoken_position - alignment.spoken_start) / alignment.spoken_length
+                sample_offset = alignment.sample_start + round(ratio * alignment.sample_length)
+                position_offsets[spoken_position].add(audio_start + sample_offset)
         if fragment.audio.size:
             parts.append(fragment.audio)
             cursor += int(fragment.audio.size)
@@ -236,6 +246,8 @@ def assemble(
         segments=tuple(rendered_segments),
         units=tuple(rendered_units),
         markers=tuple(rendered_markers),
+        diagnostics=tuple(diagnostics),
+        audio_in_range=bool(np.all(np.abs(audio) <= 1.0)),
         warnings=tuple(plan.warnings),
         metadata=metadata,
     )

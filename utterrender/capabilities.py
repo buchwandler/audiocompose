@@ -14,3 +14,22 @@ class RenderCapabilities:
     phoneme_timing: bool = False
     multi_speaker: bool = False
     streaming: bool = False
+
+    @property
+    def native_prosody_axes(self) -> frozenset[str]:
+        return frozenset(
+            axis
+            for axis, supported in (
+                ("rate", self.native_rate),
+                ("pitch", self.native_pitch),
+                ("volume", self.native_volume),
+            )
+            if supported
+        )
+
+    def supports_alignment(self, kind: str) -> bool:
+        if kind == "word":
+            return self.word_timing
+        if kind == "phoneme":
+            return self.phoneme_timing
+        return False

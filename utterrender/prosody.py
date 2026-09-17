@@ -76,8 +76,7 @@ def parse_rate(value: str) -> float:
             raise ValueError(f"rate must resolve to > 0, got {value!r}")
         return rate
 
-    # utterplan/pipersynth already accept plain numeric values, so keep that
-    # compatibility in the shared resolver.
+    # Keep compatibility with numeric values accepted by legacy frontends.
     try:
         rate = float(text)
     except ValueError as exc:

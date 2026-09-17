@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ._plan import PlanSegment
-
 from .errors import AssemblyError
 from .model import AudioFragment
 from .prosody import ProsodyAxis, resolve_prosody
 
+EmphasisPolicy = Literal["ignore", "gain", "warn", "error"]
 ProsodyMethod = Literal["phase_vocoder", "wsola", "esola", "td_psola"]
 
 
@@ -74,4 +74,34 @@ class AudioSigProsodyProcessor:
             sample_rate=fragment.sample_rate,
             realized_prosody=realized,
             metadata=metadata,
+            alignment=fragment.alignment,
+            diagnostics=fragment.diagnostics,
         )
+
+
+def apply_emphasis(
+    fragment: AudioFragment,
+    gain_db: float,
+    *,
+    policy: EmphasisPolicy = "gain",
+ ) -> AudioFragment:
+    """Apply shared gain-based emphasis when a backend has no native support."""
+    if gain_db == 0.0 or policy == "ignore":
+        return fragment
+    if policy == "error":
+        raise AssemblyError("emphasis requires native plugin support")
+    metadata = dict(fragment.metadata)
+    if policy == "warn":
+        metadata.setdefault("utterrender.warnings", []).append(
+            "emphasis approximated as gain"
+        )
+    multiplier = 10.0 ** (gain_db / 20.0)
+    return AudioFragment(
+        segment_id=fragment.segment_id,
+        audio=fragment.audio * multiplier,
+        sample_rate=fragment.sample_rate,
+        metadata=metadata,
+        realized_prosody=fragment.realized_prosody,
+        alignment=fragment.alignment,
+        diagnostics=fragment.diagnostics,
+    )

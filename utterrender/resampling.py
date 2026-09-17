@@ -13,7 +13,11 @@ def resample_fragment(fragment: AudioFragment, sample_rate: int) -> AudioFragmen
     try:
         from audiosig import resample
 
-        audio = resample(fragment.audio, fragment.sample_rate, sample_rate)
+        audio = resample(
+            fragment.audio,
+            source_rate=fragment.sample_rate,
+            target_rate=sample_rate,
+        )
     except (ImportError, AttributeError, TypeError):
         # Lightweight deterministic MVP fallback. Production builds should prefer
         # audiosig's band-limited resampler.

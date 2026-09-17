@@ -26,10 +26,8 @@ assets, routing, synthesis, runtime DSP and final audio assembly.
 
 ## Status
 
-This is an architectural MVP, not yet a replacement release for PyKokoro/PiperSynth.
-The built-in `kokoro` and `piper` plugins are lazy compatibility bridges to the current
-packages. This proves the public API and migration boundary before their implementation
-code is physically moved under `utterrender/plugins/`.
+This release provides direct prepared-segment Piper and Kokoro backends. The backend packages own
+G2P, model assets, ONNX sessions, voice data, native inference controls, and lifecycle.
 
 ## One interface
 
@@ -130,8 +128,8 @@ pip install "utterrender[piper,prosody]"
 pip install "utterrender[all]"
 ```
 
-The intended final state is still only two concepts for users: `utterplan` and `utterrender`.
-The compatibility package dependencies are a migration detail of this MVP.
+The backend extras install direct G2P and ONNX Runtime dependencies. `utterplan` remains the
+planning package, and `utterrender` remains the runtime and audio package.
 
 ## CLI
 
@@ -143,8 +141,8 @@ utterrender render chapter.utterplan.json chapter.wav --voice piper:en_US-lessac
 
 ## Voice asset provisioning and calibration
 
-The public runtime owns asset readiness even though this migration MVP delegates the
-actual downloads to the compatibility plugin:
+The runtime owns readiness and progress reporting. Discovery is metadata-only and does not open an
+ONNX session. Configure local model and voice assets on the plugin, then call:
 
 ```python
 renderer.ensure_voice("piper:en_US-lessac-medium")
@@ -162,6 +160,5 @@ renderer = Renderer(
 )
 ```
 
-The MVP applies configured gain corrections. Automatic LUFS measurement/calibration is
-a later subsystem; peak normalization is deliberately not presented as loudness
-calibration.
+The configured calibration gain is applied before final assembly. Optional loudness policy is applied
+to the complete output, with true-peak and clipping policy handled by `utterrender`.

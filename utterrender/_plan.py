@@ -1,22 +1,20 @@
-"""Small compatibility boundary around the renamed :mod:`utterplan` package.
+"""Canonical import boundary for the public :mod:`utterplan` API.
 
-The MVP intentionally supports either the new ``UtterPlan``/``UtterPlanner`` naming
-or the legacy class names if the project rename kept those public symbols.
+This module keeps internal renderer names short while targeting the documented
+current class names directly.
 """
 from __future__ import annotations
 
-import utterplan as _utterplan
+from utterplan import (
+    PlannerConfig,
+    PlanSegment,
+    ProsodyDirective,
+    UtterancePlan,
+    UtterancePlanner,
+)
 
-Plan = getattr(_utterplan, "UtterPlan", getattr(_utterplan, "TTSPlan", None))
-Planner = getattr(_utterplan, "UtterPlanner", getattr(_utterplan, "TTSPlanner", None))
-PlannerConfig = getattr(_utterplan, "PlannerConfig")
-PlanSegment = getattr(_utterplan, "PlanSegment")
-ProsodyDirective = getattr(_utterplan, "ProsodyDirective")
-
-if Plan is None or Planner is None:  # pragma: no cover - import contract guard
-    raise ImportError(
-        "utterplan must export UtterPlan/UtterPlanner or legacy TTSPlan/TTSPlanner"
-    )
+Plan = UtterancePlan
+Planner = UtterancePlanner
 
 __all__ = [
     "Plan",

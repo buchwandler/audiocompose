@@ -4,11 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .prosody import ProsodyAxis
-
 import numpy as np
 
+from .alignment import AudioTextSpan
+from .diagnostics import RenderDiagnostic
 from .errors import FragmentValidationError
+from .prosody import ProsodyAxis
 
 
 def _waveform(value: np.ndarray) -> np.ndarray:
@@ -24,17 +25,15 @@ def _waveform(value: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True, slots=True)
 class AudioFragment:
-    """One backend-rendered TTS segment.
-
-    The backend owns model inference and model-specific cleanup. utterrender owns
-    plan-aware assembly after this boundary.
-    """
+    """One backend-rendered TTS segment."""
 
     segment_id: str
     audio: np.ndarray
     sample_rate: int
     metadata: Mapping[str, Any] = field(default_factory=dict)
     realized_prosody: frozenset[ProsodyAxis] = frozenset()
+    alignment: tuple[AudioTextSpan, ...] = ()
+    diagnostics: tuple[RenderDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.segment_id:
@@ -52,6 +51,8 @@ class AudioFragment:
             )
         object.__setattr__(self, "realized_prosody", realized)
         object.__setattr__(self, "audio", _waveform(self.audio))
+        object.__setattr__(self, "alignment", tuple(self.alignment))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +102,13 @@ class RenderResult:
     units: tuple[RenderedUnit, ...]
     markers: tuple[RenderedMarker, ...]
     warnings: tuple[str, ...] = ()
+    diagnostics: tuple[RenderDiagnostic, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    audio_in_range: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "audio", _waveform(self.audio))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
     @property
     def duration_seconds(self) -> float:
