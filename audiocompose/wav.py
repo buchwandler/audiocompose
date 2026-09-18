@@ -55,7 +55,9 @@ def read_wav(path: str | Path, *, expected_channels: int | None = 1) -> tuple[np
     if channels <= 0 or rate <= 0:
         raise AudioValidationError(f"invalid WAV metadata in {source}")
     if expected_channels is not None and channels != expected_channels:
-        raise AudioValidationError(f"expected {expected_channels} channel(s), got {channels} in {source}")
+        raise AudioValidationError(
+            f"expected {expected_channels} channel(s), got {channels} in {source}"
+        )
     audio = _pcm_to_float(frames, width)
     if channels > 1:
         audio = audio.reshape(-1, channels).mean(axis=1)
@@ -65,7 +67,12 @@ def read_wav(path: str | Path, *, expected_channels: int | None = 1) -> tuple[np
 def wav_info(path: str | Path) -> WavInfo:
     try:
         with wave.open(str(path), "rb") as handle:
-            return WavInfo(handle.getframerate(), handle.getnchannels(), handle.getnframes(), handle.getsampwidth())
+            return WavInfo(
+                handle.getframerate(),
+                handle.getnchannels(),
+                handle.getnframes(),
+                handle.getsampwidth(),
+            )
     except (OSError, wave.Error) as exc:
         raise AudioValidationError(f"invalid WAV file {path}: {exc}") from exc
 
@@ -85,7 +92,7 @@ def _write_pcm(path: str | Path, audio: np.ndarray, sample_rate: int, width: int
     if width == 2:
         pcm = np.round(clipped * 32767.0).astype("<i2")
     elif width == 4:
-        pcm = np.round(clipped * 2147483647.0).astype("<i4")
+        pcm = np.round(clipped.astype(np.float64) * 2147483647.0).astype("<i4")
     else:
         raise ValueError("sample width must be 2 or 4")
     with wave.open(str(destination), "wb") as handle:
@@ -101,7 +108,9 @@ def write_intermediate_wav(path: str | Path, audio: np.ndarray, sample_rate: int
     return _write_pcm(path, audio, sample_rate, 4)
 
 
-def write_wav(path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy = "clamp") -> Path:
+def write_wav(
+    path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy = "clamp"
+) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     clipped = prepare_output(audio, clip_policy=clip_policy)

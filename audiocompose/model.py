@@ -4,8 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from .alignment import AudioAnchor, AudioSpan, ComposedMarker, ComposedSpan
+from .diagnostics import CompositionDiagnostic
+from .errors import AudioValidationError
 from .loudness import LoudnessPolicy
+from .operations import AudioOperation, Operation
 from .sources import AudioSource
 from .wav import ClipPolicy
 
@@ -18,29 +23,53 @@ class OutputPolicy:
     clip_policy: ClipPolicy = "clamp"
 
     def __post_init__(self) -> None:
-        if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int) or self.sample_rate <= 0:
-            raise ValueError("sample_rate must be a positive integer")
-        if self.channels != 1:
-            raise ValueError("audiocompose v1 supports mono output only")
+        if (
+            isinstance(self.sample_rate, bool)
+            or not isinstance(self.sample_rate, int)
+            or self.sample_rate <= 0
+        ):
+            raise AudioValidationError("sample_rate must be a positive integer")
+        if (
+            isinstance(self.channels, bool)
+            or not isinstance(self.channels, int)
+            or self.channels != 1
+        ):
+            raise AudioValidationError("audiocompose v1 supports mono output only")
         if self.clip_policy not in {"clamp", "warn", "error"}:
-            raise ValueError(f"unknown clip policy: {self.clip_policy!r}")
+            raise AudioValidationError(f"unknown clip policy: {self.clip_policy!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class AudioClip:
     id: str
     source: AudioSource
-    operations: tuple[Any, ...] = ()
+    operations: tuple[Operation, ...] = ()
     anchors: tuple[AudioAnchor, ...] = ()
     spans: tuple[AudioSpan, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.id:
-            raise ValueError("clip id must not be empty")
-        object.__setattr__(self, "operations", tuple(self.operations))
-        object.__setattr__(self, "anchors", tuple(self.anchors))
-        object.__setattr__(self, "spans", tuple(self.spans))
+        if not isinstance(self.id, str) or not self.id:
+            raise AudioValidationError("clip id must not be empty")
+        operations = tuple(self.operations)
+        if any(not isinstance(operation, AudioOperation) for operation in operations):
+            raise AudioValidationError(f"clip {self.id!r} contains an unsupported operation")
+        anchors = tuple(self.anchors)
+        seen: set[str] = set()
+        for anchor in anchors:
+            if not isinstance(anchor, AudioAnchor):
+                raise AudioValidationError(f"clip {self.id!r} contains an invalid anchor")
+            if anchor.id in seen:
+                raise AudioValidationError(f"duplicate anchor id {anchor.id!r} in clip {self.id!r}")
+            seen.add(anchor.id)
+        spans = tuple(self.spans)
+        if any(not isinstance(span, AudioSpan) for span in spans):
+            raise AudioValidationError(f"clip {self.id!r} contains an invalid span")
+        if not isinstance(self.metadata, Mapping):
+            raise AudioValidationError(f"clip {self.id!r} metadata must be an object")
+        object.__setattr__(self, "operations", operations)
+        object.__setattr__(self, "anchors", anchors)
+        object.__setattr__(self, "spans", spans)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +80,15 @@ class Silence:
 
     def __post_init__(self) -> None:
         import math
-        if not self.id:
-            raise ValueError("silence id must not be empty")
+
+        if not isinstance(self.id, str) or not self.id:
+            raise AudioValidationError("silence id must not be empty")
+        if not isinstance(self.seconds, (int, float)) or isinstance(self.seconds, bool):
+            raise AudioValidationError("silence seconds must be a finite number >= 0")
         if not math.isfinite(self.seconds) or self.seconds < 0:
-            raise ValueError("silence seconds must be finite and >= 0")
+            raise AudioValidationError("silence seconds must be a finite number >= 0")
+        if not isinstance(self.metadata, Mapping):
+            raise AudioValidationError("silence metadata must be an object")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,33 +100,45 @@ class AudioJob:
     source: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "items", tuple(self.items))
+        items = tuple(self.items)
         ids: set[str] = set()
-        for item in self.items:
+        for item in items:
+            if not isinstance(item, (AudioClip, Silence)):
+                raise AudioValidationError("AudioJob items must be AudioClip or Silence")
             if item.id in ids:
-                raise ValueError(f"duplicate AudioJob item id: {item.id!r}")
+                raise AudioValidationError(f"duplicate AudioJob item id: {item.id!r}")
             ids.add(item.id)
+        if not isinstance(self.producer, Mapping) or not isinstance(self.source, Mapping):
+            raise AudioValidationError("producer and source metadata must be objects")
+        if self.job_id is not None and (not isinstance(self.job_id, str) or not self.job_id):
+            raise AudioValidationError("job_id must be a non-empty string or None")
+        object.__setattr__(self, "items", items)
 
     def validate(self, *, base_dir: str | None = None) -> None:
         from .job import validate_job
+
         validate_job(self, base_dir=base_dir)
 
     def save(self, path: str) -> str:
         from .job import save_job
+
         return str(save_job(self, path))
 
     @classmethod
     def load(cls, path: str) -> AudioJob:
         from .job import load_job
+
         return load_job(path)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, base_dir: str = ".") -> AudioJob:
         from .job import job_from_dict
+
         return job_from_dict(payload, base_dir=base_dir)
 
     def to_dict(self, *, base_dir: str | None = None) -> dict[str, Any]:
         from .job import job_to_dict
+
         return job_to_dict(self, base_dir=base_dir)
 
 
@@ -111,12 +157,12 @@ class ComposedItem:
 
 @dataclass(frozen=True, slots=True)
 class CompositionResult:
-    audio: Any
+    audio: np.ndarray
     sample_rate: int
     items: tuple[ComposedItem, ...] = ()
     markers: tuple[ComposedMarker, ...] = ()
     spans: tuple[ComposedSpan, ...] = ()
-    diagnostics: tuple[Any, ...] = ()
+    diagnostics: tuple[CompositionDiagnostic, ...] = ()
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -124,5 +170,5 @@ class CompositionResult:
         return len(self.audio) / self.sample_rate
 
     @property
-    def waveform(self) -> Any:
+    def waveform(self) -> np.ndarray:
         return self.audio

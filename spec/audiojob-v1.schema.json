@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/buchwandler/audiocompose/blob/main/spec/audiojob-v1.schema.json",
+  "title": "AudioJob schema v1",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "producer",
+    "items",
+    "output",
+    "job_id"
+  ],
+  "properties": {
+    "format": { "const": "audiojob" },
+    "schema_version": { "const": 1 },
+    "job_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "producer": { "type": "object" },
+    "source": { "type": "object" },
+    "items": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "id", "seconds"],
+            "properties": {
+              "kind": { "const": "silence" },
+              "id": { "type": "string", "minLength": 1 },
+              "seconds": { "type": "number", "minimum": 0 },
+              "metadata": { "type": "object" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["kind", "id", "source", "operations"],
+            "properties": {
+              "kind": { "const": "clip" },
+              "id": { "type": "string", "minLength": 1 },
+              "source": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "sha256",
+                  "sample_rate",
+                  "channels",
+                  "frames"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*(^|/|\\\\)\\.\\.(?:/|\\\\|$)).+"
+                  },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "sample_rate": { "type": "integer", "minimum": 1 },
+                  "channels": { "const": 1 },
+                  "frames": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+              },
+              "operations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["type"],
+                  "properties": {
+                    "type": {
+                      "enum": ["gain", "pitch", "tempo", "fade_in", "fade_out"]
+                    },
+                    "db": { "type": "number" },
+                    "semitones": { "type": "number" },
+                    "factor": { "type": "number", "exclusiveMinimum": 0 },
+                    "seconds": { "type": "number", "minimum": 0 }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "anchors": { "type": "array" },
+              "spans": { "type": "array" },
+              "metadata": { "type": "object" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["sample_rate", "channels", "loudness", "clip_policy"],
+      "properties": {
+        "sample_rate": { "type": "integer", "minimum": 1 },
+        "channels": { "const": 1 },
+        "clip_policy": { "enum": ["clamp", "warn", "error"] },
+        "loudness": {
+          "type": "object",
+          "required": ["target_lufs", "true_peak_ceiling_dbtp", "peak_policy"],
+          "properties": {
+            "target_lufs": { "type": ["number", "null"] },
+            "true_peak_ceiling_dbtp": { "type": ["number", "null"] },
+            "peak_policy": { "enum": ["reduce_gain", "error"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

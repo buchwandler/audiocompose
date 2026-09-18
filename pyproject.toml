@@ -1,10 +1,9 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
-
 [project]
 name = "audiocompose"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Declaratively compose audio fragments into finalized audio"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,7 +29,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dsp = ["audiosig>=0.1.4,<0.2"]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "twine>=5"]
 
 [project.scripts]
 audiocompose = "audiocompose.cli:main"
@@ -43,8 +42,16 @@ Repository = "https://github.com/buchwandler/audiocompose"
 where = ["."]
 include = ["audiocompose*"]
 
+
+
 [tool.setuptools.package-data]
 audiocompose = ["py.typed"]
+
+[tool.setuptools_scm]
+version_file = "audiocompose/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+fallback_version = "0.0.dev0"
 
 [tool.mypy]
 ignore_missing_imports = true

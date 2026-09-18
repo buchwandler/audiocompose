@@ -49,7 +49,9 @@ def test_operations_are_applied_in_declared_order() -> None:
 
 def test_tempo_updates_duration_and_marker_coordinates() -> None:
     audio = np.arange(100, dtype=np.float32)
-    job = AudioJob((AudioClip("clip", AudioBufferSource(audio, 100), (Tempo(2.0),), (Marker("middle", 50),)),))
+    job = AudioJob(
+        (AudioClip("clip", AudioBufferSource(audio, 100), (Tempo(2.0),), (Marker("middle", 50),)),)
+    )
 
     result = Composer(sample_rate=100).compose(job)
 
@@ -58,13 +60,21 @@ def test_tempo_updates_duration_and_marker_coordinates() -> None:
 
 
 def test_bundle_roundtrip(tmp_path) -> None:
-    job = AudioJob((AudioClip("one", AudioBufferSource(np.linspace(-0.5, 0.5, 100), 100), (Gain(-3),)), Silence("pause", 0.1)))
+    job = AudioJob(
+        (
+            AudioClip("one", AudioBufferSource(np.linspace(-0.5, 0.5, 100), 100), (Gain(-3),)),
+            Silence("pause", 0.1),
+        )
+    )
 
     manifest = job.save(tmp_path / "simple.audiojob")
     loaded = AudioJob.load(manifest)
     result = Composer().compose(loaded)
 
-    assert json.loads((tmp_path / "simple.audiojob" / "audiojob.json").read_text())["format"] == "audiojob"
+    assert (
+        json.loads((tmp_path / "simple.audiojob" / "audiojob.json").read_text())["format"]
+        == "audiojob"
+    )
     assert len(result.audio) == 26400
     assert isinstance(loaded.items[0].source, AudioFileSource)
 
@@ -73,7 +83,15 @@ def test_bundle_rejects_path_traversal(tmp_path) -> None:
     parts = tmp_path / "job" / "parts"
     parts.mkdir(parents=True)
     manifest = parts.parent / "audiojob.json"
-    manifest.write_text(json.dumps({"format": "audiojob", "schema_version": 1, "items": [{"kind": "clip", "id": "x", "source": {"path": "../outside.wav"}}]}))
+    manifest.write_text(
+        json.dumps(
+            {
+                "format": "audiojob",
+                "schema_version": 1,
+                "items": [{"kind": "clip", "id": "x", "source": {"path": "../outside.wav"}}],
+            }
+        )
+    )
 
     with pytest.raises(AudioValidationError, match="relative"):
         AudioJob.load(manifest)
@@ -83,6 +101,7 @@ def test_wav_output(tmp_path) -> None:
     output = tmp_path / "out.wav"
     write_wav(output, np.zeros(10, dtype=np.float32), 8000)
     assert output.exists()
+
 
 def test_checked_in_fixture() -> None:
     job = AudioJob.load("tests/fixtures/simple.audiojob/audiojob.json")

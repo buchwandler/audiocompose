@@ -19,7 +19,11 @@ class AudioBufferSource:
         values = np.asarray(self.audio, dtype=np.float32)
         if values.ndim != 1 or not np.all(np.isfinite(values)):
             raise AudioValidationError("buffer audio must be a finite one-dimensional waveform")
-        if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int) or self.sample_rate <= 0:
+        if (
+            isinstance(self.sample_rate, bool)
+            or not isinstance(self.sample_rate, int)
+            or self.sample_rate <= 0
+        ):
             raise AudioValidationError("sample_rate must be a positive integer")
         if self.channels != 1:
             raise AudioValidationError("audiocompose v1 supports mono sources only")
@@ -45,11 +49,16 @@ class AudioFileSource:
     def load(self) -> tuple[np.ndarray, int]:
         audio, rate = read_wav(self.path, expected_channels=self.channels)
         if self.sample_rate is not None and rate != self.sample_rate:
-            raise AudioValidationError(f"source sample rate mismatch for {self.path}: expected {self.sample_rate}, got {rate}")
+            raise AudioValidationError(
+                f"source sample rate mismatch for {self.path}: expected {self.sample_rate}, got {rate}"
+            )
         if self.frames is not None and audio.size != self.frames:
-            raise AudioValidationError(f"source frame count mismatch for {self.path}: expected {self.frames}, got {audio.size}")
+            raise AudioValidationError(
+                f"source frame count mismatch for {self.path}: expected {self.frames}, got {audio.size}"
+            )
         if self.expected_sha256:
             from .wav import sha256_file
+
             actual = sha256_file(self.path)
             if actual != self.expected_sha256:
                 raise AudioValidationError(f"source hash mismatch for {self.path}")
