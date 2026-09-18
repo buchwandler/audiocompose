@@ -169,6 +169,7 @@ class CompositionResult:
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     loudness: LoudnessResult | None = None
+
     @property
     def duration_seconds(self) -> float:
         return len(self.audio) / self.sample_rate

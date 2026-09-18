@@ -93,9 +93,9 @@ def test_old_manifest_without_optional_span_fields_loads(tmp_path: Path) -> None
     source = tmp_path / "source.wav"
     write_wav(source, np.zeros(4), 4)
     manifest = Path(
-        AudioJob((AudioClip("clip", AudioBufferSource(np.zeros(4), 4), spans=(AudioSpan(0, 1, 0, 1),)),)).save(
-            tmp_path / "bundle.audiojob"
-        )
+        AudioJob(
+            (AudioClip("clip", AudioBufferSource(np.zeros(4), 4), spans=(AudioSpan(0, 1, 0, 1),)),)
+        ).save(tmp_path / "bundle.audiojob")
     )
     payload = json.loads(manifest.read_text())
     payload["items"][0]["spans"][0].pop("id", None)

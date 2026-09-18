@@ -311,9 +311,7 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
                     f"anchor {anchor.id!r} exceeds source length for {item.id!r}"
                 )
         for span_index, span in enumerate(item.spans):
-            _validate_json_value(
-                span.metadata, f"clip {item.id!r} span[{span_index}].metadata"
-            )
+            _validate_json_value(span.metadata, f"clip {item.id!r} span[{span_index}].metadata")
             if span.sample_end > len(audio):
                 raise AudioValidationError(
                     f"span[{span_index}] sample range exceeds source length for {item.id!r}"
@@ -321,6 +319,7 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
         if isinstance(item.source, AudioFileSource) and base_dir is not None:
             path = Path(item.source.path)
             _safe_relative(os.path.relpath(path.resolve(), Path(base_dir).resolve()))
+
 
 def save_job(job: AudioJob, path: str | Path) -> Path:
     job.validate()

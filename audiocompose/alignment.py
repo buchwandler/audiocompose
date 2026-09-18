@@ -52,6 +52,7 @@ class AudioSpan:
         if not isinstance(self.metadata, Mapping):
             raise AudioValidationError("span metadata must be an object")
 
+
 @dataclass(frozen=True, slots=True)
 class ComposedSpan:
     item_id: str
@@ -80,6 +81,7 @@ class ComposedSpan:
             raise AudioValidationError("span id must be a non-empty string or None")
         if not isinstance(self.metadata, Mapping):
             raise AudioValidationError("composed span metadata must be an object")
+
 
 @dataclass(frozen=True, slots=True)
 class ComposedMarker:
