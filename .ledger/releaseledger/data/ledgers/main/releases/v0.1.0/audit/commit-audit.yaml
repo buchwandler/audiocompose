@@ -1,0 +1,364 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 2
+release_version: v0.1.0
+git_base_ref: 06a04cf
+git_base_sha: 06a04cfb63c84735e7717b86fb2b1dfecce57276
+git_head_ref: HEAD
+git_head_sha: 7881eb24287c818e789a03e49c758bf740116c0b
+git_range: 06a04cfb63c84735e7717b86fb2b1dfecce57276..7881eb24287c818e789a03e49c758bf740116c0b
+commit_count: 6
+rows:
+  - sha: 91754e6713e15f59aeb5b511f4ba73e3544762d4
+    source_ref: git:91754e6713e15f59aeb5b511f4ba73e3544762d4
+    short_sha: 91754e6
+    changed_paths:
+      - .codecrate.toml
+      - .gitignore
+      - .pre-commit-config.yaml
+      - CHANGELOG.md
+      - README.md
+      - docs/architecture.md
+      - examples/mixed_engines.py
+      - examples/simple_api.py
+      - pyproject.toml
+      - tests/fixtures/markers.utterplan.json
+      - tests/test_assembler.py
+      - tests/test_model.py
+      - tests/test_prosody.py
+      - tests/test_registry.py
+      - tests/test_runtime.py
+      - utterrender/__init__.py
+      - utterrender/__main__.py
+      - utterrender/_plan.py
+      - utterrender/assembler.py
+      - utterrender/calibration.py
+      - utterrender/capabilities.py
+      - utterrender/cli.py
+      - utterrender/effects.py
+      - utterrender/errors.py
+      - utterrender/model.py
+      - utterrender/plugins/__init__.py
+      - utterrender/plugins/base.py
+      - utterrender/plugins/kokoro.py
+      - utterrender/plugins/piper.py
+      - utterrender/plugins/registry.py
+      - utterrender/prosody.py
+      - utterrender/protocols.py
+      - utterrender/py.typed
+      - utterrender/resampling.py
+      - utterrender/routing.py
+      - utterrender/runtime.py
+      - utterrender/voices.py
+      - utterrender/wav.py
+    stats:
+      files_changed: 38
+      insertions: 2468
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - utterrender/__init__.py
+      - utterrender/model.py
+      - utterrender/plugins/base.py
+      - utterrender/plugins/kokoro.py
+      - utterrender/plugins/piper.py
+      - utterrender/plugins/registry.py
+    observed_behavior:
+      Initial utterrender framework with TTS engine plugins for Kokoro
+      and Piper
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: initial version"
+    target_entry_key: entry-0001
+    notes: ""
+  - sha: 30da519bc7be31f6384cf7a798614a17408dab5b
+    source_ref: git:30da519bc7be31f6384cf7a798614a17408dab5b
+    short_sha: 30da519
+    changed_paths:
+      - .ledger/ledger.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - README.md
+      - docs/architecture.md
+      - examples/mixed_engines.py
+      - pyproject.toml
+      - tests/fixtures/markers.utterplan.json
+      - tests/test_assembler.py
+      - tests/test_audio_policy.py
+      - tests/test_contracts.py
+      - tests/test_import.py
+      - tests/test_kokoro_plugin.py
+      - tests/test_kokoro_short_sentence.py
+      - tests/test_piper_plugin.py
+      - tests/test_registry.py
+      - tests/test_routing.py
+      - tests/test_runtime.py
+      - utterrender/__init__.py
+      - utterrender/_plan.py
+      - utterrender/alignment.py
+      - utterrender/assembler.py
+      - utterrender/assets.py
+      - utterrender/calibration.py
+      - utterrender/capabilities.py
+      - utterrender/cli.py
+      - utterrender/diagnostics.py
+      - utterrender/effects.py
+      - utterrender/loudness.py
+      - utterrender/model.py
+      - utterrender/models.py
+      - utterrender/plugins/__init__.py
+      - utterrender/plugins/base.py
+      - utterrender/plugins/kokoro.py
+      - utterrender/plugins/kokoro_short_sentence.py
+      - utterrender/plugins/piper.py
+      - utterrender/plugins/registry.py
+      - utterrender/prosody.py
+      - utterrender/protocols.py
+      - utterrender/resampling.py
+      - utterrender/routing.py
+      - utterrender/runtime.py
+      - utterrender/utterrender_dummy
+      - utterrender/voices.py
+      - utterrender/wav.py
+    stats:
+      files_changed: 45
+      insertions: 2619
+      deletions: 409
+    inspected: true
+    inspected_paths:
+      - tests/test_assembler.py
+      - tests/test_model.py
+      - tests/test_prosody.py
+      - tests/test_runtime.py
+      - tests/test_routing.py
+    observed_behavior:
+      Test suite covering assembler, model, prosody, runtime, routing,
+      and plugin behavior
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: first working version"
+    target_entry_key: entry-0002
+    notes: ""
+  - sha: f1837b4a058e20b40e7e47ace6989ea527a342c5
+    source_ref: git:f1837b4a058e20b40e7e47ace6989ea527a342c5
+    short_sha: f1837b4
+    changed_paths:
+      - .codecrate.toml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - CHANGELOG.md
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/__main__.py
+      - audiocompose/alignment.py
+      - audiocompose/cli.py
+      - audiocompose/composer.py
+      - audiocompose/diagnostics.py
+      - audiocompose/errors.py
+      - audiocompose/job.py
+      - audiocompose/loudness.py
+      - audiocompose/model.py
+      - audiocompose/operations.py
+      - audiocompose/py.typed
+      - audiocompose/resampling.py
+      - audiocompose/sources.py
+      - audiocompose/timeline.py
+      - audiocompose/wav.py
+      - docs/Makefile
+      - docs/architecture.md
+      - docs/changelog.md
+      - docs/conf.py
+      - docs/make.bat
+      - docs/make.py
+      - docs/requirements.txt
+      - examples/mixed_engines.py
+      - examples/simple_api.py
+      - pyproject.toml
+      - tests/fixtures/markers.utterplan.json
+      - tests/fixtures/simple.audiojob/audiojob.json
+      - tests/fixtures/simple.audiojob/parts/one.wav
+      - tests/fixtures/simple.audiojob/parts/two.wav
+      - tests/test_assembler.py
+      - tests/test_audio_policy.py
+      - tests/test_audiocompose_core.py
+      - tests/test_contracts.py
+      - tests/test_import.py
+      - tests/test_kokoro_plugin.py
+      - tests/test_kokoro_short_sentence.py
+      - tests/test_model.py
+      - tests/test_piper_plugin.py
+      - tests/test_prosody.py
+      - tests/test_registry.py
+      - tests/test_routing.py
+      - tests/test_runtime.py
+      - utterrender/__init__.py
+      - utterrender/__main__.py
+      - utterrender/_plan.py
+      - utterrender/alignment.py
+      - utterrender/assembler.py
+      - utterrender/assets.py
+      - utterrender/calibration.py
+      - utterrender/capabilities.py
+      - utterrender/cli.py
+      - utterrender/diagnostics.py
+      - utterrender/effects.py
+      - utterrender/errors.py
+      - utterrender/loudness.py
+      - utterrender/model.py
+      - utterrender/models.py
+      - utterrender/plugins/__init__.py
+      - utterrender/plugins/base.py
+      - utterrender/plugins/kokoro.py
+      - utterrender/plugins/kokoro_short_sentence.py
+      - utterrender/plugins/piper.py
+      - utterrender/plugins/registry.py
+      - utterrender/prosody.py
+      - utterrender/protocols.py
+      - utterrender/resampling.py
+      - utterrender/routing.py
+      - utterrender/runtime.py
+      - utterrender/utterrender_dummy
+      - utterrender/voices.py
+      - utterrender/wav.py
+    stats:
+      files_changed: 80
+      insertions: 1611
+      deletions: 4476
+    inspected: true
+    inspected_paths:
+      - audiocompose/__init__.py
+      - pyproject.toml
+    observed_behavior: Renamed package from utterrender to audiocompose
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: rename to audiocompose"
+    target_entry_key: entry-0003
+    notes: ""
+  - sha: dda00c9af641edc6802697ddb3784202b64d255a
+    source_ref: git:dda00c9af641edc6802697ddb3784202b64d255a
+    short_sha: dda00c9
+    changed_paths:
+      - .github/workflows/ci.yml
+      - .gitignore
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/alignment.py
+      - audiocompose/analysis.py
+      - audiocompose/cli.py
+      - audiocompose/composer.py
+      - audiocompose/job.py
+      - audiocompose/loudness.py
+      - audiocompose/model.py
+      - audiocompose/operations.py
+      - audiocompose/sources.py
+      - audiocompose/wav.py
+      - docs/architecture.md
+      - examples/mixed_engines.py
+      - examples/simple_api.py
+      - pyproject.toml
+      - spec/audiojob-v1.schema.json
+      - tests/test_analysis.py
+      - tests/test_audiocompose_core.py
+      - tests/test_cli.py
+      - tests/test_contracts_v1.py
+      - tests/test_readiness_regressions.py
+    stats:
+      files_changed: 24
+      insertions: 1612
+      deletions: 167
+    inspected: true
+    inspected_paths:
+      - audiocompose/cli.py
+      - audiocompose/job.py
+      - audiocompose/model.py
+    observed_behavior: Adapted audio job pipeline to use pipersynth for synthesis
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: adapt to pipersynth"
+    target_entry_key: entry-0004
+    notes: ""
+  - sha: 70cfaae0ec60968acd1ad2640180b3a645d8ea5c
+    source_ref: git:70cfaae0ec60968acd1ad2640180b3a645d8ea5c
+    short_sha: 70cfaae
+    changed_paths:
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/alignment.py
+      - audiocompose/composer.py
+      - audiocompose/diagnostics.py
+      - audiocompose/job.py
+      - audiocompose/loudness.py
+      - audiocompose/model.py
+      - audiocompose/wav.py
+      - docs/architecture.md
+      - spec/audiojob-v1.schema.json
+      - tests/test_loudness_diagnostics.py
+      - tests/test_mixed_producers.py
+      - tests/test_span_identity.py
+      - tests/test_timing_operations.py
+    stats:
+      files_changed: 15
+      insertions: 674
+      deletions: 37
+    inspected: true
+    inspected_paths:
+      - audiocompose/loudness.py
+      - audiocompose/alignment.py
+      - tests/test_loudness_diagnostics.py
+      - tests/test_span_identity.py
+      - tests/test_timing_operations.py
+      - tests/test_mixed_producers.py
+    observed_behavior:
+      Loudness diagnostics, timing operations, span identity, and mixed
+      producer tests for pykokoro integration
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add missing features for pykokoro"
+    target_entry_key: entry-0005
+    notes: ""
+  - sha: 7881eb24287c818e789a03e49c758bf740116c0b
+    source_ref: git:7881eb24287c818e789a03e49c758bf740116c0b
+    short_sha: 7881eb2
+    changed_paths:
+      - .github/workflows/ci.yml
+      - .github/workflows/codecov.yml
+      - .github/workflows/pre-commit.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - audiocompose/alignment.py
+      - audiocompose/job.py
+      - audiocompose/model.py
+      - docs/architecture.md
+      - spec/audiojob-v1.schema.json
+      - tests/test_span_identity.py
+    stats:
+      files_changed: 12
+      insertions: 267
+      deletions: 41
+    inspected: true
+    inspected_paths:
+      - .github/workflows/ci.yml
+      - .github/workflows/codecov.yml
+      - .github/workflows/pre-commit.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    observed_behavior:
+      CI workflows for testing, code coverage, pre-commit checks, and
+      PyPI publishing
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add ci"
+    target_entry_key: entry-0006
+    notes: ""

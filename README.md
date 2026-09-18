@@ -1,3 +1,8 @@
+[![PyPI - Version](https://img.shields.io/pypi/v/audiocompose)](https://pypi.org/project/audiocompose/)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/audiocompose)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/audiocompose)
+[![codecov](https://codecov.io/gh/buchwandler/audiocompose/graph/badge.svg?token=viiusddeDL)](https://codecov.io/gh/buchwandler/audiocompose)
+
 # audiocompose
 
 `audiocompose` declaratively processes and composes existing audio fragments into finalized audio. It is intentionally independent of text-to-speech engines, voices, models, G2P, and semantic speech plans.
