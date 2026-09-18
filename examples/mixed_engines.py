@@ -1,22 +1,11 @@
-"""One utterance plan using logical voices backed by different engines."""
+import numpy as np
 
-from utterplan import PlannerConfig, UtterancePlanner
+from audiocompose import AudioBufferSource, AudioClip, AudioJob, Composer, Gain, Silence
 
-from utterrender import Renderer
-
-Planner = UtterancePlanner
-
-text = '''
-[Hello from the narrator.]{voice="narrator"}
-[And this quotation uses another engine.]{voice="quote"}
-'''
-plan = Planner(PlannerConfig(language="en-us", document_format="ssmd")).plan(text)
-
-with Renderer(
-    bindings={
-        "narrator": "kokoro:af_heart",
-        "quote": "piper:en_US-lessac-medium",
-    },
-    sample_rate=24000,
-) as renderer:
-    renderer.to_wav(plan, "mixed.wav")
+# Producers may contribute clips from different engines. Composer only sees audio.
+job = AudioJob((
+    AudioClip("producer-a", AudioBufferSource(np.zeros(24000, dtype=np.float32), 24000), (Gain(-1),)),
+    Silence("pause", 0.1),
+    AudioClip("producer-b", AudioBufferSource(np.zeros(22050, dtype=np.float32), 22050)),
+))
+Composer(sample_rate=24000).to_wav(job, "mixed.wav")

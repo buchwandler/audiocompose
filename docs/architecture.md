@@ -1,37 +1,38 @@
-# Architecture MVP
+# audiocompose architecture
 
-## Public boundary
+## Boundary
 
-`utterplan` compiles semantic speech intent. `utterrender` executes an utterance plan.
+`audiocompose` is the generic audio composition layer. It accepts a producer-neutral `AudioJob`, not an UtterPlan or speech document. Synthesis ends before composition begins.
 
-`utterplan` remains independent of ONNX, concrete voices, model caches and waveforms.
-`utterrender` owns runtime concerns: plugin discovery, concrete voice selection, assets,
-synthesis, shared DSP, sample-rate normalization, timeline assembly and WAV output.
+```text
+UtterPlan -> PyKokoro / PiperSynth -> AudioJob -> Composer -> final.wav
+```
 
-## Runtime sequence
+PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection, inference, engine-native controls, calibration, and timing extraction. They translate unresolved semantic intent into concrete audio and numeric audio-domain operations. Audiocompose has no knowledge of TTS, Kokoro, Piper, voices, phonemes, ONNX, models, or UtterPlan semantics.
 
-1. Accept a validated utterance plan from `utterplan`.
-2. Resolve each logical voice reference with `VoiceBindings`.
-3. Select the plugin from the concrete namespaced voice (`kokoro:*`, `piper:*`).
-4. Resolve lexical prosody into backend-independent numeric semantics.
-5. Let the plugin realize engine-native controls and return an `AudioFragment`.
-6. Apply per-voice calibration.
-7. Normalize fragment sample rates.
-8. Apply unresolved prosody through AudioSig.
-9. Insert plan pauses, build segment/unit spans and resolve safe marker offsets.
-10. Return `RenderResult` or write WAV.
+## AudioJob
 
-## Direct backend ownership
+An AudioJob is an ordered collection of `AudioClip` and `Silence` items. A clip references either an in-memory NumPy `AudioBufferSource` or a file-backed `AudioFileSource`, followed by ordered v1 operations. Clip anchors and spans are generic timing metadata. Output policy contains the final sample rate, channel count, clipping behavior, and complete-output loudness policy.
 
-The built-in plugins are direct implementations. Kokoro owns Kokoro G2P, voice styles, short-sentence
-workarounds, model timing extraction, and ONNX sessions. Piper owns Piper G2P, config and speaker
-resolution, native length scale, and ONNX sessions. Neither plugin invokes a planner or parser.
+Serialized bundles use schema version 1 and contain `audiojob.json` and relative PCM32 WAV fragments. Bundle loading validates paths, hashes, WAV metadata, supported operations, and output policy before composition.
 
-Kokoro short-sentence optimization remains a Kokoro plugin implementation detail. It is not moved into
-`utterplan` or generalized into the shared renderer.
+## Composition
 
-## Canonical plan API
+`Composer` loads each source, applies its operations in manifest order, resamples it to the requested output rate, places it after preceding items, and resolves anchors in final waveform coordinates. Silence is an explicit timeline item. `CompositionResult` contains float32 waveform data, sample rate, item spans, composed marker offsets, diagnostics, and provenance.
 
-The runtime imports the current public `utterplan` API directly: `UtterancePlan`, `UtterancePlanner`,
-`PlannerConfig`, `PlanSegment` and `ProsodyDirective`. Legacy `UtterPlan` and `UtterPlanner` names are
-not required.
+Timing transformations are explicit. Tempo operations map offsets proportionally. Resampling changes sample coordinates but not time. Pitch processing preserves duration in the v1 implementation. Final loudness and true-peak/clipping policy are applied once to the complete waveform.
+
+## Ownership matrix
+
+| Concern | Owner |
+| --- | --- |
+| SSMD, language analysis, segmentation, semantic pauses, prosody intent | UtterPlan |
+| G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package |
+| AudioJob format and bundle validation | audiocompose |
+| WAV loading, audio operations, resampling, timeline assembly | audiocompose |
+| Silence insertion and marker finalization | audiocompose |
+| Complete-output LUFS, true peak, clipping, and final WAV | audiocompose |
+
+## Non-TTS guarantee
+
+The package's required dependency is NumPy. Optional DSP support is provided by `audiosig`. The core package does not import `utterplan`, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. The canonical tests use deterministic synthetic audio and require no TTS models.

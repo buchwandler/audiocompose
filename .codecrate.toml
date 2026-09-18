@@ -1,11 +1,11 @@
 [codecrate]
-output = "context_utterrender.md"
+output = "context_audiocompose.md"
 keep_docstrings = true
 dedupe = true
 metadata = false
 respect_gitignore = true
-exclude = ["*/.venv/*", "context_utterrender.*"]
-gitignore_allow = ["utterrender/_version.py"]
+exclude = ["*/.venv/*", "context_audiocompose.*"]
+gitignore_allow = ["audiocompose/_version.py"]
 include = [
   "**/*.py",
   "**/*.toml",

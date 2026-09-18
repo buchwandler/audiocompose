@@ -1,4 +1,9 @@
-from utterrender import TTS
+import numpy as np
 
-with TTS(default_voice="kokoro:af_heart") as tts:
-    tts.to_wav("Hello from one interface.", "hello.wav", language="en-us")
+from audiocompose import AudioBufferSource, AudioClip, AudioJob, Composer, Silence
+
+job = AudioJob((
+    AudioClip("speech-part", AudioBufferSource(np.zeros(24000, dtype=np.float32), 24000)),
+    Silence("pause", 0.25),
+))
+Composer(sample_rate=24000).to_wav(job, "example.wav")

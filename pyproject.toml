@@ -3,18 +3,17 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "utterrender"
+name = "audiocompose"
 version = "0.1.0"
-description = "Execute utterplan plans through pluggable TTS engines and assemble final audio"
+description = "Declaratively compose audio fragments into finalized audio"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-authors = [{name = "UtterRender contributors"}]
+authors = [{name = "AudioCompose contributors"}]
 dependencies = [
   "numpy>=1.23",
-  "utterplan>=0.1,<0.2",
 ]
-keywords = ["tts", "text-to-speech", "audio", "rendering", "utterplan", "onnx"]
+keywords = ["audio", "composition", "wav", "dsp"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -25,44 +24,34 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Topic :: Multimedia :: Sound/Audio",
   "Typing :: Typed",
 ]
 
 [project.optional-dependencies]
-prosody = ["audiosig>=0.1.4,<0.2"]
-piper = ["piperg2p", "onnxruntime>=1.17,<2"]
-kokoro = ["kokorog2p[espeak,en]>=0.9,<1.0", "onnxruntime>=1.17,<2"]
-all = [
-  "audiosig>=0.1.4,<0.2",
-  "piperg2p",
-  "kokorog2p[espeak,en]>=0.9,<1.0",
-  "onnxruntime>=1.17,<2",
-]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "audiosig>=0.1.4,<0.2"]
+dsp = ["audiosig>=0.1.4,<0.2"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2"]
 
 [project.scripts]
-utterrender = "utterrender.cli:main"
-
-[project.entry-points."utterrender.plugins"]
-# Third-party packages can register plugins here.
+audiocompose = "audiocompose.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/buchwandler/utterrender"
-Repository = "https://github.com/buchwandler/utterrender"
+Homepage = "https://github.com/buchwandler/audiocompose"
+Repository = "https://github.com/buchwandler/audiocompose"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["utterrender*"]
+include = ["audiocompose*"]
 
 [tool.setuptools.package-data]
-utterrender = ["py.typed"]
+audiocompose = ["py.typed"]
 
 [tool.mypy]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
 
 [tool.ruff]

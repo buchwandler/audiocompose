@@ -1,0 +1,61 @@
+{
+  "format": "audiojob",
+  "items": [
+    {
+      "anchors": [
+        {
+          "id": "one-middle",
+          "sample_offset": 120
+        }
+      ],
+      "id": "one",
+      "kind": "clip",
+      "operations": [
+        {
+          "db": -3,
+          "type": "gain"
+        }
+      ],
+      "source": {
+        "channels": 1,
+        "frames": 240,
+        "path": "parts/one.wav",
+        "sample_rate": 24000,
+        "sha256": "ecd6a3fb1c84b5cd24b67ef8ab59e5e24d48bd0d7a8cd6401cd5f468c3cab868"
+      }
+    },
+    {
+      "id": "pause",
+      "kind": "silence",
+      "seconds": 0.01
+    },
+    {
+      "id": "two",
+      "kind": "clip",
+      "operations": [],
+      "source": {
+        "channels": 1,
+        "frames": 120,
+        "path": "parts/two.wav",
+        "sample_rate": 12000,
+        "sha256": "43b1e7481ef056026eadc9d3655b52da38293e7cbe251fdc3af2a3d48192bd22"
+      }
+    }
+  ],
+  "job_id": "sha256:2a763bbe22ed3e739a4902b0b156d77262ecacabada7254c88a3ae41120cc59d",
+  "output": {
+    "channels": 1,
+    "clip_policy": "clamp",
+    "loudness": {
+      "peak_policy": "reduce_gain",
+      "target_lufs": null,
+      "true_peak_ceiling_dbtp": -1.0
+    },
+    "sample_rate": 24000
+  },
+  "producer": {
+    "name": "fixture",
+    "version": "1"
+  },
+  "schema_version": 1
+}
