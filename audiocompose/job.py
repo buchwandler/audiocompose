@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,28 @@ from .wav import sha256_file, wav_info, write_intermediate_wav
 
 AUDIOJOB_FORMAT = "audiojob"
 AUDIOJOB_SCHEMA_VERSION = 1
+
+
+def _validate_json_value(value: Any, path: str) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AudioValidationError(f"{path} must contain only finite JSON numbers")
+        return
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise AudioValidationError(f"{path} contains a non-string JSON object key: {key!r}")
+            _validate_json_value(nested, f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, nested in enumerate(value):
+            _validate_json_value(nested, f"{path}[{index}]")
+        return
+    raise AudioValidationError(
+        f"{path} contains unsupported non-JSON value of type {type(value).__name__}"
+    )
 
 
 def _safe_relative(path: str) -> str:
@@ -68,6 +92,7 @@ def _source_to_dict(
 
 
 def job_to_dict(job: AudioJob, *, base_dir: str | None = None) -> dict[str, Any]:
+    job.validate(base_dir=base_dir)
     items: list[dict[str, Any]] = []
     for item in job.items:
         if isinstance(item, Silence):
@@ -104,6 +129,8 @@ def job_to_dict(job: AudioJob, *, base_dir: str | None = None) -> dict[str, Any]
                     "source_end": span.source_end,
                     "sample_start": span.sample_start,
                     "sample_end": span.sample_end,
+                    **({"id": span.id} if span.id is not None else {}),
+                    **({"metadata": dict(span.metadata)} if span.metadata else {}),
                 }
                 for span in item.spans
             ]
@@ -224,6 +251,8 @@ def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
                         int(s["source_end"]),
                         int(s["sample_start"]),
                         int(s["sample_end"]),
+                        s.get("id"),
+                        s.get("metadata", {}),
                     )
                     for s in spans_data
                 )
@@ -262,9 +291,12 @@ def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
 
 
 def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
+    _validate_json_value(job.producer, "producer")
+    _validate_json_value(job.source, "source")
     if job.output.channels != 1:
         raise AudioValidationError("only mono output is supported")
-    for item in job.items:
+    for index, item in enumerate(job.items):
+        _validate_json_value(item.metadata, f"items[{index}] ({item.id!r}) metadata")
         if not isinstance(item, AudioClip):
             continue
         if not isinstance(item.source, (AudioBufferSource, AudioFileSource)):
@@ -278,15 +310,20 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
                 raise AudioValidationError(
                     f"anchor {anchor.id!r} exceeds source length for {item.id!r}"
                 )
-        for span in item.spans:
-            if span.source_end > len(audio) or span.sample_end > len(audio):
-                raise AudioValidationError(f"span exceeds source length for {item.id!r}")
+        for span_index, span in enumerate(item.spans):
+            _validate_json_value(
+                span.metadata, f"clip {item.id!r} span[{span_index}].metadata"
+            )
+            if span.sample_end > len(audio):
+                raise AudioValidationError(
+                    f"span[{span_index}] sample range exceeds source length for {item.id!r}"
+                )
         if isinstance(item.source, AudioFileSource) and base_dir is not None:
             path = Path(item.source.path)
             _safe_relative(os.path.relpath(path.resolve(), Path(base_dir).resolve()))
 
-
 def save_job(job: AudioJob, path: str | Path) -> Path:
+    job.validate()
     destination = Path(path)
     bundle = destination if destination.suffix != ".json" else destination.parent
     bundle.mkdir(parents=True, exist_ok=True)

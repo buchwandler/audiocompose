@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 from .errors import AudioValidationError
 
@@ -28,6 +30,8 @@ class AudioSpan:
     source_end: int
     sample_start: int
     sample_end: int
+    id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         values = (
@@ -43,7 +47,10 @@ class AudioSpan:
             raise AudioValidationError("source_end must be >= source_start")
         if self.sample_end < self.sample_start:
             raise AudioValidationError("sample_end must be >= sample_start")
-
+        if self.id is not None and (not isinstance(self.id, str) or not self.id):
+            raise AudioValidationError("span id must be a non-empty string or None")
+        if not isinstance(self.metadata, Mapping):
+            raise AudioValidationError("span metadata must be an object")
 
 @dataclass(frozen=True, slots=True)
 class ComposedSpan:
@@ -52,7 +59,27 @@ class ComposedSpan:
     source_end: int
     sample_start: int
     sample_end: int
+    id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        values = (
+            ("source_start", self.source_start),
+            ("source_end", self.source_end),
+            ("sample_start", self.sample_start),
+            ("sample_end", self.sample_end),
+        )
+        for name, value in values:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AudioValidationError(f"{name} must be a non-negative integer")
+        if self.source_end < self.source_start:
+            raise AudioValidationError("source_end must be >= source_start")
+        if self.sample_end < self.sample_start:
+            raise AudioValidationError("sample_end must be >= sample_start")
+        if self.id is not None and (not isinstance(self.id, str) or not self.id):
+            raise AudioValidationError("span id must be a non-empty string or None")
+        if not isinstance(self.metadata, Mapping):
+            raise AudioValidationError("composed span metadata must be an object")
 
 @dataclass(frozen=True, slots=True)
 class ComposedMarker:

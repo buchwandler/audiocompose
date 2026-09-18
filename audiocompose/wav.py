@@ -22,9 +22,15 @@ class WavInfo:
     sample_width: int
 
 
+def _validate_sample_rate(sample_rate: int) -> None:
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
+        raise AudioValidationError("sample_rate must be a positive integer")
+
+
 def prepare_output(audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp") -> np.ndarray:
     samples = np.asarray(audio, dtype=np.float32)
-    if samples.ndim != 1 or not np.all(np.isfinite(samples)):
+    if clip_policy not in {"clamp", "warn", "error"}:
+        raise AudioValidationError(f"unknown clip policy: {clip_policy!r}")
         raise AudioValidationError("audio must be a finite one-dimensional waveform")
     over_range = bool(np.any((samples < -1.0) | (samples > 1.0)))
     if over_range and clip_policy == "error":
@@ -88,6 +94,7 @@ def sha256_file(path: str | Path) -> str:
 def _write_pcm(path: str | Path, audio: np.ndarray, sample_rate: int, width: int) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_sample_rate(sample_rate)
     clipped = prepare_output(audio)
     if width == 2:
         pcm = np.round(clipped * 32767.0).astype("<i2")
@@ -113,6 +120,7 @@ def write_wav(
 ) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_sample_rate(sample_rate)
     clipped = prepare_output(audio, clip_policy=clip_policy)
     pcm = np.round(clipped * 32767.0).astype("<i2")
     with wave.open(str(destination), "wb") as handle:

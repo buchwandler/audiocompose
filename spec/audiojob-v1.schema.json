@@ -76,8 +76,35 @@
                   "additionalProperties": false
                 }
               },
-              "anchors": { "type": "array" },
-              "spans": { "type": "array" },
+              "anchors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "sample_offset"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "sample_offset": { "type": "integer", "minimum": 0 },
+                    "name": { "type": ["string", "null"] }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "spans": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["source_start", "source_end", "sample_start", "sample_end"],
+                  "properties": {
+                    "source_start": { "type": "integer", "minimum": 0 },
+                    "source_end": { "type": "integer", "minimum": 0 },
+                    "sample_start": { "type": "integer", "minimum": 0 },
+                    "sample_end": { "type": "integer", "minimum": 0 },
+                    "id": { "type": "string", "minLength": 1 },
+                    "metadata": { "type": "object" }
+                  },
+                  "additionalProperties": false
+                }
+              },
               "metadata": { "type": "object" }
             },
             "additionalProperties": false

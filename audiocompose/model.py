@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -13,6 +13,9 @@ from .loudness import LoudnessPolicy
 from .operations import AudioOperation, Operation
 from .sources import AudioSource
 from .wav import ClipPolicy
+
+if TYPE_CHECKING:
+    from .loudness import LoudnessResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,7 @@ class CompositionResult:
     diagnostics: tuple[CompositionDiagnostic, ...] = ()
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
+    loudness: LoudnessResult | None = None
     @property
     def duration_seconds(self) -> float:
         return len(self.audio) / self.sample_rate

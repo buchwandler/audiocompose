@@ -32,13 +32,34 @@ class LoudnessPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class LoudnessMetrics:
+    integrated_lufs: float | None
+    true_peak_dbtp: float | None
+    sample_peak_dbfs: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LoudnessResult:
     audio: np.ndarray
+    before: LoudnessMetrics
+    after: LoudnessMetrics
+    target_lufs: float | None
+    true_peak_ceiling_dbtp: float | None
+    requested_gain_db: float
     applied_gain_db: float
-    measured_lufs: float | None
     target_reached: bool
-    true_peak_dbtp: float | None
+    peak_policy: PeakPolicy
     warning: str | None = None
+
+    @property
+    def measured_lufs(self) -> float | None:
+        """Compatibility alias for the pre-normalization loudness measurement."""
+        return self.before.integrated_lufs
+
+    @property
+    def true_peak_dbtp(self) -> float | None:
+        """Compatibility alias for the post-normalization true peak."""
+        return self.after.true_peak_dbtp
 
 
 def _biquad(
@@ -86,9 +107,12 @@ def _rlb_high_pass(sample_rate: int) -> tuple[float, float, float, float, float]
     )
 
 
-def _k_weight(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+def _k_weight(sample_rate: int, audio: np.ndarray) -> np.ndarray:
+    if sample_rate <= 2 * 1681.974450955533:
+        return audio.astype(np.float64, copy=True)
     return _biquad(
-        _biquad(audio.astype(np.float64), _high_shelf(sample_rate)), _rlb_high_pass(sample_rate)
+        _biquad(audio.astype(np.float64), _high_shelf(sample_rate)),
+        _rlb_high_pass(sample_rate),
     )
 
 
@@ -131,11 +155,26 @@ def _true_peak(audio: np.ndarray) -> float:
     return 20.0 * math.log10(peak) if peak > 0 else -math.inf
 
 
-def _measure(audio: np.ndarray, sample_rate: int) -> tuple[float, float]:
+def _dbfs_peak(audio: np.ndarray) -> float:
+    if not audio.size:
+        return -math.inf
+    peak = float(np.max(np.abs(audio)))
+    return 20.0 * math.log10(peak) if peak > 0 else -math.inf
+
+
+def _finite_or_none(value: float) -> float | None:
+    return value if math.isfinite(value) else None
+
+
+def _measure(audio: np.ndarray, sample_rate: int) -> LoudnessMetrics:
     values = np.asarray(audio, dtype=np.float64)
     if not values.size:
-        return -math.inf, -math.inf
-    return _integrated_loudness(_k_weight(values, sample_rate), sample_rate), _true_peak(values)
+        return LoudnessMetrics(None, None, None)
+    return LoudnessMetrics(
+        _finite_or_none(_integrated_loudness(_k_weight(sample_rate, values), sample_rate)),
+        _finite_or_none(_true_peak(values)),
+        _finite_or_none(_dbfs_peak(values)),
+    )
 
 
 def apply_complete_output_loudness(
@@ -144,18 +183,15 @@ def apply_complete_output_loudness(
     policy: LoudnessPolicy,
 ) -> LoudnessResult:
     values = np.asarray(audio, dtype=np.float32)
-    if not values.size:
-        return LoudnessResult(values, 0.0, None, False, None)
-
-    measured, peak = _measure(values, sample_rate)
+    before = _measure(values, sample_rate)
     requested = (
         0.0
-        if policy.target_lufs is None or not math.isfinite(measured)
-        else policy.target_lufs - measured
+        if policy.target_lufs is None or before.integrated_lufs is None
+        else policy.target_lufs - before.integrated_lufs
     )
     safe = math.inf
-    if policy.true_peak_ceiling_dbtp is not None and math.isfinite(peak):
-        safe = policy.true_peak_ceiling_dbtp - peak
+    if policy.true_peak_ceiling_dbtp is not None and before.true_peak_dbtp is not None:
+        safe = policy.true_peak_ceiling_dbtp - before.true_peak_dbtp
     if policy.peak_policy == "error" and requested > safe:
         raise CompositionError(
             "complete-output loudness target exceeds true-peak ceiling: "
@@ -163,11 +199,26 @@ def apply_complete_output_loudness(
         )
     applied = min(requested, safe)
     normalized = (values * (10.0 ** (applied / 20.0))).astype(np.float32)
-    post_loudness, post_peak = _measure(normalized, sample_rate)
-    target_reached = policy.target_lufs is not None and math.isclose(
-        post_loudness, policy.target_lufs, abs_tol=0.1
+    after = _measure(normalized, sample_rate)
+    target_reached = (
+        policy.target_lufs is not None
+        and after.integrated_lufs is not None
+        and math.isclose(after.integrated_lufs, policy.target_lufs, abs_tol=0.1)
     )
     warning = None
-    if policy.target_lufs is not None and not target_reached:
+    if before.integrated_lufs is None:
+        warning = "input has no meaningful integrated loudness, such as digital silence"
+    elif policy.target_lufs is not None and not target_reached:
         warning = "true-peak ceiling limited the requested loudness target"
-    return LoudnessResult(normalized, applied, post_loudness, target_reached, post_peak, warning)
+    return LoudnessResult(
+        audio=normalized,
+        before=before,
+        after=after,
+        target_lufs=policy.target_lufs,
+        true_peak_ceiling_dbtp=policy.true_peak_ceiling_dbtp,
+        requested_gain_db=requested,
+        applied_gain_db=applied,
+        target_reached=target_reached,
+        peak_policy=policy.peak_policy,
+        warning=warning,
+    )

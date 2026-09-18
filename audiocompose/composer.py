@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 
 from .alignment import ComposedMarker, ComposedSpan
+from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import CompositionError
-from .loudness import apply_complete_output_loudness
+from .loudness import LoudnessResult, apply_complete_output_loudness
 from .model import AudioJob, ComposedItem, CompositionResult, Silence
 from .operations import Tempo, apply_operation
 from .resampling import resample_audio
@@ -16,6 +17,28 @@ from .wav import write_wav
 
 def _seconds_samples(seconds: float, rate: int) -> int:
     return round(seconds * rate)
+
+
+def _loudness_summary(result: LoudnessResult) -> dict[str, object]:
+    return {
+        "before": {
+            "integrated_lufs": result.before.integrated_lufs,
+            "true_peak_dbtp": result.before.true_peak_dbtp,
+            "sample_peak_dbfs": result.before.sample_peak_dbfs,
+        },
+        "after": {
+            "integrated_lufs": result.after.integrated_lufs,
+            "true_peak_dbtp": result.after.true_peak_dbtp,
+            "sample_peak_dbfs": result.after.sample_peak_dbfs,
+        },
+        "target_lufs": result.target_lufs,
+        "true_peak_ceiling_dbtp": result.true_peak_ceiling_dbtp,
+        "requested_gain_db": result.requested_gain_db,
+        "applied_gain_db": result.applied_gain_db,
+        "target_reached": result.target_reached,
+        "peak_policy": result.peak_policy,
+        "warning": result.warning,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +90,8 @@ class Composer:
                             span.source_end,
                             cursor + round(span_start * rate / source_rate),
                             cursor + round(span_end * rate / source_rate),
+                            id=span.id,
+                            metadata=span.metadata,
                         )
                     )
                 audio = resample_audio(audio, source_rate, rate)
@@ -88,18 +113,53 @@ class Composer:
         )
         loudness = apply_complete_output_loudness(waveform, rate, job.output.loudness)
         waveform = loudness.audio
+        diagnostics: list[CompositionDiagnostic] = []
+        if loudness.warning:
+            if loudness.before.integrated_lufs is None:
+                diagnostics.append(
+                    CompositionDiagnostic(
+                        code="LOUDNESS_UNMEASURABLE",
+                        message=loudness.warning,
+                        severity=DiagnosticSeverity.WARNING,
+                        context={"sample_count": len(waveform)},
+                    )
+                )
+            else:
+                diagnostics.append(
+                    CompositionDiagnostic(
+                        code="LOUDNESS_TARGET_LIMITED",
+                        message=loudness.warning,
+                        severity=DiagnosticSeverity.WARNING,
+                        context={
+                            "requested_gain_db": loudness.requested_gain_db,
+                            "applied_gain_db": loudness.applied_gain_db,
+                            "true_peak_ceiling_dbtp": loudness.true_peak_ceiling_dbtp,
+                        },
+                    )
+                )
+        if job.output.clip_policy == "warn" and np.any(np.abs(waveform) > 1.0):
+            diagnostics.append(
+                CompositionDiagnostic(
+                    code="CLIPPING_POSSIBLE",
+                    message="final waveform contains samples outside the PCM range",
+                    severity=DiagnosticSeverity.WARNING,
+                    context={"sample_count": len(waveform)},
+                )
+            )
         return CompositionResult(
             audio=waveform,
             sample_rate=rate,
             items=tuple(composed),
             markers=tuple(markers),
             spans=tuple(spans),
-            diagnostics=(),
+            diagnostics=tuple(diagnostics),
             provenance={
                 "job_id": job.job_id,
                 "producer": dict(job.producer),
                 "applied_loudness_gain_db": loudness.applied_gain_db,
+                "loudness": _loudness_summary(loudness),
             },
+            loudness=loudness,
         )
 
     def to_wav(self, job: AudioJob, path: str | Path) -> Path:

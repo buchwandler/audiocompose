@@ -12,7 +12,12 @@ from .composer import Composer
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import AudioComposeError, AudioValidationError, CompositionError
 from .job import load_job, save_job, validate_job
-from .loudness import LoudnessPolicy, LoudnessResult, apply_complete_output_loudness
+from .loudness import (
+    LoudnessMetrics,
+    LoudnessPolicy,
+    LoudnessResult,
+    apply_complete_output_loudness,
+)
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, OutputPolicy, Silence
 from .operations import (
     AudioOperation,
@@ -56,6 +61,7 @@ __all__ = [
     "DiagnosticSeverity",
     "FadeIn",
     "FadeOut",
+    "LoudnessMetrics",
     "Gain",
     "LoudnessPolicy",
     "LoudnessResult",
