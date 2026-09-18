@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -55,6 +54,18 @@ def _safe_relative(path: str) -> str:
     return candidate.as_posix()
 
 
+def _relative_source_path(path: Path, base_dir: str | Path) -> str:
+    resolved_path = path.resolve()
+    resolved_base = Path(base_dir).resolve()
+    try:
+        relative = resolved_path.relative_to(resolved_base)
+    except ValueError as exc:
+        raise AudioValidationError(
+            f"source path must be relative and contained in bundle: {resolved_path!r}"
+        ) from exc
+    return _safe_relative(relative.as_posix())
+
+
 def _policy_to_dict(policy: OutputPolicy) -> dict[str, Any]:
     loudness = policy.loudness
     return {
@@ -78,7 +89,7 @@ def _source_to_dict(
         )
     path = Path(source.path)
     if base_dir is not None:
-        relative = _safe_relative(os.path.relpath(path.resolve(), Path(base_dir).resolve()))
+        relative = _relative_source_path(path, base_dir)
     else:
         relative = _safe_relative(str(path))
     info = wav_info(path)
@@ -318,7 +329,7 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
                 )
         if isinstance(item.source, AudioFileSource) and base_dir is not None:
             path = Path(item.source.path)
-            _safe_relative(os.path.relpath(path.resolve(), Path(base_dir).resolve()))
+            _relative_source_path(path, base_dir)
 
 
 def save_job(job: AudioJob, path: str | Path) -> Path:
