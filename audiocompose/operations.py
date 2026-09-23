@@ -115,15 +115,12 @@ def operation_from_dict(value: dict[str, Any]) -> Operation:
     raise AudioValidationError(f"unsupported operation: {kind!r}")
 
 
-
 def apply_temporal_group(
     audio: np.ndarray,
     sample_rate: int,
     operations: Sequence[Tempo | PitchShift],
 ) -> np.ndarray:
-    rate = math.prod(
-        operation.factor for operation in operations if isinstance(operation, Tempo)
-    )
+    rate = math.prod(operation.factor for operation in operations if isinstance(operation, Tempo))
     semitones = math.fsum(
         operation.semitones for operation in operations if isinstance(operation, PitchShift)
     )

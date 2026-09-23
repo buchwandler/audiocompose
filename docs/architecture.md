@@ -37,7 +37,6 @@ Serialized bundles use schema version 1 and contain `audiojob.json` and relative
 
 The complete-output ordering is normative: load clips, apply clip operations, map anchors and spans through those operations, resample clips, concatenate clips and explicit silence, then measure and apply loudness once. Loudness is amplitude-only and never changes item ranges, marker offsets, or composed span coordinates.
 
-
 ## Composition progress
 
 `Composer` exposes optional synchronous `CompositionProgress` events as a runtime observation boundary. The events identify generic items, operations, source and target sample rates, frame counts, assembly, complete-output loudness, and completion. Item metadata is forwarded opaquely so a producer can map events to its own identifiers without adding producer-specific concepts to audiocompose.
@@ -63,8 +62,8 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 | SSMD, language analysis, segmentation, semantic pauses, prosody intent         | UtterPlan                              |
 | G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package |
 | AudioJob format and bundle validation                                          | audiocompose                           |
-| WAV loading, operation model/orchestration, timeline assembly                        | audiocompose                           |
-| Band-limited resampling, time-scale modification, pitch-shift DSP                   | AudioSig                               |
+| WAV loading, operation model/orchestration, timeline assembly                  | audiocompose                           |
+| Band-limited resampling, time-scale modification, pitch-shift DSP              | AudioSig                               |
 | Silence insertion and marker finalization                                      | audiocompose                           |
 | Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose                           |
 

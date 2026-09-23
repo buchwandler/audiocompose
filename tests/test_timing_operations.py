@@ -51,9 +51,7 @@ def test_fused_tempos_keep_sequential_marker_and_span_mapping() -> None:
         anchors=(AudioAnchor("middle", 450),),
         spans=(AudioSpan(100, 200, 200, 800, id="fused"),),
     )
-    result = Composer(sample_rate=100).compose(
-        AudioJob((clip,), output=_output(100))
-    )
+    result = Composer(sample_rate=100).compose(AudioJob((clip,), output=_output(100)))
 
     assert len(result.audio) == round(1_000 / (0.85 * 1.2))
     assert result.markers[0].sample_offset == round(round(450 / 0.85) / 1.2)

@@ -25,4 +25,5 @@ git_head_sha: null
 git_range: null
 git_commit_count: null
 ---
+
 Adds the producer-neutral composition progress callback contract.

@@ -88,9 +88,13 @@ def test_operation_events_preserve_order_and_identity() -> None:
 
     started = [event for event in events if event.kind == "operation_started"]
     completed = [event for event in events if event.kind == "operation_completed"]
-    assert [event.operation for event in started] == [operation.to_dict() for operation in operations]
+    assert [event.operation for event in started] == [
+        operation.to_dict() for operation in operations
+    ]
     assert [event.operation_index for event in started] == list(range(len(operations)))
-    assert [event.operation for event in completed] == [operation.to_dict() for operation in operations]
+    assert [event.operation for event in completed] == [
+        operation.to_dict() for operation in operations
+    ]
 
 
 def test_resampling_events_contain_both_rates_and_frame_counts() -> None:
@@ -115,7 +119,9 @@ def test_resampling_events_contain_both_rates_and_frame_counts() -> None:
 def test_matching_rates_do_not_emit_resampling_events() -> None:
     events = []
     Composer().compose(
-        make_job(AudioClip("clip", AudioBufferSource(np.ones(4, dtype=np.float32), 4)), sample_rate=4),
+        make_job(
+            AudioClip("clip", AudioBufferSource(np.ones(4, dtype=np.float32), 4)), sample_rate=4
+        ),
         on_progress=events.append,
     )
 
@@ -139,7 +145,9 @@ def test_metadata_is_forwarded_without_special_cases() -> None:
     metadata = {"producer": "test", "segment_id": "seg-0042"}
     Composer().compose(
         make_job(
-            AudioClip("clip", AudioBufferSource(np.ones(4, dtype=np.float32), 4), metadata=metadata),
+            AudioClip(
+                "clip", AudioBufferSource(np.ones(4, dtype=np.float32), 4), metadata=metadata
+            ),
         ),
         on_progress=events.append,
     )
@@ -208,8 +216,12 @@ def test_fused_operation_progress_preserves_logical_events_and_group_frames() ->
     started = [event for event in operation_events if event.kind == "operation_started"]
     completed = [event for event in operation_events if event.kind == "operation_completed"]
     assert [event.operation_index for event in started] == [0, 1, 2]
-    assert [event.operation for event in started] == [operation.to_dict() for operation in operations]
-    assert [event.operation for event in completed] == [operation.to_dict() for operation in operations]
+    assert [event.operation for event in started] == [
+        operation.to_dict() for operation in operations
+    ]
+    assert [event.operation for event in completed] == [
+        operation.to_dict() for operation in operations
+    ]
 
     fused_events = operation_events[:4]
     assert all(

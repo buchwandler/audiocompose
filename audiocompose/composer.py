@@ -87,9 +87,7 @@ class Composer:
         ]
         clip_durations = [duration for duration in item_durations if duration is not None]
         total_audio_seconds = (
-            sum(clip_durations)
-            if len(clip_durations) == len(duration_items)
-            else None
+            sum(clip_durations) if len(clip_durations) == len(duration_items) else None
         )
         completed_audio_seconds = 0.0 if total_audio_seconds is not None else None
         metadata_kind_counts: dict[str, int] = {}
@@ -211,9 +209,7 @@ class Composer:
                                 operation=dict(group_operation.to_dict()),
                                 source_sample_rate=source_rate,
                                 target_sample_rate=rate,
-                                input_frames=(
-                                    group_input_frames if fused else len(audio)
-                                ),
+                                input_frames=(group_input_frames if fused else len(audio)),
                                 details=group_details,
                             ),
                         )
@@ -242,9 +238,7 @@ class Composer:
                                 operation=dict(group_operation.to_dict()),
                                 source_sample_rate=source_rate,
                                 target_sample_rate=rate,
-                                input_frames=(
-                                    group_input_frames if fused else original_length
-                                ),
+                                input_frames=(group_input_frames if fused else original_length),
                                 output_frames=len(audio),
                                 details=group_details,
                             ),

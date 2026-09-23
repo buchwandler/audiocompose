@@ -13,8 +13,8 @@ audience: null
 scopes: []
 source_refs: []
 paths:
-- README.md
-- docs/architecture.md
+  - README.md
+  - docs/architecture.md
 issues: []
 prs: []
 sources: []
