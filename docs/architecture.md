@@ -37,8 +37,22 @@ Serialized bundles use schema version 1 and contain `audiojob.json` and relative
 
 The complete-output ordering is normative: load clips, apply clip operations, map anchors and spans through those operations, resample clips, concatenate clips and explicit silence, then measure and apply loudness once. Loudness is amplitude-only and never changes item ranges, marker offsets, or composed span coordinates.
 
+
+## Composition progress
+
+`Composer` exposes optional synchronous `CompositionProgress` events as a runtime observation boundary. The events identify generic items, operations, source and target sample rates, frame counts, assembly, complete-output loudness, and completion. Item metadata is forwarded opaquely so a producer can map events to its own identifiers without adding producer-specific concepts to audiocompose.
+
+Progress delivery is not part of AudioJob serialization, job identity, result provenance, or audio semantics. With no callback, the composition path remains unchanged. Callback exceptions propagate to the caller, while terminal stream failures are a responsibility of the consuming UI layer.
 `AudioSpan` and `ComposedSpan` support optional IDs and JSON-safe metadata. The fields are producer-neutral and are preserved through AudioJob serialization and composition. `CompositionResult.loudness` provides typed before and after metrics, requested and applied gain, policy, target, ceiling, and warnings. `CompositionResult.diagnostics` contains generic diagnostic codes and numeric context.
 Timing transformations are explicit. Tempo operations map offsets proportionally. Resampling changes sample coordinates but not time. Pitch processing preserves duration in the v1 implementation. Final loudness and true-peak/clipping policy are applied once to the complete waveform.
+
+## DSP behavior and reproducibility
+
+AudioSig owns band-limited resampling, time-scale modification, and pitch-shift DSP. AudioCompose owns numeric operations and orchestration. Contiguous `Tempo` and `PitchShift` operations are fused only when no other operation intervenes. Marker and span mapping remains based on the declared operations, not the selected DSP implementation.
+
+For a fused group, Composer emits each logical `operation_started` event in declaration order before the combined AudioSig call, then emits the matching `operation_completed` events in declaration order. Event `details` identifies the group start and size; frame counts describe the fused group's input and output boundaries.
+
+Exact PCM can change between AudioCompose or AudioSig versions. Numeric operation semantics and timeline mapping are the compatibility contract.
 
 Silence keeps the public seconds-to-samples rule based on rounded `seconds * output_rate`. A producer that requires exact frame parity should quantize first with `frames = int(seconds * producer_rate)` and pass `frames / producer_rate` as the job duration. No engine-specific silence type is part of AudioCompose.
 
@@ -49,10 +63,11 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 | SSMD, language analysis, segmentation, semantic pauses, prosody intent         | UtterPlan                              |
 | G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package |
 | AudioJob format and bundle validation                                          | audiocompose                           |
-| WAV loading, audio operations, resampling, timeline assembly                   | audiocompose                           |
+| WAV loading, operation model/orchestration, timeline assembly                        | audiocompose                           |
+| Band-limited resampling, time-scale modification, pitch-shift DSP                   | AudioSig                               |
 | Silence insertion and marker finalization                                      | audiocompose                           |
 | Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose                           |
 
 ## Non-TTS guarantee
 
-The package's required dependency is NumPy. Tempo and PitchShift use deterministic NumPy phase-vocoder processing in the current implementation; the optional `dsp` extra remains available for future quality backends. The core package does not import `utterplan`, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. The canonical tests use deterministic synthetic audio and require no TTS models.
+`audiocompose` requires NumPy and AudioSig. AudioSig supplies band-limited resampling and WSOLA time/pitch DSP; AudioCompose owns the generic operation model and composition orchestration. The package does not import `utterplan`, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. Canonical tests use deterministic synthetic audio and require no TTS models.

@@ -42,6 +42,27 @@ def test_tempo_maps_markers_and_spans() -> None:
     assert result.spans[0].id == "span"
 
 
+def test_fused_tempos_keep_sequential_marker_and_span_mapping() -> None:
+    operations = (Tempo(0.85), PitchShift(-3.0), Tempo(1.2))
+    clip = AudioClip(
+        "clip",
+        AudioBufferSource(np.zeros(1_000, dtype=np.float32), 100),
+        operations=operations,
+        anchors=(AudioAnchor("middle", 450),),
+        spans=(AudioSpan(100, 200, 200, 800, id="fused"),),
+    )
+    result = Composer(sample_rate=100).compose(
+        AudioJob((clip,), output=_output(100))
+    )
+
+    assert len(result.audio) == round(1_000 / (0.85 * 1.2))
+    assert result.markers[0].sample_offset == round(round(450 / 0.85) / 1.2)
+    assert (result.spans[0].sample_start, result.spans[0].sample_end) == (
+        round(round(200 / 0.85) / 1.2),
+        round(round(800 / 0.85) / 1.2),
+    )
+
+
 def test_duration_preserving_operations_keep_coordinates_stable() -> None:
     clip = AudioClip(
         "clip",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from audiosig import InvalidParameterError, resample
 
 from .errors import AudioValidationError
 
@@ -18,6 +19,15 @@ def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.
         return np.zeros(0, dtype=np.float32)
     if values.size == 1:
         return np.full(output_size, values[0], dtype=np.float32)
-    old = np.linspace(0.0, 1.0, values.size, endpoint=True)
-    new = np.linspace(0.0, 1.0, output_size, endpoint=True)
-    return np.interp(new, old, values).astype(np.float32)
+    try:
+        result = resample(
+            values,
+            source_rate=source_rate,
+            target_rate=target_rate,
+            filter_width=32,
+            rolloff=0.945,
+            length_mode="round",
+        )
+    except InvalidParameterError as exc:
+        raise AudioValidationError(str(exc)) from exc
+    return np.ascontiguousarray(result, dtype=np.float32)

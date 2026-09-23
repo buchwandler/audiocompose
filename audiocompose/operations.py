@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from audiosig import apply_speech_effects, pitch_shift, time_stretch
 
 from .errors import AudioValidationError, CompositionError
-from .resampling import resample_audio
 
 
 class AudioOperation:
@@ -114,54 +115,26 @@ def operation_from_dict(value: dict[str, Any]) -> Operation:
     raise AudioValidationError(f"unsupported operation: {kind!r}")
 
 
-def _phase_vocoder(audio: np.ndarray, rate: float) -> np.ndarray:
-    values = np.asarray(audio, dtype=np.float32)
-    if values.size < 4 or rate == 1.0:
-        return values.copy()
-    n_fft = min(1024, 2 ** int(math.floor(math.log2(values.size))))
-    n_fft = max(16, n_fft)
-    hop = n_fft // 4
-    window = np.hanning(n_fft).astype(np.float64)
-    padded = np.pad(values.astype(np.float64), (n_fft // 2, n_fft // 2 + n_fft), mode="constant")
-    starts = range(0, len(padded) - n_fft + 1, hop)
-    spectra = np.stack([np.fft.rfft(padded[start : start + n_fft] * window) for start in starts])
-    time_steps = np.arange(0.0, max(1.0, len(spectra) - 1.0), rate)
-    expected = 2.0 * np.pi * hop * np.arange(spectra.shape[1]) / n_fft
-    phase = np.angle(spectra[0])
-    output = np.zeros((len(time_steps) + 1) * hop + n_fft, dtype=np.float64)
-    normalization = np.zeros_like(output)
-    for frame_index, step in enumerate(time_steps):
-        left = min(int(step), len(spectra) - 2)
-        fraction = step - left
-        magnitude = (1.0 - fraction) * np.abs(spectra[left]) + fraction * np.abs(spectra[left + 1])
-        phase_delta = np.angle(spectra[left + 1]) - np.angle(spectra[left]) - expected
-        phase_delta = np.angle(np.exp(1j * phase_delta))
-        phase += expected + phase_delta
-        frame = np.fft.irfft(magnitude * np.exp(1j * phase), n_fft)
-        start = frame_index * hop
-        output[start : start + n_fft] += frame * window
-        normalization[start : start + n_fft] += window * window
-    valid = normalization > 1e-12
-    output[valid] /= normalization[valid]
-    target = max(1, round(values.size / rate))
-    result = output[n_fft // 2 : n_fft // 2 + target]
-    if len(result) < target:
-        result = np.pad(result, (0, target - len(result)))
-    return result.astype(np.float32, copy=False)
 
-
-def _pitch_shift(audio: np.ndarray, sample_rate: int, semitones: float) -> np.ndarray:
-    if audio.size < 4 or semitones == 0:
-        return np.asarray(audio, dtype=np.float32).copy()
-    ratio = 2.0 ** (semitones / 12.0)
-    stretched = _phase_vocoder(audio, 1.0 / ratio)
-    shifted = resample_audio(stretched, sample_rate, max(1, round(sample_rate / ratio)))
-    target = len(audio)
-    if len(shifted) > target:
-        shifted = shifted[:target]
-    elif len(shifted) < target:
-        shifted = np.pad(shifted, (0, target - len(shifted)))
-    return shifted.astype(np.float32, copy=False)
+def apply_temporal_group(
+    audio: np.ndarray,
+    sample_rate: int,
+    operations: Sequence[Tempo | PitchShift],
+) -> np.ndarray:
+    rate = math.prod(
+        operation.factor for operation in operations if isinstance(operation, Tempo)
+    )
+    semitones = math.fsum(
+        operation.semitones for operation in operations if isinstance(operation, PitchShift)
+    )
+    result = apply_speech_effects(
+        np.asarray(audio, dtype=np.float32),
+        sample_rate=sample_rate,
+        rate=rate,
+        semitones=semitones,
+        method="wsola",
+    )
+    return np.ascontiguousarray(result, dtype=np.float32)
 
 
 def apply_operation(audio: np.ndarray, sample_rate: int, operation: Operation) -> np.ndarray:
@@ -169,9 +142,25 @@ def apply_operation(audio: np.ndarray, sample_rate: int, operation: Operation) -
     if isinstance(operation, Gain):
         return (values * (10.0 ** (operation.db / 20.0))).astype(np.float32)
     if isinstance(operation, Tempo):
-        return _phase_vocoder(values, operation.factor)
+        return np.ascontiguousarray(
+            time_stretch(
+                values,
+                operation.factor,
+                sample_rate=sample_rate,
+                method="wsola",
+            ),
+            dtype=np.float32,
+        )
     if isinstance(operation, PitchShift):
-        return _pitch_shift(values, sample_rate, operation.semitones)
+        return np.ascontiguousarray(
+            pitch_shift(
+                values,
+                sample_rate=sample_rate,
+                semitones=operation.semitones,
+                method="wsola",
+            ),
+            dtype=np.float32,
+        )
     if isinstance(operation, (FadeIn, FadeOut)):
         result = values.copy()
         count = min(result.size, round(operation.seconds * sample_rate))

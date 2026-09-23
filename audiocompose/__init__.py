@@ -29,6 +29,7 @@ from .operations import (
     apply_operation,
     operation_from_dict,
 )
+from .progress import CompositionProgress, CompositionProgressCallback
 from .resampling import resample_audio
 from .sources import AudioBufferSource, AudioFileSource, AudioSource
 from .timeline import samples_for_duration, silence
@@ -58,6 +59,8 @@ __all__ = [
     "ComposedMarker",
     "ComposedSpan",
     "Composer",
+    "CompositionProgress",
+    "CompositionProgressCallback",
     "DiagnosticSeverity",
     "FadeIn",
     "FadeOut",

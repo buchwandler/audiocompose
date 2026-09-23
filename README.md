@@ -22,6 +22,21 @@ result = Composer(sample_rate=24000).compose(job)
 Composer().to_wav(job, "final.wav")
 ```
 
+## DSP behavior and reproducibility
+
+AudioCompose delegates band-limited resampling and WSOLA time/pitch processing to AudioSig. Contiguous `Tempo` and `PitchShift` operations are combined unless a `Gain` or fade separates them. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
+
+## Composition progress
+
+`Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
+
+```python
+events = []
+Composer().compose(job, on_progress=events.append)
+```
+
+The callback is also available through `to_wav()` and `compose_to_wav()`. Callback exceptions propagate to the caller so producer code can detect programming errors.
+
 ## Mixed producers
 
 Different producers can place clips and opaque timing metadata in one job without AudioCompose knowing their engine names:
