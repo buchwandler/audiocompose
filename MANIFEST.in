@@ -1,0 +1,2 @@
+prune .ledger
+include docs/migration-v0.2.md

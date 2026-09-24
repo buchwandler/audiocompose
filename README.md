@@ -65,18 +65,18 @@ The producer resolves speech behavior before creating the job. AudioCompose hand
 
 ```python
 job.save("chapter.audiojob")
-loaded = AudioJob.load("chapter.audiojob/audiojob.json")
-Composer().compose_to_wav("chapter.audiojob/audiojob.json", "chapter.wav")
+loaded = AudioJob.load("chapter.audiojob")
+Composer().compose_to_wav("chapter.audiojob", "chapter.wav")
 ```
 
-Bundles contain deterministic `audiojob.json` plus writer-owned `parts/000001.wav` fragments. Every saved source is canonical mono PCM32 WAV at its native sample rate. Paths cannot escape the bundle, duplicate source basenames cannot collide, and SHA-256, WAV metadata, and the canonical manifest `job_id` are checked at load time.
+Bundles contain deterministic `audiojob.json` plus writer-owned `parts/000001.wav` fragments. Saves stage parts, replace the owned `parts/` set, then atomically replace the manifest last; unrelated bundle files are preserved. Every saved source is canonical mono PCM32 WAV at its native sample rate. Paths cannot escape the bundle, duplicate source basenames cannot collide, and SHA-256, WAV metadata, and the canonical manifest `job_id` are checked when sources are loaded.
 
 ## CLI
 
 ```text
-audiocompose validate chapter.audiojob/audiojob.json
-audiocompose inspect chapter.audiojob/audiojob.json
-audiocompose compose chapter.audiojob/audiojob.json chapter.wav
+audiocompose validate chapter.audiojob
+audiocompose inspect chapter.audiojob
+audiocompose compose chapter.audiojob chapter.wav
 ```
 
 ## Debugging and analysis
@@ -96,7 +96,10 @@ audiocompose report INPUT -o report.html
 
 ## Schema and provenance
 
-AudioJob schema v1 and v2 are documented in `spec/audiojob-v1.schema.json` and `spec/audiojob-v2.schema.json`. New jobs use v2; a loaded v1 job retains v1 when saved, and `RatePitchEnvelope` requires v2. Package versioning is SCM-derived and independent from the persisted AudioJob schema version. Stable upstream segment IDs should be used as generic `AudioClip.id` values where a one-to-one mapping exists; producer metadata remains opaque.
+The canonical packaged AudioJob schemas are in `audiocompose/schemas/`; the repository-level `spec/` files mirror those resources and are checked for byte equality. `audiojob_schema(1)` and `audiojob_schema(2)` load the corresponding JSON Schema for external validation. New jobs use v2; a loaded v1 job retains v1 when saved, and `RatePitchEnvelope` requires v2. Package versioning is SCM-derived and independent from the persisted AudioJob schema version. Stable upstream segment IDs should be used as generic `AudioClip.id` values where a one-to-one mapping exists; producer metadata remains opaque.
+
+The package root intentionally exposes common composition models, built-in operations, composition results, diagnostics, progress, errors, and schema loading. Specialized analysis, WAV, resampling, and low-level DSP helpers remain available from their modules, for example `audiocompose.analysis`, `audiocompose.wav`, `audiocompose.resampling`, and `audiocompose.operations`.
+See [the v0.2 migration guide](docs/migration-v0.2.md) for breaking import, persistence, clipping, loudness, and progress changes.
 
 `AudioSpan` and `ComposedSpan` carry optional producer-defined IDs and JSON-safe metadata. AudioCompose preserves these opaque values while mapping sample coordinates through operations and resampling; it never interprets the metadata.
 

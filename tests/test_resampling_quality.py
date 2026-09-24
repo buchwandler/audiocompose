@@ -5,7 +5,8 @@ import pytest
 from _quality_helpers import dominant_frequency, rms, tone_amplitude
 from audiosig import InvalidParameterError
 
-from audiocompose import AudioValidationError, resampling
+import audiocompose.resampling as resampling
+from audiocompose import AudioValidationError
 from audiocompose.resampling import resample_audio
 
 

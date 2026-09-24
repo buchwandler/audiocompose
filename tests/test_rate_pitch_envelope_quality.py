@@ -13,8 +13,8 @@ from audiocompose import (
     LoudnessPolicy,
     OutputPolicy,
     RatePitchEnvelope,
-    resample_audio,
 )
+from audiocompose.resampling import resample_audio
 
 
 def _output(sample_rate: int) -> OutputPolicy:

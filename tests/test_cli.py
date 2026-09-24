@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 
-from audiocompose import AudioAnchor, AudioBufferSource, AudioClip, AudioJob, write_wav
+from audiocompose import AudioAnchor, AudioBufferSource, AudioClip, AudioJob, Composer
 from audiocompose.cli import main
+from audiocompose.wav import write_wav
 
 
 def test_cli_json_validate_inspect_timeline_and_report(tmp_path: Path, capsys) -> None:
@@ -50,3 +51,30 @@ def test_cli_analyze_wav_json_and_malformed_json_error(tmp_path: Path, capsys) -
     malformed.write_text("{not json")
     assert main(["validate", str(malformed), "--json"]) == 2
     assert "traceback" not in capsys.readouterr().err.lower()
+
+
+def test_cli_analyze_near_marker_reuses_composition(tmp_path, capsys, monkeypatch) -> None:
+    job = AudioJob(
+        (
+            AudioClip(
+                "clip",
+                AudioBufferSource(np.zeros(100, dtype=np.float32), 100),
+                anchors=(AudioAnchor("mark", 50),),
+            ),
+        )
+    )
+    manifest = job.save(tmp_path / "job.audiojob")
+    original_compose = Composer.compose
+    compose_count = 0
+
+    def counted_compose(self, job, *, on_progress=None):
+        nonlocal compose_count
+        compose_count += 1
+        return original_compose(self, job, on_progress=on_progress)
+
+    monkeypatch.setattr(Composer, "compose", counted_compose)
+
+    assert main(["analyze", manifest, "--near-marker", "mark", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["near_marker"] == "mark"
+    assert compose_count == 1

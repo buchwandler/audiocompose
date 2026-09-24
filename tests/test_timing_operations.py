@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from audiosig import InvalidParameterError
 
 from audiocompose import (
     AudioAnchor,
@@ -8,6 +10,7 @@ from audiocompose import (
     AudioClip,
     AudioJob,
     AudioSpan,
+    AudioValidationError,
     AutomationPoint,
     Composer,
     FadeIn,
@@ -19,6 +22,7 @@ from audiocompose import (
     Silence,
     Tempo,
 )
+from audiocompose.operations import apply_temporal_group
 
 
 def _output(sample_rate: int) -> OutputPolicy:
@@ -140,3 +144,14 @@ def test_item_offsets_are_added_once() -> None:
         (10, 20),
         (20, 30),
     ]
+
+
+def test_static_temporal_group_translates_audiosig_errors(monkeypatch) -> None:
+    def fail(*args, **kwargs):
+        raise InvalidParameterError("invalid temporal parameters")
+
+    monkeypatch.setattr("audiocompose.operations.apply_speech_effects", fail)
+    with pytest.raises(AudioValidationError, match="invalid temporal parameters") as error:
+        apply_temporal_group(np.ones(16, dtype=np.float32), 16, (Tempo(1.2), PitchShift(1.0)))
+
+    assert isinstance(error.value.__cause__, InvalidParameterError)

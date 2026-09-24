@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._json_value import snapshot_json_object
 from .errors import AudioValidationError
 
 
@@ -22,6 +23,8 @@ class AudioAnchor:
             or self.sample_offset < 0
         ):
             raise AudioValidationError("sample_offset must be a non-negative integer")
+        if self.name is not None and not isinstance(self.name, str):
+            raise AudioValidationError("anchor name must be a string or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +52,7 @@ class AudioSpan:
             raise AudioValidationError("sample_end must be >= sample_start")
         if self.id is not None and (not isinstance(self.id, str) or not self.id):
             raise AudioValidationError("span id must be a non-empty string or None")
-        if not isinstance(self.metadata, Mapping):
-            raise AudioValidationError("span metadata must be an object")
+        object.__setattr__(self, "metadata", snapshot_json_object(self.metadata, "span metadata"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +81,9 @@ class ComposedSpan:
             raise AudioValidationError("sample_end must be >= sample_start")
         if self.id is not None and (not isinstance(self.id, str) or not self.id):
             raise AudioValidationError("span id must be a non-empty string or None")
-        if not isinstance(self.metadata, Mapping):
-            raise AudioValidationError("composed span metadata must be an object")
+        object.__setattr__(
+            self, "metadata", snapshot_json_object(self.metadata, "composed span metadata")
+        )
 
 
 @dataclass(frozen=True, slots=True)

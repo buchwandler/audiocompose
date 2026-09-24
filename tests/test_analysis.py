@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from audiocompose import ActivityConfig, analyze_activity, measure_gap_near
+from audiocompose.analysis import ActivityConfig, analyze_activity, measure_gap_near
 
 
 def test_activity_analysis_reports_internal_gap_in_sample_coordinates() -> None:

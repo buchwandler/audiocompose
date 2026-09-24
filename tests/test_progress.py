@@ -6,6 +6,7 @@ import pytest
 from audiocompose import (
     AudioBufferSource,
     AudioClip,
+    AudioFileSource,
     AudioJob,
     AutomationPoint,
     Composer,
@@ -19,6 +20,7 @@ from audiocompose import (
     Silence,
     Tempo,
 )
+from audiocompose.wav import write_wav
 
 
 def make_job(*items: AudioClip | Silence, sample_rate: int = 100) -> AudioJob:
@@ -142,6 +144,63 @@ def test_silence_has_item_lifecycle_without_source_or_operation_events() -> None
     assert events[1].details == {"seconds": 0.5}
 
 
+def test_progress_durations_include_transformed_audio_and_silence() -> None:
+    events = []
+    job = make_job(
+        AudioClip(
+            "clip",
+            AudioBufferSource(np.ones(4000, dtype=np.float32), 4000),
+            (Tempo(2.0),),
+        ),
+        Silence("pause", 0.125),
+        sample_rate=4000,
+    )
+
+    result = Composer(sample_rate=4000).compose(job, on_progress=events.append)
+
+    assert len(result.audio) == 2500
+    assert events[0].completed_audio_seconds == 0.0
+    assert events[0].total_audio_seconds == pytest.approx(0.625)
+    completed = [event for event in events if event.kind == "item_completed"]
+    assert completed[0].completed_audio_seconds == pytest.approx(0.5)
+    assert completed[0].total_audio_seconds == pytest.approx(0.625)
+    assert completed[1].completed_audio_seconds == pytest.approx(0.625)
+    assert events[-1].completed_audio_seconds == pytest.approx(0.625)
+
+
+def test_progress_duration_matches_fused_tempo_rounding() -> None:
+    sample_rate = 24_000
+    events = []
+    job = make_job(
+        AudioClip(
+            "clip",
+            AudioBufferSource(np.ones(10_010, dtype=np.float32), sample_rate),
+            (Tempo(0.85), Tempo(0.85)),
+        ),
+        sample_rate=sample_rate,
+    )
+
+    result = Composer(sample_rate=sample_rate).compose(job, on_progress=events.append)
+
+    assert len(result.audio) == round(10_010 / (0.85 * 0.85))
+    assert events[0].total_audio_seconds == pytest.approx(len(result.audio) / sample_rate)
+    assert events[-1].completed_audio_seconds == pytest.approx(len(result.audio) / sample_rate)
+
+
+def test_progress_keeps_unknown_total_unknown_but_reports_completed_duration(tmp_path) -> None:
+    path = tmp_path / "source.wav"
+    write_wav(path, np.full(10, 0.2, dtype=np.float32), 10)
+    events = []
+    job = make_job(AudioClip("clip", AudioFileSource(path)), sample_rate=10)
+
+    Composer(sample_rate=10).compose(job, on_progress=events.append)
+
+    assert events[0].total_audio_seconds is None
+    completed = next(event for event in events if event.kind == "item_completed")
+    assert completed.completed_audio_seconds == pytest.approx(1.0)
+    assert completed.total_audio_seconds is None
+
+
 def test_metadata_is_forwarded_without_special_cases() -> None:
     events = []
     metadata = {"producer": "test", "segment_id": "seg-0042"}
@@ -173,6 +232,23 @@ def test_wav_helpers_forward_progress_callback(tmp_path) -> None:
         on_progress=manifest_events.append,
     )
     assert manifest_events[-1].kind == "compose_completed"
+
+
+def test_compose_to_wav_reads_each_persisted_source_once(tmp_path, monkeypatch) -> None:
+    job = make_job(AudioClip("clip", AudioBufferSource(np.ones(100, dtype=np.float32), 100)))
+    manifest = job.save(tmp_path / "bundle.audiojob")
+    original_load = AudioFileSource.load
+    load_count = 0
+
+    def counted_load(source):
+        nonlocal load_count
+        load_count += 1
+        return original_load(source)
+
+    monkeypatch.setattr(AudioFileSource, "load", counted_load)
+    Composer().compose_to_wav(manifest, tmp_path / "output.wav")
+
+    assert load_count == 1
 
 
 def test_callback_exception_propagates() -> None:

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ._json_value import snapshot_json_object
 from .alignment import AudioAnchor, AudioSpan, ComposedMarker, ComposedSpan
 from .diagnostics import CompositionDiagnostic
 from .errors import AudioValidationError
 from .loudness import LoudnessPolicy
-from .operations import AudioOperation, Operation
+from .operations import Operation
 from .sources import AudioSource
 from .wav import ClipPolicy
 
@@ -37,8 +40,8 @@ class OutputPolicy:
             or not isinstance(self.channels, int)
             or self.channels != 1
         ):
-            raise AudioValidationError("audiocompose v1 supports mono output only")
-        if self.clip_policy not in {"clamp", "warn", "error"}:
+            raise AudioValidationError("AudioCompose supports mono output only")
+        if self.clip_policy not in ("clamp", "warn", "error"):
             raise AudioValidationError(f"unknown clip policy: {self.clip_policy!r}")
 
 
@@ -55,7 +58,7 @@ class AudioClip:
         if not isinstance(self.id, str) or not self.id:
             raise AudioValidationError("clip id must not be empty")
         operations = tuple(self.operations)
-        if any(not isinstance(operation, AudioOperation) for operation in operations):
+        if any(not isinstance(operation, Operation) for operation in operations):
             raise AudioValidationError(f"clip {self.id!r} contains an unsupported operation")
         anchors = tuple(self.anchors)
         seen: set[str] = set()
@@ -68,11 +71,11 @@ class AudioClip:
         spans = tuple(self.spans)
         if any(not isinstance(span, AudioSpan) for span in spans):
             raise AudioValidationError(f"clip {self.id!r} contains an invalid span")
-        if not isinstance(self.metadata, Mapping):
-            raise AudioValidationError(f"clip {self.id!r} metadata must be an object")
+        metadata = snapshot_json_object(self.metadata, f"clip {self.id!r} metadata")
         object.__setattr__(self, "operations", operations)
         object.__setattr__(self, "anchors", anchors)
         object.__setattr__(self, "spans", spans)
+        object.__setattr__(self, "metadata", metadata)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +93,9 @@ class Silence:
             raise AudioValidationError("silence seconds must be a finite number >= 0")
         if not math.isfinite(self.seconds) or self.seconds < 0:
             raise AudioValidationError("silence seconds must be a finite number >= 0")
-        if not isinstance(self.metadata, Mapping):
-            raise AudioValidationError("silence metadata must be an object")
+        object.__setattr__(
+            self, "metadata", snapshot_json_object(self.metadata, f"silence {self.id!r} metadata")
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,33 +123,53 @@ class AudioJob:
             if item.id in ids:
                 raise AudioValidationError(f"duplicate AudioJob item id: {item.id!r}")
             ids.add(item.id)
-        if not isinstance(self.producer, Mapping) or not isinstance(self.source, Mapping):
-            raise AudioValidationError("producer and source metadata must be objects")
-        if self.job_id is not None and (not isinstance(self.job_id, str) or not self.job_id):
-            raise AudioValidationError("job_id must be a non-empty string or None")
+        producer = snapshot_json_object(self.producer, "producer metadata")
+        source = snapshot_json_object(self.source, "source metadata")
+        if self.job_id is not None and (
+            not isinstance(self.job_id, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.job_id) is None
+        ):
+            raise AudioValidationError(
+                "job_id must use the canonical sha256:<64 lowercase hex> format"
+            )
         object.__setattr__(self, "items", items)
+        object.__setattr__(self, "producer", producer)
+        object.__setattr__(self, "source", source)
 
-    def validate(self, *, base_dir: str | None = None) -> None:
+    def validate(self, *, base_dir: str | None = None, verify_sources: bool = True) -> None:
         from .job import validate_job
 
-        validate_job(self, base_dir=base_dir)
+        validate_job(self, base_dir=base_dir, verify_sources=verify_sources)
 
-    def save(self, path: str) -> str:
+    def save(self, path: str | Path) -> str:
+        """Save to a bundle directory and return its ``audiojob.json`` path."""
         from .job import save_job
 
         return str(save_job(self, path))
 
     @classmethod
-    def load(cls, path: str) -> AudioJob:
+    def load(cls, path: str, *, verify_sources: bool = True) -> AudioJob:
+        """Load a manifest, optionally deferring source reads until use.
+
+        With ``verify_sources=False``, manifest structure is still validated,
+        while source integrity and sample geometry are checked when sources
+        are loaded by composition or inspection.
+        """
         from .job import load_job
 
-        return load_job(path)
+        return load_job(path, verify_sources=verify_sources)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, base_dir: str = ".") -> AudioJob:
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+        *,
+        base_dir: str = ".",
+        verify_sources: bool = True,
+    ) -> AudioJob:
         from .job import job_from_dict
 
-        return job_from_dict(payload, base_dir=base_dir)
+        return job_from_dict(payload, base_dir=base_dir, verify_sources=verify_sources)
 
     def to_dict(self, *, base_dir: str | None = None) -> dict[str, Any]:
         from .job import job_to_dict

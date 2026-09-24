@@ -1,49 +1,26 @@
 from ._version import __version__
-from .alignment import AudioAnchor, AudioSpan, ComposedMarker, ComposedSpan, Marker
-from .analysis import (
-    AcousticGap,
-    ActivityConfig,
-    ActivityRegion,
-    ActivityReport,
-    analyze_activity,
-    measure_gap_near,
-)
+from .alignment import AudioAnchor, AudioSpan, ComposedMarker, ComposedSpan
 from .composer import Composer
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import AudioComposeError, AudioValidationError, CompositionError
-from .job import load_job, save_job, validate_job
-from .loudness import (
-    LoudnessMetrics,
-    LoudnessPolicy,
-    LoudnessResult,
-    apply_complete_output_loudness,
-)
+from .job import load_job, save_job
+from .loudness import LoudnessPolicy, LoudnessResult
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, OutputPolicy, Silence
 from .operations import (
-    AudioOperation,
     AutomationPoint,
     FadeIn,
     FadeOut,
     Gain,
+    Operation,
     PitchShift,
     RatePitchEnvelope,
     Tempo,
-    apply_operation,
-    operation_from_dict,
 )
 from .progress import CompositionProgress, CompositionProgressCallback
-from .resampling import resample_audio
-from .sources import AudioBufferSource, AudioFileSource, AudioSource
-from .timeline import samples_for_duration, silence
-from .wav import prepare_output, read_wav, sha256_file, wav_info, write_intermediate_wav, write_wav
+from .schema import audiojob_schema
+from .sources import AudioBufferSource, AudioFileSource
 
 __all__ = [
-    "ActivityConfig",
-    "ActivityRegion",
-    "ActivityReport",
-    "AcousticGap",
-    "analyze_activity",
-    "measure_gap_near",
     "__version__",
     "AudioAnchor",
     "AudioBufferSource",
@@ -51,46 +28,31 @@ __all__ = [
     "AudioComposeError",
     "AudioFileSource",
     "AudioJob",
-    "AudioOperation",
-    "AudioSource",
-    "AutomationPoint",
     "AudioSpan",
+    "AudioValidationError",
+    "AutomationPoint",
     "CompositionDiagnostic",
     "CompositionError",
+    "CompositionProgress",
+    "CompositionProgressCallback",
     "CompositionResult",
     "ComposedItem",
     "ComposedMarker",
     "ComposedSpan",
     "Composer",
-    "CompositionProgress",
-    "CompositionProgressCallback",
     "DiagnosticSeverity",
     "FadeIn",
     "FadeOut",
-    "LoudnessMetrics",
     "Gain",
     "LoudnessPolicy",
     "LoudnessResult",
-    "Marker",
+    "Operation",
     "OutputPolicy",
     "PitchShift",
     "RatePitchEnvelope",
     "Silence",
     "Tempo",
-    "apply_complete_output_loudness",
-    "apply_operation",
+    "audiojob_schema",
     "load_job",
-    "operation_from_dict",
-    "prepare_output",
-    "read_wav",
-    "resample_audio",
-    "samples_for_duration",
     "save_job",
-    "sha256_file",
-    "silence",
-    "validate_job",
-    "wav_info",
-    "write_intermediate_wav",
-    "write_wav",
-    "AudioValidationError",
 ]

@@ -6,8 +6,15 @@ from numbers import Real
 from typing import Literal
 
 import numpy as np
+from audiosig import (
+    AudioSignalError,
+    measure_loudness,
+    sample_peak_dbfs,
+    true_peak_dbtp,
+)
 
-from .errors import CompositionError
+from .errors import AudioValidationError, CompositionError
+from .wav import _as_finite_mono_float32
 
 PeakPolicy = Literal["reduce_gain", "error"]
 
@@ -19,16 +26,19 @@ class LoudnessPolicy:
     peak_policy: PeakPolicy = "reduce_gain"
 
     def __post_init__(self) -> None:
-        if self.peak_policy not in {"reduce_gain", "error"}:
-            raise ValueError(f"unknown peak policy: {self.peak_policy!r}")
+        if self.peak_policy not in ("reduce_gain", "error"):
+            raise AudioValidationError(f"unknown peak policy: {self.peak_policy!r}")
         for name in ("target_lufs", "true_peak_ceiling_dbtp"):
             value = getattr(self, name)
-            if value is not None and (
+            if value is None:
+                continue
+            if (
                 isinstance(value, bool)
                 or not isinstance(value, Real)
                 or not math.isfinite(float(value))
             ):
-                raise ValueError(f"{name} must be a finite real number or None")
+                raise AudioValidationError(f"{name} must be a finite real number or None")
+            object.__setattr__(self, name, float(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,118 +72,30 @@ class LoudnessResult:
         return self.after.true_peak_dbtp
 
 
-def _biquad(
-    values: np.ndarray, coefficients: tuple[float, float, float, float, float]
-) -> np.ndarray:
-    b0, b1, b2, a1, a2 = coefficients
-    output = np.empty_like(values, dtype=np.float64)
-    x1 = x2 = y1 = y2 = 0.0
-    for index, value in enumerate(values):
-        current = b0 * value + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-        output[index] = current
-        x2, x1 = x1, value
-        y2, y1 = y1, current
-    return output
-
-
-def _high_shelf(sample_rate: int) -> tuple[float, float, float, float, float]:
-    frequency = 1681.974450955533
-    gain = 4.0
-    q = 0.7071752369554196
-    k = math.tan(math.pi * frequency / sample_rate)
-    vh = 10.0 ** (gain / 20.0)
-    vb = vh**0.4996667741545416
-    a0 = 1.0 + k / q + k * k
-    return (
-        (vh + vb * k / q + k * k) / a0,
-        2.0 * (k * k - vh) / a0,
-        (vh - vb * k / q + k * k) / a0,
-        2.0 * (k * k - 1.0) / a0,
-        (1.0 - k / q + k * k) / a0,
-    )
-
-
-def _rlb_high_pass(sample_rate: int) -> tuple[float, float, float, float, float]:
-    frequency = 38.13547087602444
-    q = 0.5003270373253953
-    k = math.tan(math.pi * frequency / sample_rate)
-    a0 = 1.0 + k / q + k * k
-    return (
-        1.0 / a0,
-        -2.0 / a0,
-        1.0 / a0,
-        2.0 * (k * k - 1.0) / a0,
-        (1.0 - k / q + k * k) / a0,
-    )
-
-
-def _k_weight(sample_rate: int, audio: np.ndarray) -> np.ndarray:
-    if sample_rate <= 2 * 1681.974450955533:
-        return audio.astype(np.float64, copy=True)
-    return _biquad(
-        _biquad(audio.astype(np.float64), _high_shelf(sample_rate)),
-        _rlb_high_pass(sample_rate),
-    )
-
-
-def _integrated_loudness(audio: np.ndarray, sample_rate: int) -> float:
-    if not audio.size:
-        return -math.inf
-    block_size = max(1, round(0.4 * sample_rate))
-    hop = max(1, round(0.1 * sample_rate))
-    if len(audio) <= block_size:
-        blocks = [audio]
-    else:
-        blocks = [
-            audio[start : start + block_size]
-            for start in range(0, len(audio) - block_size + 1, hop)
-        ]
-    powers = np.asarray([float(np.mean(block * block)) for block in blocks], dtype=np.float64)
-    finite = powers > 1e-15
-    if not np.any(finite):
-        return -math.inf
-    absolute = -0.691 + 10.0 * np.log10(np.maximum(powers, 1e-15))
-    gated = powers[absolute > -70.0]
-    if not gated.size:
-        return -math.inf
-    relative_gate = -0.691 + 10.0 * math.log10(float(np.mean(gated))) - 10.0
-    gated = gated[(-0.691 + 10.0 * np.log10(np.maximum(gated, 1e-15))) > relative_gate]
-    if not gated.size:
-        return -math.inf
-    return -0.691 + 10.0 * math.log10(float(np.mean(gated)))
-
-
-def _true_peak(audio: np.ndarray) -> float:
-    if not audio.size:
-        return -math.inf
-    oversample = 4
-    if len(audio) < 2:
-        peak = float(np.max(np.abs(audio)))
-    else:
-        spectrum = np.fft.rfft(audio.astype(np.float64))
-        peak = float(oversample * np.max(np.abs(np.fft.irfft(spectrum, n=len(audio) * oversample))))
-    return 20.0 * math.log10(peak) if peak > 0 else -math.inf
-
-
-def _dbfs_peak(audio: np.ndarray) -> float:
-    if not audio.size:
-        return -math.inf
-    peak = float(np.max(np.abs(audio)))
-    return 20.0 * math.log10(peak) if peak > 0 else -math.inf
-
-
 def _finite_or_none(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
 def _measure(audio: np.ndarray, sample_rate: int) -> LoudnessMetrics:
-    values = np.asarray(audio, dtype=np.float64)
+    values = _as_finite_mono_float32(audio)
     if not values.size:
         return LoudnessMetrics(None, None, None)
+    try:
+        if round(0.1 * sample_rate) == 0:
+            integrated_lufs = None
+            sample_peak = sample_peak_dbfs(values)
+            true_peak = true_peak_dbtp(values, sample_rate=sample_rate)
+        else:
+            measured = measure_loudness(values, sample_rate=sample_rate)
+            integrated_lufs = measured.integrated_lufs
+            sample_peak = measured.sample_peak_dbfs
+            true_peak = measured.true_peak_dbtp
+    except AudioSignalError as exc:
+        raise AudioValidationError(f"AudioSig loudness measurement failed: {exc}") from exc
     return LoudnessMetrics(
-        _finite_or_none(_integrated_loudness(_k_weight(sample_rate, values), sample_rate)),
-        _finite_or_none(_true_peak(values)),
-        _finite_or_none(_dbfs_peak(values)),
+        _finite_or_none(integrated_lufs) if integrated_lufs is not None else None,
+        _finite_or_none(true_peak),
+        _finite_or_none(sample_peak),
     )
 
 
@@ -182,7 +104,14 @@ def apply_complete_output_loudness(
     sample_rate: int,
     policy: LoudnessPolicy,
 ) -> LoudnessResult:
-    values = np.asarray(audio, dtype=np.float32)
+    """Measure and normalize the complete output waveform.
+
+    AudioSig reports no integrated loudness below one complete 400 ms block.
+    Such output is represented by ``None`` and receives no LUFS normalization.
+    """
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
+        raise AudioValidationError("sample_rate must be a positive integer")
+    values = _as_finite_mono_float32(audio)
     before = _measure(values, sample_rate)
     requested = (
         0.0

@@ -15,6 +15,7 @@ from audiocompose import (
     AudioValidationError,
     RatePitchEnvelope,
 )
+from audiocompose.job import _job_id
 
 
 def make_job(operation: RatePitchEnvelope, *, schema_version: int = 2) -> AudioJob:
@@ -113,15 +114,15 @@ def test_v1_jobs_reject_envelopes_on_save_and_load(tmp_path: Path) -> None:
 
     _, payload = save_payload(make_job(envelope()), tmp_path / "v2.audiojob")
     payload["schema_version"] = 1
-    payload.pop("job_id")
+    payload["job_id"] = _job_id(payload)
     with pytest.raises(AudioValidationError, match="schema v1"):
         AudioJob.from_dict(payload, base_dir=str(tmp_path / "v2.audiojob"))
 
 
 def test_v2_parser_rejects_nonincreasing_curve_points(tmp_path: Path) -> None:
     manifest, payload = save_payload(make_job(envelope()), tmp_path / "duplicate.audiojob")
-    payload.pop("job_id")
     payload["items"][0]["operations"][0]["rate"][1]["seconds"] = 0.0
+    payload["job_id"] = _job_id(payload)
 
     with pytest.raises(AudioValidationError, match="rate_pitch_envelope"):
         AudioJob.from_dict(payload, base_dir=str(manifest.parent))
@@ -131,7 +132,7 @@ def test_v2_parser_requires_explicit_envelope_fields(tmp_path: Path) -> None:
     manifest, payload = save_payload(make_job(envelope()), tmp_path / "missing-fields.audiojob")
     for field in ("interpolation", "time_base"):
         malformed = copy.deepcopy(payload)
-        malformed.pop("job_id")
         del malformed["items"][0]["operations"][0][field]
+        malformed["job_id"] = _job_id(malformed)
         with pytest.raises(AudioValidationError, match="rate_pitch_envelope"):
             AudioJob.from_dict(malformed, base_dir=str(manifest.parent))

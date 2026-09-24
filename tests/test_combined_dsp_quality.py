@@ -5,6 +5,7 @@ import pytest
 from _quality_helpers import dominant_frequency
 from audiosig import apply_speech_effects as audiosig_apply_speech_effects
 
+import audiocompose.operations as operations_module
 from audiocompose import (
     AudioBufferSource,
     AudioClip,
@@ -16,7 +17,6 @@ from audiocompose import (
     PitchShift,
     Tempo,
 )
-from audiocompose import operations as operations_module
 
 
 def _compose(source: np.ndarray, operations: tuple, sample_rate: int = 24_000):

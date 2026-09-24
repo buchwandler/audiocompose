@@ -45,7 +45,7 @@ include = ["audiocompose*"]
 
 
 [tool.setuptools.package-data]
-audiocompose = ["py.typed"]
+audiocompose = ["py.typed", "schemas/*.schema.json"]
 
 [tool.setuptools_scm]
 version_file = "audiocompose/_version.py"

@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .alignment import AudioAnchor, AudioSpan
 from .errors import AudioValidationError
@@ -18,6 +23,27 @@ from .wav import sha256_file, wav_info, write_intermediate_wav
 AUDIOJOB_FORMAT = "audiojob"
 AUDIOJOB_SCHEMA_VERSION = 2
 AUDIOJOB_SUPPORTED_SCHEMA_VERSIONS = (1, AUDIOJOB_SCHEMA_VERSION)
+
+
+def _exact_object(
+    value: Any,
+    path: str,
+    *,
+    required: tuple[str, ...],
+    optional: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AudioValidationError(f"{path} must be an object")
+    allowed = set(required) | set(optional)
+    missing = set(required) - value.keys()
+    unknown = [key for key in value if key not in allowed]
+    if missing:
+        fields = ", ".join(sorted(missing))
+        raise AudioValidationError(f"{path} is missing required field(s): {fields}")
+    if unknown:
+        fields = ", ".join(sorted(map(str, unknown)))
+        raise AudioValidationError(f"{path} has unknown field(s): {fields}")
+    return value
 
 
 def _validate_json_value(value: Any, path: str) -> None:
@@ -103,8 +129,10 @@ def _source_to_dict(
     }
 
 
-def job_to_dict(job: AudioJob, *, base_dir: str | None = None) -> dict[str, Any]:
-    job.validate(base_dir=base_dir)
+def job_to_dict(
+    job: AudioJob, *, base_dir: str | None = None, verify_sources: bool = True
+) -> dict[str, Any]:
+    job.validate(base_dir=base_dir, verify_sources=verify_sources)
     items: list[dict[str, Any]] = []
     for item in job.items:
         if isinstance(item, Silence):
@@ -182,102 +210,161 @@ def _job_id(payload: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(_canonical_payload(payload)).hexdigest()
 
 
-def _source_from_dict(source: dict[str, Any], base_dir: Path) -> AudioFileSource:
-    path = _safe_relative(str(source.get("path", "")))
+def _source_from_dict(source: Any, base_dir: Path) -> AudioFileSource:
+    source = _exact_object(
+        source,
+        "source",
+        required=("path", "sha256", "sample_rate", "channels", "frames"),
+    )
+    path = source["path"]
+    if not isinstance(path, str):
+        raise AudioValidationError("source.path must be a string")
+    path = _safe_relative(path)
     root = base_dir.resolve()
     full_path = (root / path).resolve()
     if full_path == root or root not in full_path.parents:
         raise AudioValidationError(f"source path escapes bundle: {path!r}")
     return AudioFileSource(
         full_path,
-        expected_sha256=source.get("sha256"),
-        sample_rate=source.get("sample_rate"),
-        channels=source.get("channels", 1),
-        frames=source.get("frames"),
+        expected_sha256=source["sha256"],
+        sample_rate=source["sample_rate"],
+        channels=source["channels"],
+        frames=source["frames"],
     )
 
 
-def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
-    if not isinstance(payload, dict):
-        raise AudioValidationError("manifest root must be an object")
-    schema_version = payload.get("schema_version")
+def job_from_dict(
+    payload: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    verify_sources: bool = True,
+) -> AudioJob:
+    payload = _exact_object(
+        payload,
+        "manifest",
+        required=("format", "schema_version", "producer", "items", "output", "job_id"),
+        optional=("source",),
+    )
+    schema_version = payload["schema_version"]
     if (
-        payload.get("format") != AUDIOJOB_FORMAT
+        payload["format"] != AUDIOJOB_FORMAT
         or type(schema_version) is not int
         or schema_version not in AUDIOJOB_SUPPORTED_SCHEMA_VERSIONS
     ):
         raise AudioValidationError("unsupported AudioJob format or schema version")
 
-    declared_job_id = payload.get("job_id")
-    if declared_job_id is not None and declared_job_id != _job_id(payload):
+    declared_job_id = payload["job_id"]
+    if (
+        not isinstance(declared_job_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", declared_job_id) is None
+    ):
+        raise AudioValidationError("job_id must use the canonical sha256:<64 lowercase hex> format")
+    if declared_job_id != _job_id(payload):
         raise AudioValidationError("job_id does not match the canonical manifest contents")
 
-    output_data = payload.get("output", {})
-    if not isinstance(output_data, dict):
-        raise AudioValidationError("output must be an object")
-    loudness_data = output_data.get("loudness", {})
-    if not isinstance(loudness_data, dict):
-        raise AudioValidationError("output.loudness must be an object")
+    output_data = _exact_object(
+        payload["output"],
+        "output",
+        required=("sample_rate", "channels", "loudness", "clip_policy"),
+    )
+    loudness_data = _exact_object(
+        output_data["loudness"],
+        "output.loudness",
+        required=("target_lufs", "true_peak_ceiling_dbtp", "peak_policy"),
+    )
     try:
         output = OutputPolicy(
-            sample_rate=output_data.get("sample_rate", 24000),
-            channels=output_data.get("channels", 1),
-            clip_policy=output_data.get("clip_policy", "clamp"),
+            sample_rate=output_data["sample_rate"],
+            channels=output_data["channels"],
+            clip_policy=output_data["clip_policy"],
             loudness=LoudnessPolicy(
-                target_lufs=loudness_data.get("target_lufs"),
-                true_peak_ceiling_dbtp=loudness_data.get("true_peak_ceiling_dbtp", -1.0),
-                peak_policy=loudness_data.get("peak_policy", "reduce_gain"),
+                target_lufs=loudness_data["target_lufs"],
+                true_peak_ceiling_dbtp=loudness_data["true_peak_ceiling_dbtp"],
+                peak_policy=loudness_data["peak_policy"],
             ),
         )
     except (TypeError, ValueError, OverflowError) as exc:
         raise AudioValidationError(f"output: {exc}") from exc
 
-    raw_items = payload.get("items", [])
+    raw_items = payload["items"]
     if not isinstance(raw_items, list):
         raise AudioValidationError("items must be an array")
     items: list[AudioClip | Silence] = []
     root = Path(base_dir)
     for index, raw in enumerate(raw_items):
         path = f"items[{index}]"
+        if not isinstance(raw, dict):
+            raise AudioValidationError(f"{path} must be an object")
+        kind = raw.get("kind")
         try:
-            if not isinstance(raw, dict):
-                raise AudioValidationError("must be an object")
-            kind = raw.get("kind")
             if kind == "silence":
-                items.append(Silence(raw["id"], float(raw["seconds"]), raw.get("metadata", {})))
+                raw = _exact_object(
+                    raw,
+                    path,
+                    required=("kind", "id", "seconds"),
+                    optional=("metadata",),
+                )
+                items.append(Silence(raw["id"], raw["seconds"], raw.get("metadata", {})))
             elif kind == "clip":
+                raw = _exact_object(
+                    raw,
+                    path,
+                    required=("kind", "id", "source", "operations"),
+                    optional=("anchors", "spans", "metadata"),
+                )
                 anchors_data = raw.get("anchors", [])
                 spans_data = raw.get("spans", [])
-                operations_data = raw.get("operations", [])
+                operations_data = raw["operations"]
                 if not isinstance(anchors_data, list):
                     raise AudioValidationError("anchors must be an array")
                 if not isinstance(spans_data, list):
                     raise AudioValidationError("spans must be an array")
                 if not isinstance(operations_data, list):
                     raise AudioValidationError("operations must be an array")
-                anchors = tuple(
-                    AudioAnchor(a["id"], int(a["sample_offset"]), a.get("name"))
-                    for a in anchors_data
-                )
-                spans = tuple(
-                    AudioSpan(
-                        int(s["source_start"]),
-                        int(s["source_end"]),
-                        int(s["sample_start"]),
-                        int(s["sample_end"]),
-                        s.get("id"),
-                        s.get("metadata", {}),
+                anchors: list[AudioAnchor] = []
+                for anchor_index, anchor in enumerate(anchors_data):
+                    anchor_path = f"{path}.anchors[{anchor_index}]"
+                    anchor = _exact_object(
+                        anchor,
+                        anchor_path,
+                        required=("id", "sample_offset"),
+                        optional=("name",),
                     )
-                    for s in spans_data
-                )
-                operations = tuple(operation_from_dict(op) for op in operations_data)
+                    anchors.append(
+                        AudioAnchor(anchor["id"], anchor["sample_offset"], anchor.get("name"))
+                    )
+                spans: list[AudioSpan] = []
+                for span_index, span in enumerate(spans_data):
+                    span_path = f"{path}.spans[{span_index}]"
+                    span = _exact_object(
+                        span,
+                        span_path,
+                        required=(
+                            "source_start",
+                            "source_end",
+                            "sample_start",
+                            "sample_end",
+                        ),
+                        optional=("id", "metadata"),
+                    )
+                    spans.append(
+                        AudioSpan(
+                            span["source_start"],
+                            span["source_end"],
+                            span["sample_start"],
+                            span["sample_end"],
+                            span.get("id"),
+                            span.get("metadata", {}),
+                        )
+                    )
+                operations = tuple(operation_from_dict(operation) for operation in operations_data)
                 items.append(
                     AudioClip(
                         raw["id"],
                         _source_from_dict(raw["source"], root),
                         operations,
-                        anchors,
-                        spans,
+                        tuple(anchors),
+                        tuple(spans),
                         raw.get("metadata", {}),
                     )
                 )
@@ -292,12 +379,12 @@ def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
         job = AudioJob(
             tuple(items),
             output,
-            payload.get("producer", {}),
-            declared_job_id or _job_id(payload),
-            payload.get("source", {}),
-            schema_version,
+            producer=payload["producer"],
+            job_id=declared_job_id,
+            source=payload.get("source", {}),
+            schema_version=schema_version,
         )
-        job.validate(base_dir=str(root))
+        job.validate(base_dir=str(root), verify_sources=verify_sources)
     except AudioValidationError:
         raise
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -305,7 +392,22 @@ def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
     return job
 
 
-def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
+def validate_clip_geometry(item: AudioClip, audio: np.ndarray) -> None:
+    for anchor in item.anchors:
+        if anchor.sample_offset > len(audio):
+            raise AudioValidationError(
+                f"anchor {anchor.id!r} exceeds source length for {item.id!r}"
+            )
+    for span_index, span in enumerate(item.spans):
+        if span.sample_end > len(audio):
+            raise AudioValidationError(
+                f"span[{span_index}] sample range exceeds source length for {item.id!r}"
+            )
+
+
+def validate_job(
+    job: AudioJob, *, base_dir: str | None = None, verify_sources: bool = True
+) -> None:
     _validate_json_value(job.producer, "producer")
     _validate_json_value(job.source, "source")
     if job.output.channels != 1:
@@ -323,80 +425,96 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
                 raise AudioValidationError(
                     "rate_pitch_envelope is not supported in AudioJob schema v1"
                 )
-        audio, _ = item.source.load()
-        for anchor in item.anchors:
-            if anchor.sample_offset > len(audio):
-                raise AudioValidationError(
-                    f"anchor {anchor.id!r} exceeds source length for {item.id!r}"
-                )
         for span_index, span in enumerate(item.spans):
             _validate_json_value(span.metadata, f"clip {item.id!r} span[{span_index}].metadata")
-            if span.sample_end > len(audio):
-                raise AudioValidationError(
-                    f"span[{span_index}] sample range exceeds source length for {item.id!r}"
-                )
         if isinstance(item.source, AudioFileSource) and base_dir is not None:
-            path = Path(item.source.path)
-            _relative_source_path(path, base_dir)
+            _relative_source_path(Path(item.source.path), base_dir)
+        if verify_sources:
+            audio, _ = item.source.load()
+            validate_clip_geometry(item, audio)
 
 
 def save_job(job: AudioJob, path: str | Path) -> Path:
-    job.validate()
-    destination = Path(path)
-    bundle = destination if destination.suffix != ".json" else destination.parent
+    """Save an AudioJob bundle directory and return its manifest path."""
+    job.validate(verify_sources=False)
+    bundle = Path(path).resolve()
     bundle.mkdir(parents=True, exist_ok=True)
-    parts = (bundle / "parts").resolve()
-    parts.mkdir(parents=True, exist_ok=True)
+    parts = bundle / "parts"
+    if parts.is_symlink():
+        raise AudioValidationError("bundle parts directory must not be a symlink")
+    if parts.exists() and not parts.is_dir():
+        raise AudioValidationError("bundle parts path must be a directory")
+    manifest = bundle / "audiojob.json"
 
-    saved_items: list[AudioClip | Silence] = []
-    for index, item in enumerate(job.items, start=1):
-        if isinstance(item, Silence):
-            saved_items.append(item)
-            continue
+    with tempfile.TemporaryDirectory(prefix=".audiojob-stage-", dir=bundle) as temp_dir:
+        stage = Path(temp_dir)
+        staged_parts = stage / "parts"
+        staged_parts.mkdir()
+        saved_items: list[AudioClip | Silence] = []
+        for index, item in enumerate(job.items, start=1):
+            if isinstance(item, Silence):
+                saved_items.append(item)
+                continue
 
-        output = parts / f"{index:06d}.wav"
-        resolved_output = output.resolve()
-        if resolved_output == parts or parts not in resolved_output.parents:
-            raise AudioValidationError(f"bundle part path escapes parts directory: {output}")
-        audio, sample_rate = item.source.load()
-        write_intermediate_wav(resolved_output, audio, sample_rate)
-        info = wav_info(resolved_output)
-        saved_items.append(
-            AudioClip(
-                item.id,
-                AudioFileSource(
-                    resolved_output,
-                    sha256_file(resolved_output),
-                    info.sample_rate,
-                    info.channels,
-                    info.frames,
-                ),
-                item.operations,
-                item.anchors,
-                item.spans,
-                item.metadata,
+            output = staged_parts / f"{index:06d}.wav"
+            audio, sample_rate = item.source.load()
+            validate_clip_geometry(item, audio)
+            write_intermediate_wav(output, audio, sample_rate)
+            info = wav_info(output)
+            saved_items.append(
+                AudioClip(
+                    item.id,
+                    AudioFileSource(
+                        output,
+                        sha256_file(output),
+                        info.sample_rate,
+                        info.channels,
+                        info.frames,
+                    ),
+                    item.operations,
+                    item.anchors,
+                    item.spans,
+                    item.metadata,
+                )
             )
+
+        saved_job = AudioJob(
+            tuple(saved_items),
+            job.output,
+            job.producer,
+            None,
+            job.source,
+            job.schema_version,
+        )
+        serialized = job_to_dict(saved_job, base_dir=str(stage), verify_sources=False)
+        serialized["job_id"] = _job_id(serialized)
+        staged_manifest = stage / "audiojob.json"
+        staged_manifest.write_text(
+            json.dumps(serialized, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
 
-    saved_job = AudioJob(
-        tuple(saved_items),
-        job.output,
-        job.producer,
-        None,
-        job.source,
-        job.schema_version,
-    )
-    serialized = job_to_dict(saved_job, base_dir=str(bundle))
-    serialized["job_id"] = _job_id(serialized)
-    manifest = bundle / "audiojob.json"
-    manifest.write_text(
-        json.dumps(serialized, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+        previous_parts = stage / "previous-parts"
+        moved_previous_parts = False
+        installed_parts = False
+        try:
+            if parts.exists():
+                os.replace(parts, previous_parts)
+                moved_previous_parts = True
+            os.replace(staged_parts, parts)
+            installed_parts = True
+            os.replace(staged_manifest, manifest)
+        except BaseException:
+            if installed_parts:
+                os.replace(parts, staged_parts)
+            if moved_previous_parts:
+                os.replace(previous_parts, parts)
+            raise
+
     return manifest
 
 
-def load_job(path: str | Path) -> AudioJob:
+def load_job(path: str | Path, *, verify_sources: bool = True) -> AudioJob:
     manifest = Path(path)
     if manifest.is_dir():
         manifest /= "audiojob.json"
@@ -407,7 +525,7 @@ def load_job(path: str | Path) -> AudioJob:
     if not isinstance(payload, dict):
         raise AudioValidationError("AudioJob manifest root must be an object")
     try:
-        return job_from_dict(payload, base_dir=manifest.parent)
+        return job_from_dict(payload, base_dir=manifest.parent, verify_sources=verify_sources)
     except AudioValidationError:
         raise
     except (KeyError, TypeError, ValueError, OverflowError) as exc:

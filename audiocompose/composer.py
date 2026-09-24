@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,29 +8,59 @@ import numpy as np
 
 from .alignment import ComposedMarker, ComposedSpan
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
-from .errors import CompositionError
+from .errors import AudioValidationError, CompositionError
+from .job import validate_clip_geometry
 from .loudness import LoudnessResult, apply_complete_output_loudness
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, Silence
 from .operations import PitchShift, Tempo, apply_operation, apply_temporal_group
-from .progress import CompositionProgress, CompositionProgressCallback
+from .progress import CompositionProgress, CompositionProgressCallback, ProgressItemKind
 from .resampling import resample_audio
-from .wav import write_wav
+from .sources import AudioBufferSource
+from .wav import prepare_output, write_wav
 
 
 def _seconds_samples(seconds: float, rate: int) -> int:
     return round(seconds * rate)
 
 
-def _source_duration(source: object) -> float | None:
-    frames = getattr(source, "frames", None)
-    sample_rate = getattr(source, "sample_rate", None)
-    if frames is None:
-        audio = getattr(source, "audio", None)
-        if audio is not None:
-            frames = len(audio)
-    if not isinstance(frames, int) or not isinstance(sample_rate, int) or sample_rate <= 0:
+def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int | None:
+    if isinstance(item, Silence):
+        return _seconds_samples(item.seconds, output_rate)
+    source = item.source
+    frames: int | None
+    source_rate: int | None
+    if isinstance(source, AudioBufferSource):
+        frames = len(source.audio)
+        source_rate = source.sample_rate
+    else:
+        frames = source.frames
+        source_rate = source.sample_rate
+    if frames is None or source_rate is None:
         return None
-    return frames / sample_rate
+    operation_index = 0
+    while operation_index < len(item.operations):
+        group_start = operation_index
+        group_end = group_start + 1
+        operation = item.operations[group_start]
+        if isinstance(operation, (Tempo, PitchShift)):
+            while group_end < len(item.operations) and isinstance(
+                item.operations[group_end], (Tempo, PitchShift)
+            ):
+                group_end += 1
+        group = item.operations[group_start:group_end]
+        if len(group) > 1:
+            rate = math.prod(
+                group_operation.factor
+                for group_operation in group
+                if isinstance(group_operation, Tempo)
+            )
+            frames = round(frames / rate)
+        else:
+            frames = operation.output_length(frames, source_rate)
+        operation_index = group_end
+    if source_rate != output_rate:
+        frames = round(frames * output_rate / source_rate)
+    return frames
 
 
 def _emit(callback: CompositionProgressCallback | None, event: CompositionProgress) -> None:
@@ -63,33 +94,33 @@ def _loudness_summary(result: LoudnessResult) -> dict[str, object]:
 class Composer:
     sample_rate: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.sample_rate is not None and (
+            isinstance(self.sample_rate, bool)
+            or not isinstance(self.sample_rate, int)
+            or self.sample_rate <= 0
+        ):
+            raise AudioValidationError("sample_rate must be a positive integer or None")
+
     def compose(
         self,
         job: AudioJob,
         *,
         on_progress: CompositionProgressCallback | None = None,
     ) -> CompositionResult:
-        job.validate()
-        rate = self.sample_rate or job.output.sample_rate
-        if rate <= 0:
-            raise CompositionError("sample_rate must be positive")
+        job.validate(verify_sources=False)
+        rate = self.sample_rate if self.sample_rate is not None else job.output.sample_rate
         total_items = len(job.items)
-        item_durations = [
-            _source_duration(item.source)
-            if isinstance(item, AudioClip) and item.metadata.get("kind") != "silence"
+        item_output_frames = [_predicted_output_frames(item, rate) for item in job.items]
+        total_output_frames = (
+            sum(frames for frames in item_output_frames if frames is not None)
+            if all(frames is not None for frames in item_output_frames)
             else None
-            for item in job.items
-        ]
-        duration_items = [
-            item
-            for item in job.items
-            if isinstance(item, AudioClip) and item.metadata.get("kind") != "silence"
-        ]
-        clip_durations = [duration for duration in item_durations if duration is not None]
-        total_audio_seconds = (
-            sum(clip_durations) if len(clip_durations) == len(duration_items) else None
         )
-        completed_audio_seconds = 0.0 if total_audio_seconds is not None else None
+        total_audio_seconds = (
+            total_output_frames / rate if total_output_frames is not None else None
+        )
+        completed_audio_seconds = 0.0
         metadata_kind_counts: dict[str, int] = {}
         for item in job.items:
             metadata_kind = item.metadata.get("kind")
@@ -117,8 +148,7 @@ class Composer:
         spans: list[ComposedSpan] = []
         cursor = 0
         for index, item in enumerate(job.items):
-            item_kind = "silence" if isinstance(item, Silence) else "clip"
-            item_duration = item_durations[index]
+            item_kind: ProgressItemKind = "silence" if isinstance(item, Silence) else "clip"
             _emit(
                 on_progress,
                 CompositionProgress(
@@ -154,6 +184,7 @@ class Composer:
                     ),
                 )
                 audio, source_rate = item.source.load()
+                validate_clip_geometry(item, audio)
                 _emit(
                     on_progress,
                     CompositionProgress(
@@ -307,8 +338,7 @@ class Composer:
                     )
             parts.append(np.asarray(audio, dtype=np.float32))
             cursor += len(audio)
-            if completed_audio_seconds is not None and item_duration is not None:
-                completed_audio_seconds += item_duration
+            completed_audio_seconds = cursor / rate
             _emit(
                 on_progress,
                 CompositionProgress(
@@ -405,6 +435,12 @@ class Composer:
                 },
             ),
         )
+        try:
+            waveform = prepare_output(waveform, clip_policy=job.output.clip_policy)
+        except AudioValidationError as exc:
+            if job.output.clip_policy != "error":
+                raise
+            raise CompositionError(str(exc)) from exc
         diagnostics: list[CompositionDiagnostic] = []
         if loudness.warning:
             if loudness.before.integrated_lufs is None:
@@ -484,4 +520,8 @@ class Composer:
         *,
         on_progress: CompositionProgressCallback | None = None,
     ) -> Path:
-        return self.to_wav(AudioJob.load(str(manifest)), path, on_progress=on_progress)
+        return self.to_wav(
+            AudioJob.load(str(manifest), verify_sources=False),
+            path,
+            on_progress=on_progress,
+        )

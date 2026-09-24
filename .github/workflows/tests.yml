@@ -55,7 +55,9 @@ jobs:
       - name: Install lower-bound package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev]"
+          python -m pip install "numpy==1.24.0" "audiosig==0.1.5"
+          python -m pip install --no-deps -e .
+          python -m pip install "pytest==8.0.0" "jsonschema==4.18.0"
 
       - name: Run lower-bound tests
         run: python -m pytest -q
@@ -85,5 +87,32 @@ jobs:
 
       - name: Smoke-test installed wheel
         run: |
-          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" -c "import audiocompose; assert audiocompose.__version__"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" - <<'PY'
+          import sys
+          from importlib.resources import files
+          from pathlib import Path
+
+          import numpy as np
+
+          import audiocompose
+          from audiocompose import (
+              AudioBufferSource,
+              AudioClip,
+              AudioJob,
+              Composer,
+              audiojob_schema,
+          )
+
+          assert audiocompose.__version__
+          assert Path(sys.prefix).resolve() in Path(audiocompose.__file__).resolve().parents
+          assert files("audiocompose").joinpath("py.typed").is_file()
+          for version in (1, 2):
+              assert audiojob_schema(version)["$schema"]
+          source = AudioBufferSource(np.zeros(240, dtype=np.float32), 24000)
+          job = AudioJob((AudioClip("clip", source),))
+          result = Composer().compose(job)
+          assert result.sample_rate == 24000
+          assert result.audio.ndim == 1
+          PY
           "$RUNNER_TEMP/audiocompose-wheel-venv/bin/audiocompose" --version

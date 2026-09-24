@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import warnings
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,17 +26,37 @@ def _validate_sample_rate(sample_rate: int) -> None:
         raise AudioValidationError("sample_rate must be a positive integer")
 
 
+def _as_finite_mono_float32(
+    audio: np.ndarray, *, name: str = "audio", copy: bool = False
+) -> np.ndarray:
+    """Return a finite mono float32 waveform; empty waveforms are valid."""
+    try:
+        values = np.asarray(audio)
+    except (TypeError, ValueError) as exc:
+        raise AudioValidationError(f"{name} must be a finite one-dimensional waveform") from exc
+    if values.ndim != 1 or np.iscomplexobj(values):
+        raise AudioValidationError(f"{name} must be a finite one-dimensional waveform")
+    try:
+        values = np.asarray(values, dtype=np.float32)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AudioValidationError(f"{name} must be a finite one-dimensional waveform") from exc
+    if not np.isfinite(values).all():
+        raise AudioValidationError(f"{name} must be a finite one-dimensional waveform")
+    if copy:
+        return np.array(values, dtype=np.float32, order="C", copy=True)
+    return np.ascontiguousarray(values, dtype=np.float32)
+
+
 def prepare_output(audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp") -> np.ndarray:
-    samples = np.asarray(audio, dtype=np.float32)
-    if clip_policy not in {"clamp", "warn", "error"}:
+    if clip_policy not in ("clamp", "warn", "error"):
         raise AudioValidationError(f"unknown clip policy: {clip_policy!r}")
-        raise AudioValidationError("audio must be a finite one-dimensional waveform")
+    samples = _as_finite_mono_float32(audio)
     over_range = bool(np.any((samples < -1.0) | (samples > 1.0)))
     if over_range and clip_policy == "error":
         raise AudioValidationError("audio contains samples outside the PCM range [-1, 1]")
-    if over_range and clip_policy == "warn":
-        warnings.warn("audio was clipped to the PCM range [-1, 1]", RuntimeWarning, stacklevel=2)
-    return np.clip(samples, -1.0, 1.0)
+    if clip_policy == "clamp":
+        return np.ascontiguousarray(np.clip(samples, -1.0, 1.0), dtype=np.float32)
+    return samples
 
 
 def _pcm_to_float(raw: bytes, width: int) -> np.ndarray:
@@ -121,7 +140,7 @@ def write_wav(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     _validate_sample_rate(sample_rate)
-    clipped = prepare_output(audio, clip_policy=clip_policy)
+    clipped = np.clip(prepare_output(audio, clip_policy=clip_policy), -1.0, 1.0)
     pcm = np.round(clipped * 32767.0).astype("<i2")
     with wave.open(str(destination), "wb") as handle:
         handle.setnchannels(1)

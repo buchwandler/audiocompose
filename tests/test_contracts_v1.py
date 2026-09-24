@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from jsonschema import Draft202012Validator
 
 from audiocompose import (
     AudioBufferSource,
@@ -50,6 +51,8 @@ def test_save_load_save_preserves_canonical_identity(tmp_path: Path) -> None:
 
 def test_v1_fixture_preserves_schema_version_and_identity(tmp_path: Path) -> None:
     fixture = Path("tests/fixtures/simple.audiojob")
+    schema = json.loads(Path("spec/audiojob-v1.schema.json").read_text())
+    Draft202012Validator(schema).validate(json.loads((fixture / "audiojob.json").read_text()))
     loaded = AudioJob.load(fixture)
     assert loaded.schema_version == 1
 

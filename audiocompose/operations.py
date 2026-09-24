@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from audiosig import (
-    InvalidParameterError,
+    AudioSignalError,
     apply_speech_effects,
     apply_speech_effects_envelope,
     pitch_shift,
@@ -16,6 +16,7 @@ from audiosig import (
 
 from ._automation import map_source_frame, output_frames_for_input_frames
 from .errors import AudioValidationError, CompositionError
+from .wav import _as_finite_mono_float32
 
 
 def _finite_float(value: Any, name: str) -> float:
@@ -39,7 +40,7 @@ class AutomationPoint:
 
 
 class AudioOperation:
-    type: str
+    type: ClassVar[str]
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -65,11 +66,10 @@ class AudioOperation:
 @dataclass(frozen=True, slots=True)
 class Gain(AudioOperation):
     db: float
-    type: str = "gain"
+    type: ClassVar[Literal["gain"]] = "gain"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.db):
-            raise ValueError("gain db must be finite")
+        object.__setattr__(self, "db", _finite_float(self.db, "gain db"))
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": self.type, "db": self.db}
@@ -78,11 +78,10 @@ class Gain(AudioOperation):
 @dataclass(frozen=True, slots=True)
 class PitchShift(AudioOperation):
     semitones: float
-    type: str = "pitch"
+    type: ClassVar[Literal["pitch"]] = "pitch"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.semitones):
-            raise ValueError("pitch semitones must be finite")
+        object.__setattr__(self, "semitones", _finite_float(self.semitones, "pitch semitones"))
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": self.type, "semitones": self.semitones}
@@ -91,11 +90,13 @@ class PitchShift(AudioOperation):
 @dataclass(frozen=True, slots=True)
 class Tempo(AudioOperation):
     factor: float
-    type: str = "tempo"
+    type: ClassVar[Literal["tempo"]] = "tempo"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.factor) or self.factor <= 0:
-            raise ValueError("tempo factor must be finite and > 0")
+        factor = _finite_float(self.factor, "tempo factor")
+        if factor <= 0:
+            raise AudioValidationError("tempo factor must be finite and > 0")
+        object.__setattr__(self, "factor", factor)
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": self.type, "factor": self.factor}
@@ -112,11 +113,13 @@ class Tempo(AudioOperation):
 @dataclass(frozen=True, slots=True)
 class FadeIn(AudioOperation):
     seconds: float
-    type: str = "fade_in"
+    type: ClassVar[Literal["fade_in"]] = "fade_in"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.seconds) or self.seconds < 0:
-            raise ValueError("fade-in seconds must be finite and >= 0")
+        seconds = _finite_float(self.seconds, "fade-in seconds")
+        if seconds < 0:
+            raise AudioValidationError("fade-in seconds must be finite and >= 0")
+        object.__setattr__(self, "seconds", seconds)
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": self.type, "seconds": self.seconds}
@@ -125,11 +128,13 @@ class FadeIn(AudioOperation):
 @dataclass(frozen=True, slots=True)
 class FadeOut(AudioOperation):
     seconds: float
-    type: str = "fade_out"
+    type: ClassVar[Literal["fade_out"]] = "fade_out"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.seconds) or self.seconds < 0:
-            raise ValueError("fade-out seconds must be finite and >= 0")
+        seconds = _finite_float(self.seconds, "fade-out seconds")
+        if seconds < 0:
+            raise AudioValidationError("fade-out seconds must be finite and >= 0")
+        object.__setattr__(self, "seconds", seconds)
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": self.type, "seconds": self.seconds}
@@ -139,9 +144,9 @@ class FadeOut(AudioOperation):
 class RatePitchEnvelope(AudioOperation):
     rate: tuple[AutomationPoint, ...] = ()
     pitch_semitones: tuple[AutomationPoint, ...] = ()
-    interpolation: str = "linear"
-    time_base: str = "output"
-    type: str = "rate_pitch_envelope"
+    interpolation: Literal["linear"] = "linear"
+    time_base: Literal["output"] = "output"
+    type: ClassVar[Literal["rate_pitch_envelope"]] = "rate_pitch_envelope"
 
     def __post_init__(self) -> None:
         try:
@@ -263,38 +268,79 @@ class RatePitchEnvelope(AudioOperation):
 Operation = Gain | PitchShift | Tempo | FadeIn | FadeOut | RatePitchEnvelope
 
 
+def _exact_object(value: Any, path: str, required: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AudioValidationError(f"{path} must be an object")
+    missing = set(required) - value.keys()
+    unknown = [key for key in value if key not in required]
+    if missing:
+        fields = ", ".join(sorted(missing))
+        raise AudioValidationError(f"{path} is missing required field(s): {fields}")
+    if unknown:
+        fields = ", ".join(sorted(map(str, unknown)))
+        raise AudioValidationError(f"{path} has unknown field(s): {fields}")
+    return value
+
+
 def operation_from_dict(value: dict[str, Any]) -> Operation:
+    if not isinstance(value, dict):
+        raise AudioValidationError("operation must be an object")
+    kind = value.get("type")
+    fields_by_kind = {
+        "gain": ("type", "db"),
+        "pitch": ("type", "semitones"),
+        "tempo": ("type", "factor"),
+        "fade_in": ("type", "seconds"),
+        "fade_out": ("type", "seconds"),
+        "rate_pitch_envelope": ("type", "interpolation", "time_base", "rate", "pitch"),
+    }
+    if not isinstance(kind, str) or kind not in fields_by_kind:
+        raise AudioValidationError(f"unsupported operation: {kind!r}")
     try:
-        kind = value["type"]
-    except (KeyError, TypeError) as exc:
-        raise AudioValidationError("operation must contain a type") from exc
+        value = _exact_object(value, f"{kind} operation", fields_by_kind[kind])
+    except AudioValidationError as exc:
+        raise AudioValidationError(f"invalid {kind!r} operation: {exc}") from exc
+    if kind == "gain":
+        return Gain(value["db"])
+    if kind == "pitch":
+        return PitchShift(value["semitones"])
+    if kind == "tempo":
+        return Tempo(value["factor"])
+    if kind == "fade_in":
+        return FadeIn(value["seconds"])
+    if kind == "fade_out":
+        return FadeOut(value["seconds"])
     try:
-        if kind == "gain":
-            return Gain(float(value["db"]))
-        if kind == "pitch":
-            return PitchShift(float(value["semitones"]))
-        if kind == "tempo":
-            return Tempo(float(value["factor"]))
-        if kind == "fade_in":
-            return FadeIn(float(value["seconds"]))
-        if kind == "fade_out":
-            return FadeOut(float(value["seconds"]))
-        if kind == "rate_pitch_envelope":
-            rate = tuple(
-                AutomationPoint(point["seconds"], point["factor"]) for point in value["rate"]
+        rate_data = value["rate"]
+        pitch_data = value["pitch"]
+        if not isinstance(rate_data, list) or not isinstance(pitch_data, list):
+            raise AudioValidationError("rate and pitch must be arrays")
+        rate = tuple(
+            AutomationPoint(
+                _exact_object(point, f"{kind} operation.rate[{index}]", ("seconds", "factor"))[
+                    "seconds"
+                ],
+                point["factor"],
             )
-            pitch_semitones = tuple(
-                AutomationPoint(point["seconds"], point["semitones"]) for point in value["pitch"]
+            for index, point in enumerate(rate_data)
+        )
+        pitch_semitones = tuple(
+            AutomationPoint(
+                _exact_object(point, f"{kind} operation.pitch[{index}]", ("seconds", "semitones"))[
+                    "seconds"
+                ],
+                point["semitones"],
             )
-            return RatePitchEnvelope(
-                rate=rate,
-                pitch_semitones=pitch_semitones,
-                interpolation=value["interpolation"],
-                time_base=value["time_base"],
-            )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AudioValidationError(f"invalid {kind!r} operation parameters") from exc
-    raise AudioValidationError(f"unsupported operation: {kind!r}")
+            for index, point in enumerate(pitch_data)
+        )
+        return RatePitchEnvelope(
+            rate=rate,
+            pitch_semitones=pitch_semitones,
+            interpolation=value["interpolation"],
+            time_base=value["time_base"],
+        )
+    except AudioValidationError as exc:
+        raise AudioValidationError(f"invalid {kind!r} operation: {exc}") from exc
 
 
 def apply_temporal_group(
@@ -302,44 +348,52 @@ def apply_temporal_group(
     sample_rate: int,
     operations: Sequence[Tempo | PitchShift],
 ) -> np.ndarray:
+    values = _as_finite_mono_float32(audio)
     rate = math.prod(operation.factor for operation in operations if isinstance(operation, Tempo))
     semitones = math.fsum(
         operation.semitones for operation in operations if isinstance(operation, PitchShift)
     )
-    result = apply_speech_effects(
-        np.asarray(audio, dtype=np.float32),
-        sample_rate=sample_rate,
-        rate=rate,
-        semitones=semitones,
-        method="wsola",
-    )
-    return np.ascontiguousarray(result, dtype=np.float32)
+    try:
+        result = apply_speech_effects(
+            values,
+            sample_rate=sample_rate,
+            rate=rate,
+            semitones=semitones,
+            method="wsola",
+        )
+    except AudioSignalError as exc:
+        raise AudioValidationError(f"AudioSig temporal processing failed: {exc}") from exc
+    return _as_finite_mono_float32(result, name="temporal processing output")
 
 
 def apply_operation(audio: np.ndarray, sample_rate: int, operation: Operation) -> np.ndarray:
-    values = np.asarray(audio, dtype=np.float32)
+    values = _as_finite_mono_float32(audio)
     if isinstance(operation, Gain):
-        return (values * (10.0 ** (operation.db / 20.0))).astype(np.float32)
+        return _as_finite_mono_float32(
+            values * (10.0 ** (operation.db / 20.0)), name="operation output"
+        )
     if isinstance(operation, Tempo):
-        return np.ascontiguousarray(
-            time_stretch(
+        try:
+            result = time_stretch(
                 values,
                 operation.factor,
                 sample_rate=sample_rate,
                 method="wsola",
-            ),
-            dtype=np.float32,
-        )
+            )
+        except AudioSignalError as exc:
+            raise AudioValidationError(f"AudioSig tempo processing failed: {exc}") from exc
+        return _as_finite_mono_float32(result, name="tempo output")
     if isinstance(operation, PitchShift):
-        return np.ascontiguousarray(
-            pitch_shift(
+        try:
+            result = pitch_shift(
                 values,
                 sample_rate=sample_rate,
                 semitones=operation.semitones,
                 method="wsola",
-            ),
-            dtype=np.float32,
-        )
+            )
+        except AudioSignalError as exc:
+            raise AudioValidationError(f"AudioSig pitch processing failed: {exc}") from exc
+        return _as_finite_mono_float32(result, name="pitch output")
     if isinstance(operation, RatePitchEnvelope):
         rate_points = tuple((point.seconds, point.value) for point in operation.rate)
         pitch_points = tuple((point.seconds, point.value) for point in operation.pitch_semitones)
@@ -353,9 +407,9 @@ def apply_operation(audio: np.ndarray, sample_rate: int, operation: Operation) -
                 interpolation=operation.interpolation,
                 method="wsola",
             )
-        except InvalidParameterError as exc:
+        except AudioSignalError as exc:
             raise AudioValidationError(str(exc)) from exc
-        return np.ascontiguousarray(result, dtype=np.float32)
+        return _as_finite_mono_float32(result, name="envelope output")
     if isinstance(operation, (FadeIn, FadeOut)):
         result = values.copy()
         count = min(result.size, round(operation.seconds * sample_rate))
@@ -365,5 +419,5 @@ def apply_operation(audio: np.ndarray, sample_rate: int, operation: Operation) -
                 result[:count] *= ramp
             else:
                 result[-count:] *= ramp[::-1]
-        return result
+        return _as_finite_mono_float32(result, name="operation output")
     raise CompositionError(f"unsupported operation: {operation!r}")

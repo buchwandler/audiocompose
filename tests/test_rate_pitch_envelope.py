@@ -6,8 +6,8 @@ from audiocompose import (
     AudioValidationError,
     AutomationPoint,
     RatePitchEnvelope,
-    operation_from_dict,
 )
+from audiocompose.operations import operation_from_dict
 
 
 def test_automation_point_requires_finite_value_and_nonnegative_time() -> None:

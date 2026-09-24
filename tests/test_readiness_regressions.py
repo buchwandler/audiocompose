@@ -19,10 +19,9 @@ from audiocompose import (
     OutputPolicy,
     PitchShift,
     Tempo,
-    apply_complete_output_loudness,
-    wav_info,
-    write_wav,
 )
+from audiocompose.loudness import apply_complete_output_loudness
+from audiocompose.wav import wav_info, write_wav
 
 
 def _dominant_frequency(audio: np.ndarray, sample_rate: int) -> float:
@@ -127,6 +126,23 @@ def test_file_sources_are_canonical_pcm32_parts(tmp_path: Path) -> None:
     )
     part = next(manifest.parent.joinpath("parts").glob("*.wav"))
     assert wav_info(part).sample_width == 4
+
+
+def test_persisted_source_integrity_is_checked_when_loaded(tmp_path: Path) -> None:
+    source = tmp_path / "input.wav"
+    write_wav(source, np.linspace(-0.5, 0.5, 16), 8)
+    manifest = Path(
+        AudioJob((AudioClip("one", AudioFileSource(source)),)).save(tmp_path / "bundle.audiojob")
+    )
+    part = next(manifest.parent.joinpath("parts").glob("*.wav"))
+    write_wav(part, np.zeros(16, dtype=np.float32), 8)
+
+    with pytest.raises(AudioValidationError, match="source hash mismatch"):
+        AudioJob.load(manifest)
+
+    deferred = AudioJob.load(manifest, verify_sources=False)
+    with pytest.raises(AudioValidationError, match="source hash mismatch"):
+        Composer().compose(deferred)
 
 
 def test_job_id_is_verified_on_load(tmp_path: Path) -> None:

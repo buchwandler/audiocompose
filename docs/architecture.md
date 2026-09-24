@@ -24,12 +24,12 @@ PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection
 
 An AudioJob is an ordered collection of `AudioClip` and `Silence` items. A clip references either an in-memory NumPy `AudioBufferSource` or a file-backed `AudioFileSource`, followed by ordered numeric operations allowed by its schema version. V1 contains the existing static operations; v2 adds the generic time-varying `RatePitchEnvelope`. Clip anchors and spans are generic timing metadata. Output policy contains the final sample rate, channel count, clipping behavior, and complete-output loudness policy.
 
-The normative schemas are `spec/audiojob-v1.schema.json` and `spec/audiojob-v2.schema.json`. New jobs default to v2. Loading and saving a v1 job preserves v1, and v1 rejects the v2-only envelope operation. The bundle identity is `sha256:` plus the SHA-256 of canonical UTF-8 JSON with sorted keys and compact separators, excluding `job_id` itself.
+The canonical packaged schemas are `audiocompose/schemas/audiojob-v1.schema.json` and `audiocompose/schemas/audiojob-v2.schema.json`; repository-level `spec/` copies are verified mirrors. `audiojob_schema(version)` loads a packaged schema. New jobs default to v2. Loading and saving a v1 job preserves v1, and v1 rejects the v2-only envelope operation. The bundle identity is `sha256:` plus the SHA-256 of canonical UTF-8 JSON with sorted keys and compact separators, excluding `job_id` itself.
 
 ## Generic analysis boundary
 
 `audiocompose.analysis` reports acoustic activity and gaps using sample coordinates. The analyzer is intentionally not a voice activity detector and does not interpret semantic pauses or producer timing. Producer code may supply a generic anchor, then request gap measurement near that coordinate.
-New serialized bundles use schema version 2 and contain `audiojob.json` and relative PCM32 WAV fragments. Loaded v1 bundles retain schema version 1 when saved. Bundle loading validates paths, hashes, WAV metadata, supported operations, and output policy before composition.
+New serialized bundles use schema version 2 and contain `audiojob.json` plus relative PCM32 WAV fragments. Bundle directories are the save target; writes stage deterministic parts, replace the writer-owned `parts/` directory, then atomically replace `audiojob.json` last. Unrelated bundle files are preserved. Loaded v1 bundles retain schema version 1 when saved. `AudioJob.load()` validates source integrity by default; explicit `verify_sources=False` defers file reads, while composition and inspection verify each source as it is loaded and check source-coordinate geometry against that same waveform.
 
 ## Composition
 
@@ -65,8 +65,8 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 | G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package |
 | AudioJob format and bundle validation                                          | audiocompose                           |
 | WAV loading, operation model/orchestration, timeline assembly                  | audiocompose                           |
-| Numeric rate/pitch envelopes and timing maps                                  | audiocompose                           |
-| Transition eligibility and voice/segment semantics                            | producer                               |
+| Numeric rate/pitch envelopes and timing maps                                   | audiocompose                           |
+| Transition eligibility and voice/segment semantics                             | producer                               |
 | Band-limited resampling, time-scale modification, pitch-shift DSP              | AudioSig                               |
 | Silence insertion and marker finalization                                      | audiocompose                           |
 | Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose                           |

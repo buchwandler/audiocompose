@@ -11,9 +11,9 @@ from audiocompose import (
     LoudnessPolicy,
     OutputPolicy,
     Silence,
-    apply_complete_output_loudness,
 )
 from audiocompose.errors import CompositionError
+from audiocompose.loudness import apply_complete_output_loudness
 
 
 def _tone(sample_rate: int = 1000, seconds: float = 1.0) -> np.ndarray:
@@ -46,6 +46,18 @@ def test_silence_reports_non_normalizable_loudness() -> None:
     assert result.after.integrated_lufs is None
     assert result.warning is not None
     assert not result.target_reached
+
+
+def test_integrated_loudness_requires_a_complete_400ms_block() -> None:
+    policy = LoudnessPolicy(target_lufs=-20.0, true_peak_ceiling_dbtp=None)
+    short = apply_complete_output_loudness(_tone(seconds=0.399), 1000, policy)
+    boundary = apply_complete_output_loudness(_tone(seconds=0.4), 1000, policy)
+
+    assert short.before.integrated_lufs is None
+    assert short.before.sample_peak_dbfs is not None
+    assert short.before.true_peak_dbtp is not None
+    assert short.requested_gain_db == 0.0
+    assert boundary.before.integrated_lufs is not None
 
 
 def test_peak_ceiling_limitation_is_reported() -> None:

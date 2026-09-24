@@ -13,8 +13,9 @@ from audiocompose import (
     AudioSpan,
     AudioValidationError,
     Composer,
-    write_wav,
 )
+from audiocompose.job import _job_id
+from audiocompose.wav import write_wav
 
 
 def test_span_identity_and_metadata_survive_composition() -> None:
@@ -56,18 +57,8 @@ def test_sample_coordinates_are_limited_by_audio_length() -> None:
 
 
 def test_span_metadata_must_be_json_safe() -> None:
-    job = AudioJob(
-        (
-            AudioClip(
-                "clip",
-                AudioBufferSource(np.zeros(4), 4),
-                spans=(AudioSpan(0, 1, 0, 1, metadata={"bad": object()}),),
-            ),
-        )
-    )
-
-    with pytest.raises(AudioValidationError, match=r"span\[0\]\.metadata"):
-        job.validate()
+    with pytest.raises(AudioValidationError, match="span metadata"):
+        AudioSpan(0, 1, 0, 1, metadata={"bad": object()})
 
 
 def test_span_metadata_roundtrips_and_changes_job_identity(tmp_path: Path) -> None:
@@ -100,8 +91,7 @@ def test_old_manifest_without_optional_span_fields_loads(tmp_path: Path) -> None
     payload = json.loads(manifest.read_text())
     payload["items"][0]["spans"][0].pop("id", None)
     payload["items"][0]["spans"][0].pop("metadata", None)
-    payload["job_id"] = "sha256:" + "0" * 64
-    payload.pop("job_id")
+    payload["job_id"] = _job_id(payload)
     manifest.write_text(json.dumps(payload, indent=2) + "\n")
 
     loaded = AudioJob.load(manifest)

@@ -11,7 +11,8 @@ from ._version import __version__
 from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_gap_near
 from .composer import Composer
 from .errors import AudioComposeError
-from .model import AudioClip, AudioJob, Silence
+from .job import validate_clip_geometry
+from .model import AudioClip, AudioJob, CompositionResult, Silence
 from .wav import read_wav
 
 
@@ -106,19 +107,23 @@ def _report_dict(report: ActivityReport) -> dict[str, Any]:
     }
 
 
-def _load_input(path: str) -> tuple[Any, int, AudioJob | None]:
+def _load_input(
+    path: str,
+) -> tuple[Any, int, AudioJob | None, CompositionResult | None]:
     if Path(path).suffix.lower() == ".wav":
         audio, sample_rate = read_wav(path)
-        return audio, sample_rate, None
-    job = AudioJob.load(path)
+        return audio, sample_rate, None, None
+    job = AudioJob.load(path, verify_sources=False)
     result = Composer().compose(job)
-    return result.audio, result.sample_rate, job
+    return result.audio, result.sample_rate, job, result
 
 
 def _inspect(job: AudioJob) -> dict[str, Any]:
     clips = [item for item in job.items if isinstance(item, AudioClip)]
     silence = [item for item in job.items if isinstance(item, Silence)]
     loaded = [(item, *item.source.load()) for item in clips]
+    for item, audio, _ in loaded:
+        validate_clip_geometry(item, audio)
     rates = sorted({rate for _, _, rate in loaded})
     operations = sorted({operation.type for item in clips for operation in item.operations})
     raw_duration = sum(len(audio) / rate for _, audio, rate in loaded) + sum(
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             result = {
                 "valid": True,
                 "format": "audiojob",
-                "schema_version": 1,
+                "schema_version": validated_job.schema_version,
                 "job_id": validated_job.job_id,
             }
             if args.json:
@@ -233,25 +238,24 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"valid AudioJob: {args.manifest}")
         elif args.command == "inspect":
-            result = _inspect(AudioJob.load(args.manifest))
+            result = _inspect(AudioJob.load(args.manifest, verify_sources=False))
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "compose":
-            Composer().to_wav(AudioJob.load(args.manifest), args.output)
+            Composer().to_wav(AudioJob.load(args.manifest, verify_sources=False), args.output)
             print(f"wrote {args.output}")
         elif args.command == "timeline":
-            result = _timeline(AudioJob.load(args.manifest))
+            result = _timeline(AudioJob.load(args.manifest, verify_sources=False))
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command in {"analyze", "report"}:
-            audio, sample_rate, job = _load_input(args.input)
+            audio, sample_rate, job, composition = _load_input(args.input)
             report = analyze_activity(audio, sample_rate, _analysis_config(args))
             if args.command == "analyze":
                 result = _report_dict(report)
                 if args.near_marker:
-                    if job is None:
+                    if job is None or composition is None:
                         raise AudioComposeError("--near-marker requires an AudioJob input")
-                    timeline = Composer().compose(job)
                     marker = next(
-                        (marker for marker in timeline.markers if marker.id == args.near_marker),
+                        (marker for marker in composition.markers if marker.id == args.near_marker),
                         None,
                     )
                     if marker is None:

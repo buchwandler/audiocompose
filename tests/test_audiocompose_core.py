@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from audiocompose import (
+    AudioAnchor,
     AudioBufferSource,
     AudioClip,
     AudioFileSource,
@@ -13,11 +15,11 @@ from audiocompose import (
     AudioValidationError,
     Composer,
     Gain,
-    Marker,
     Silence,
     Tempo,
-    write_wav,
 )
+from audiocompose.job import _job_id
+from audiocompose.wav import write_wav
 
 
 def test_composes_buffers_silence_and_mixed_rates() -> None:
@@ -50,7 +52,11 @@ def test_operations_are_applied_in_declared_order() -> None:
 def test_tempo_updates_duration_and_marker_coordinates() -> None:
     audio = np.arange(100, dtype=np.float32)
     job = AudioJob(
-        (AudioClip("clip", AudioBufferSource(audio, 100), (Tempo(2.0),), (Marker("middle", 50),)),)
+        (
+            AudioClip(
+                "clip", AudioBufferSource(audio, 100), (Tempo(2.0),), (AudioAnchor("middle", 50),)
+            ),
+        )
     )
 
     result = Composer(sample_rate=100).compose(job)
@@ -80,18 +86,15 @@ def test_bundle_roundtrip(tmp_path) -> None:
 
 
 def test_bundle_rejects_path_traversal(tmp_path) -> None:
-    parts = tmp_path / "job" / "parts"
-    parts.mkdir(parents=True)
-    manifest = parts.parent / "audiojob.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "format": "audiojob",
-                "schema_version": 1,
-                "items": [{"kind": "clip", "id": "x", "source": {"path": "../outside.wav"}}],
-            }
+    manifest = Path(
+        AudioJob((AudioClip("x", AudioBufferSource(np.zeros(8, dtype=np.float32), 8)),)).save(
+            tmp_path / "job.audiojob"
         )
     )
+    payload = json.loads(manifest.read_text())
+    payload["items"][0]["source"]["path"] = "../outside.wav"
+    payload["job_id"] = _job_id(payload)
+    manifest.write_text(json.dumps(payload))
 
     with pytest.raises(AudioValidationError, match="relative"):
         AudioJob.load(manifest)

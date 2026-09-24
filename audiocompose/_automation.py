@@ -4,7 +4,7 @@ import math
 from bisect import bisect_right
 from collections.abc import Sequence
 
-from audiosig import InvalidParameterError, speech_effects_output_frames
+from audiosig import AudioSignalError, speech_effects_output_frames
 
 from .errors import AudioValidationError
 
@@ -77,5 +77,5 @@ def output_frames_for_input_frames(
             sample_rate=sample_rate,
             rate_points=rate_points,
         )
-    except InvalidParameterError as exc:
+    except AudioSignalError as exc:
         raise AudioValidationError(str(exc)) from exc
