@@ -28,13 +28,16 @@ def test_save_load_save_preserves_canonical_identity(tmp_path: Path) -> None:
             sample_rate=32,
             loudness=LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=None),
         ),
+        schema_version=1,
     )
     first = Path(job.save(tmp_path / "first.audiojob"))
     payload = json.loads(first.read_text())
     original_id = payload["job_id"]
+    assert payload["schema_version"] == 1
     first.write_text(json.dumps(payload, separators=(",", ":")))
     loaded = AudioJob.load(first)
     assert loaded.job_id == original_id
+    assert loaded.schema_version == 1
 
     second = Path(loaded.save(tmp_path / "second.audiojob"))
     second_payload = json.loads(second.read_text())
@@ -43,3 +46,19 @@ def test_save_load_save_preserves_canonical_identity(tmp_path: Path) -> None:
         Composer(sample_rate=32).compose(loaded).audio,
         Composer(sample_rate=32).compose(AudioJob.load(second)).audio,
     )
+
+
+def test_v1_fixture_preserves_schema_version_and_identity(tmp_path: Path) -> None:
+    fixture = Path("tests/fixtures/simple.audiojob")
+    loaded = AudioJob.load(fixture)
+    assert loaded.schema_version == 1
+
+    first = Path(loaded.save(tmp_path / "first-v1.audiojob"))
+    first_payload = json.loads(first.read_text())
+    assert first_payload["schema_version"] == 1
+    first_id = first_payload["job_id"]
+
+    second = Path(AudioJob.load(first).save(tmp_path / "second-v1.audiojob"))
+    second_payload = json.loads(second.read_text())
+    assert second_payload["schema_version"] == 1
+    assert second_payload["job_id"] == first_id

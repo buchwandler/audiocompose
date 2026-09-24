@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/buchwandler/audiocompose/blob/main/spec/audiojob-v2.schema.json",
+  "title": "AudioJob schema v2",
+  "type": "object",
+  "required": ["format", "schema_version", "producer", "items", "output", "job_id"],
+  "properties": {
+    "format": { "const": "audiojob" },
+    "schema_version": { "const": 2 },
+    "job_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "producer": { "type": "object" },
+    "source": { "type": "object" },
+    "items": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "id", "seconds"],
+            "properties": {
+              "kind": { "const": "silence" },
+              "id": { "type": "string", "minLength": 1 },
+              "seconds": { "type": "number", "minimum": 0 },
+              "metadata": { "type": "object" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["kind", "id", "source", "operations"],
+            "properties": {
+              "kind": { "const": "clip" },
+              "id": { "type": "string", "minLength": 1 },
+              "source": {
+                "type": "object",
+                "required": ["path", "sha256", "sample_rate", "channels", "frames"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*(^|/|\\\\)\\.\\.(?:/|\\\\|$)).+"
+                  },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "sample_rate": { "type": "integer", "minimum": 1 },
+                  "channels": { "const": 1 },
+                  "frames": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+              },
+              "operations": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    { "$ref": "#/$defs/gain" },
+                    { "$ref": "#/$defs/pitch" },
+                    { "$ref": "#/$defs/tempo" },
+                    { "$ref": "#/$defs/fadeIn" },
+                    { "$ref": "#/$defs/fadeOut" },
+                    { "$ref": "#/$defs/ratePitchEnvelope" }
+                  ]
+                }
+              },
+              "anchors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "sample_offset"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "sample_offset": { "type": "integer", "minimum": 0 },
+                    "name": { "type": ["string", "null"] }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "spans": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["source_start", "source_end", "sample_start", "sample_end"],
+                  "properties": {
+                    "source_start": { "type": "integer", "minimum": 0 },
+                    "source_end": { "type": "integer", "minimum": 0 },
+                    "sample_start": { "type": "integer", "minimum": 0 },
+                    "sample_end": { "type": "integer", "minimum": 0 },
+                    "id": { "type": "string", "minLength": 1 },
+                    "metadata": { "type": "object" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "metadata": { "type": "object" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["sample_rate", "channels", "loudness", "clip_policy"],
+      "properties": {
+        "sample_rate": { "type": "integer", "minimum": 1 },
+        "channels": { "const": 1 },
+        "clip_policy": { "enum": ["clamp", "warn", "error"] },
+        "loudness": {
+          "type": "object",
+          "required": ["target_lufs", "true_peak_ceiling_dbtp", "peak_policy"],
+          "properties": {
+            "target_lufs": { "type": ["number", "null"] },
+            "true_peak_ceiling_dbtp": { "type": ["number", "null"] },
+            "peak_policy": { "enum": ["reduce_gain", "error"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "gain": {
+      "type": "object",
+      "required": ["type", "db"],
+      "properties": { "type": { "const": "gain" }, "db": { "type": "number" } },
+      "additionalProperties": false
+    },
+    "pitch": {
+      "type": "object",
+      "required": ["type", "semitones"],
+      "properties": { "type": { "const": "pitch" }, "semitones": { "type": "number" } },
+      "additionalProperties": false
+    },
+    "tempo": {
+      "type": "object",
+      "required": ["type", "factor"],
+      "properties": {
+        "type": { "const": "tempo" },
+        "factor": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "fadeIn": {
+      "type": "object",
+      "required": ["type", "seconds"],
+      "properties": {
+        "type": { "const": "fade_in" },
+        "seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "fadeOut": {
+      "type": "object",
+      "required": ["type", "seconds"],
+      "properties": {
+        "type": { "const": "fade_out" },
+        "seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "ratePitchEnvelope": {
+      "type": "object",
+      "required": ["type", "time_base", "interpolation", "rate", "pitch"],
+      "properties": {
+        "type": { "const": "rate_pitch_envelope" },
+        "time_base": { "const": "output" },
+        "interpolation": { "const": "linear" },
+        "rate": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seconds", "factor"],
+            "properties": {
+              "seconds": { "type": "number", "minimum": 0 },
+              "factor": { "type": "number", "exclusiveMinimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "pitch": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seconds", "semitones"],
+            "properties": {
+              "seconds": { "type": "number", "minimum": 0 },
+              "semitones": { "type": "number" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "anyOf": [
+        { "properties": { "rate": { "minItems": 1 } } },
+        { "properties": { "pitch": { "minItems": 1 } } }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

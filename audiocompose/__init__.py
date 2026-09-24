@@ -21,10 +21,12 @@ from .loudness import (
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, OutputPolicy, Silence
 from .operations import (
     AudioOperation,
+    AutomationPoint,
     FadeIn,
     FadeOut,
     Gain,
     PitchShift,
+    RatePitchEnvelope,
     Tempo,
     apply_operation,
     operation_from_dict,
@@ -51,6 +53,7 @@ __all__ = [
     "AudioJob",
     "AudioOperation",
     "AudioSource",
+    "AutomationPoint",
     "AudioSpan",
     "CompositionDiagnostic",
     "CompositionError",
@@ -71,6 +74,7 @@ __all__ = [
     "Marker",
     "OutputPolicy",
     "PitchShift",
+    "RatePitchEnvelope",
     "Silence",
     "Tempo",
     "apply_complete_output_loudness",

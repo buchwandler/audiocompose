@@ -11,7 +11,7 @@ license = {file = "LICENSE"}
 authors = [{name = "AudioCompose contributors"}]
 dependencies = [
   "numpy>=1.23",
-  "audiosig>=0.1.4,<0.2",
+  "audiosig>=0.1.5,<0.2",
 ]
 keywords = ["audio", "composition", "wav", "dsp"]
 classifiers = [
@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "twine>=5"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "twine>=5", "jsonschema>=4.18"]
 
 [project.scripts]
 audiocompose = "audiocompose.cli:main"

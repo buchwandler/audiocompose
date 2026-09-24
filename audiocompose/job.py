@@ -11,12 +11,13 @@ from .alignment import AudioAnchor, AudioSpan
 from .errors import AudioValidationError
 from .loudness import LoudnessPolicy
 from .model import AudioClip, AudioJob, OutputPolicy, Silence
-from .operations import AudioOperation, operation_from_dict
+from .operations import AudioOperation, RatePitchEnvelope, operation_from_dict
 from .sources import AudioBufferSource, AudioFileSource
 from .wav import sha256_file, wav_info, write_intermediate_wav
 
 AUDIOJOB_FORMAT = "audiojob"
-AUDIOJOB_SCHEMA_VERSION = 1
+AUDIOJOB_SCHEMA_VERSION = 2
+AUDIOJOB_SUPPORTED_SCHEMA_VERSIONS = (1, AUDIOJOB_SCHEMA_VERSION)
 
 
 def _validate_json_value(value: Any, path: str) -> None:
@@ -151,7 +152,7 @@ def job_to_dict(job: AudioJob, *, base_dir: str | None = None) -> dict[str, Any]
 
     payload: dict[str, Any] = {
         "format": AUDIOJOB_FORMAT,
-        "schema_version": AUDIOJOB_SCHEMA_VERSION,
+        "schema_version": job.schema_version,
         "producer": dict(job.producer),
         "items": items,
         "output": _policy_to_dict(job.output),
@@ -199,9 +200,11 @@ def _source_from_dict(source: dict[str, Any], base_dir: Path) -> AudioFileSource
 def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
     if not isinstance(payload, dict):
         raise AudioValidationError("manifest root must be an object")
+    schema_version = payload.get("schema_version")
     if (
         payload.get("format") != AUDIOJOB_FORMAT
-        or payload.get("schema_version") != AUDIOJOB_SCHEMA_VERSION
+        or type(schema_version) is not int
+        or schema_version not in AUDIOJOB_SUPPORTED_SCHEMA_VERSIONS
     ):
         raise AudioValidationError("unsupported AudioJob format or schema version")
 
@@ -292,6 +295,7 @@ def job_from_dict(payload: dict[str, Any], *, base_dir: str | Path) -> AudioJob:
             payload.get("producer", {}),
             declared_job_id or _job_id(payload),
             payload.get("source", {}),
+            schema_version,
         )
         job.validate(base_dir=str(root))
     except AudioValidationError:
@@ -315,6 +319,10 @@ def validate_job(job: AudioJob, *, base_dir: str | None = None) -> None:
         for operation in item.operations:
             if not isinstance(operation, AudioOperation):
                 raise AudioValidationError(f"unsupported operation on clip {item.id!r}")
+            if job.schema_version == 1 and isinstance(operation, RatePitchEnvelope):
+                raise AudioValidationError(
+                    "rate_pitch_envelope is not supported in AudioJob schema v1"
+                )
         audio, _ = item.source.load()
         for anchor in item.anchors:
             if anchor.sample_offset > len(audio):
@@ -370,7 +378,14 @@ def save_job(job: AudioJob, path: str | Path) -> Path:
             )
         )
 
-    saved_job = AudioJob(tuple(saved_items), job.output, job.producer, None, job.source)
+    saved_job = AudioJob(
+        tuple(saved_items),
+        job.output,
+        job.producer,
+        None,
+        job.source,
+        job.schema_version,
+    )
     serialized = job_to_dict(saved_job, base_dir=str(bundle))
     serialized["job_id"] = _job_id(serialized)
     manifest = bundle / "audiojob.json"

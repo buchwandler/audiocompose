@@ -7,6 +7,7 @@ from audiocompose import (
     AudioBufferSource,
     AudioClip,
     AudioJob,
+    AutomationPoint,
     Composer,
     FadeIn,
     FadeOut,
@@ -14,6 +15,7 @@ from audiocompose import (
     LoudnessPolicy,
     OutputPolicy,
     PitchShift,
+    RatePitchEnvelope,
     Silence,
     Tempo,
 )
@@ -230,3 +232,61 @@ def test_fused_operation_progress_preserves_logical_events_and_group_frames() ->
     )
     assert [event.input_frames for event in fused_events] == [24_000] * 4
     assert [event.output_frames for event in fused_events[2:]] == [round(24_000 / 0.85)] * 2
+
+
+def test_rate_pitch_envelope_delegates_once_and_reports_operation_frames(monkeypatch) -> None:
+    calls = []
+
+    def fake_time_stretch(audio, factor, *, sample_rate, method):
+        assert factor == 0.5
+        assert sample_rate == 24
+        assert method == "wsola"
+        return np.repeat(audio, 2)
+
+    def fake_envelope(audio, **kwargs):
+        calls.append((len(audio), kwargs))
+        return np.repeat(audio, 2)
+
+    monkeypatch.setattr("audiocompose.operations.time_stretch", fake_time_stretch)
+    monkeypatch.setattr("audiocompose.operations.apply_speech_effects_envelope", fake_envelope)
+    envelope = RatePitchEnvelope(rate=(AutomationPoint(0, 0.5),))
+    operations = (Tempo(0.5), envelope)
+    events = []
+    source = np.ones(24, dtype=np.float32)
+    job = make_job(
+        AudioClip("seg-000481", AudioBufferSource(source, 24), operations),
+        sample_rate=24,
+    )
+
+    result = Composer(sample_rate=24).compose(job, on_progress=events.append)
+
+    assert len(result.audio) == 96
+    assert calls == [
+        (
+            48,
+            {
+                "sample_rate": 24,
+                "rate_points": ((0.0, 0.5),),
+                "pitch_points": (),
+                "time_base": "output",
+                "interpolation": "linear",
+                "method": "wsola",
+            },
+        )
+    ]
+    started = [
+        event
+        for event in events
+        if event.kind == "operation_started" and event.operation["type"] == "rate_pitch_envelope"
+    ]
+    completed = [
+        event
+        for event in events
+        if event.kind == "operation_completed" and event.operation["type"] == "rate_pitch_envelope"
+    ]
+    assert len(started) == len(completed) == 1
+    assert started[0].item_id == completed[0].item_id == "seg-000481"
+    assert started[0].operation_index == completed[0].operation_index == 1
+    assert started[0].operation_count == completed[0].operation_count == 2
+    assert started[0].input_frames == completed[0].input_frames == 48
+    assert completed[0].output_frames == 96

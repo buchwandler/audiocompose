@@ -8,12 +8,14 @@ from audiocompose import (
     AudioClip,
     AudioJob,
     AudioSpan,
+    AutomationPoint,
     Composer,
     FadeIn,
     Gain,
     LoudnessPolicy,
     OutputPolicy,
     PitchShift,
+    RatePitchEnvelope,
     Silence,
     Tempo,
 )
@@ -88,6 +90,33 @@ def test_resampling_maps_coordinates_consistently() -> None:
     assert len(result.audio) == 200
     assert result.markers[0].sample_offset == 100
     assert (result.spans[0].sample_start, result.spans[0].sample_end) == (50, 150)
+
+
+def test_rate_envelope_maps_anchors_and_spans_before_resampling(monkeypatch) -> None:
+    def render_at_predicted_length(audio, sample_rate, operation):
+        return np.zeros(operation.output_length(len(audio), sample_rate), dtype=np.float32)
+
+    monkeypatch.setattr("audiocompose.composer.apply_operation", render_at_predicted_length)
+    operation = RatePitchEnvelope(rate=(AutomationPoint(0, 1.0), AutomationPoint(1.0, 2.0)))
+    clip = AudioClip(
+        "curve",
+        AudioBufferSource(np.zeros(3000, dtype=np.float32), 1000),
+        operations=(operation,),
+        anchors=(
+            AudioAnchor("before_knot", 500),
+            AudioAnchor("at_knot", 1500),
+            AudioAnchor("after_knot", 2500),
+        ),
+        spans=(AudioSpan(10, 20, 500, 2500, id="curve-span"),),
+    )
+
+    result = Composer(sample_rate=2000).compose(AudioJob((clip,), output=_output(1000)))
+
+    assert len(result.audio) == 3500
+    assert [marker.sample_offset for marker in result.markers] == [828, 2000, 3000]
+    assert (result.spans[0].sample_start, result.spans[0].sample_end) == (828, 3000)
+    assert result.spans[0].id == "curve-span"
+    assert (result.items[0].start_sample, result.items[0].end_sample) == (0, 3500)
 
 
 def test_item_offsets_are_added_once() -> None:

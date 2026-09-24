@@ -24,7 +24,7 @@ Composer().to_wav(job, "final.wav")
 
 ## DSP behavior and reproducibility
 
-AudioCompose delegates band-limited resampling and WSOLA time/pitch processing to AudioSig. Contiguous `Tempo` and `PitchShift` operations are combined unless a `Gain` or fade separates them. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
+AudioCompose delegates band-limited resampling, static WSOLA time/pitch processing, and `RatePitchEnvelope` DSP to AudioSig. The envelope API requires `audiosig>=0.1.5,<0.2`. Contiguous static `Tempo` and `PitchShift` operations remain fused unless a `Gain` or fade separates them. Each envelope is one complete AudioSig call. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
 
 ## Composition progress
 
@@ -96,7 +96,7 @@ audiocompose report INPUT -o report.html
 
 ## Schema and provenance
 
-AudioJob schema v1 is documented in `spec/audiojob-v1.schema.json`. Package versioning is SCM-derived and independent from the persisted AudioJob schema version. Stable upstream segment IDs should be used as generic `AudioClip.id` values where a one-to-one mapping exists; producer metadata remains opaque.
+AudioJob schema v1 and v2 are documented in `spec/audiojob-v1.schema.json` and `spec/audiojob-v2.schema.json`. New jobs use v2; a loaded v1 job retains v1 when saved, and `RatePitchEnvelope` requires v2. Package versioning is SCM-derived and independent from the persisted AudioJob schema version. Stable upstream segment IDs should be used as generic `AudioClip.id` values where a one-to-one mapping exists; producer metadata remains opaque.
 
 `AudioSpan` and `ComposedSpan` carry optional producer-defined IDs and JSON-safe metadata. AudioCompose preserves these opaque values while mapping sample coordinates through operations and resampling; it never interprets the metadata.
 
@@ -109,7 +109,22 @@ This checkout contains no PyKokoro or PiperSynth producer source. Producer adapt
 
 ## Supported operations
 
-Version 1 supports `Gain`, `PitchShift`, `Tempo`, `FadeIn`, and `FadeOut`. Operation values are numeric and are applied exactly in manifest order. Semantic values such as `slow`, `loud`, voices, and phonemes belong to the producer layer, not this package.
+AudioJob v1 supports `Gain`, `PitchShift`, `Tempo`, `FadeIn`, and `FadeOut`. AudioJob v2 adds `AutomationPoint` and `RatePitchEnvelope`. Envelope point times are seconds on the operation output timeline; rate values are playback factors, pitch values are semitone offsets, interpolation is linear, and the last value is held. An omitted rate or pitch curve means identity for that dimension.
+
+```python
+from audiocompose import RatePitchEnvelope
+
+operation = RatePitchEnvelope.transition(
+    from_rate=1.0,
+    to_rate=0.85,
+    rate_seconds=0.450,
+    from_semitones=0.0,
+    to_semitones=2.0,
+    pitch_seconds=0.300,
+)
+```
+
+The envelope describes numeric DSP only. The producer decides whether a transition is appropriate; AudioCompose does not compare voices or interpret producer metadata. Semantic values such as `slow`, `loud`, voices, and phonemes remain producer-layer concepts.
 
 ## Development
 

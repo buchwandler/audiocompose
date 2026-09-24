@@ -238,7 +238,7 @@ class Composer:
                                 operation=dict(group_operation.to_dict()),
                                 source_sample_rate=source_rate,
                                 target_sample_rate=rate,
-                                input_frames=(group_input_frames if fused else original_length),
+                                input_frames=group_input_frames,
                                 output_frames=len(audio),
                                 details=group_details,
                             ),
@@ -248,9 +248,8 @@ class Composer:
                     offset = anchor.sample_offset
                     length = original_length
                     for operation in item.operations:
-                        offset = operation.map_offset(offset, length)
-                        if isinstance(operation, Tempo):
-                            length = round(length / operation.factor)
+                        offset = operation.map_offset_at_rate(offset, length, source_rate)
+                        length = operation.output_length(length, source_rate)
                     offset = round(offset * rate / source_rate)
                     markers.append(ComposedMarker(anchor.id, cursor + offset, anchor.name, item.id))
                 for span in item.spans:
@@ -258,10 +257,9 @@ class Composer:
                     span_end = span.sample_end
                     length = original_length
                     for operation in item.operations:
-                        span_start = operation.map_offset(span_start, length)
-                        span_end = operation.map_offset(span_end, length)
-                        if isinstance(operation, Tempo):
-                            length = round(length / operation.factor)
+                        span_start = operation.map_offset_at_rate(span_start, length, source_rate)
+                        span_end = operation.map_offset_at_rate(span_end, length, source_rate)
+                        length = operation.output_length(length, source_rate)
                     spans.append(
                         ComposedSpan(
                             item.id,

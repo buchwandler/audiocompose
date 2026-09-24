@@ -102,7 +102,15 @@ class AudioJob:
     job_id: str | None = None
     source: Mapping[str, Any] = field(default_factory=dict)
 
+    schema_version: int = 2
+
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version not in {1, 2}
+        ):
+            raise AudioValidationError("unsupported AudioJob schema version")
         items = tuple(self.items)
         ids: set[str] = set()
         for item in items:
