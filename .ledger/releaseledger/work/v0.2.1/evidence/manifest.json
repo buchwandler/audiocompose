@@ -1,0 +1,48 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 204,
+      "deletions": 41,
+      "patch_file": "aa03d06.patch",
+      "patch_sha256": "53e71be80c3e24cc25bd12edd1edb901b3ae673b443b1ed3e06d37f060d7207d",
+      "paths": [
+        "audiocompose/composer.py",
+        "audiocompose/job.py",
+        "audiocompose/loudness.py",
+        "audiocompose/schemas/audiojob-v1.schema.json",
+        "audiocompose/schemas/audiojob-v2.schema.json",
+        "spec/audiojob-v1.schema.json",
+        "spec/audiojob-v2.schema.json",
+        "tests/test_loudness_diagnostics.py"
+      ],
+      "sha": "aa03d0606e60d10a2d00ea125b36ae994d35f47d",
+      "short_sha": "aa03d06",
+      "source_ref": "git:aa03d0606e60d10a2d00ea125b36ae994d35f47d"
+    },
+    {
+      "additions": 5,
+      "deletions": 4,
+      "patch_file": "76763d5.patch",
+      "patch_sha256": "63f396e979b69b52389d5a1bf7bd0b3d80a10b9115fe04705f8c79fbbf2c4916",
+      "paths": [
+        ".github/workflows/python-publish.yml",
+        ".github/workflows/tests.yml",
+        "README.md",
+        "docs/architecture.md",
+        "pyproject.toml"
+      ],
+      "sha": "76763d59f3e9db77ccce57a26b8a92b8085c8f64",
+      "short_sha": "76763d5",
+      "source_ref": "git:76763d59f3e9db77ccce57a26b8a92b8085c8f64"
+    }
+  ],
+  "git_base_ref": "0f6d70d2f76cc1b4f4a57a9fb35fe23f44250904",
+  "git_base_sha": "0f6d70d2f76cc1b4f4a57a9fb35fe23f44250904",
+  "git_head_ref": "76763d59f3e9db77ccce57a26b8a92b8085c8f64",
+  "git_head_sha": "76763d59f3e9db77ccce57a26b8a92b8085c8f64",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.2.1",
+  "schema_version": 1
+}

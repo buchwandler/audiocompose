@@ -1,0 +1,56 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.2.1
+git_base_ref: v0.2.0
+git_base_sha: 0f6d70d2f76cc1b4f4a57a9fb35fe23f44250904
+git_head_ref: HEAD
+git_head_sha: 76763d59f3e9db77ccce57a26b8a92b8085c8f64
+git_range: 0f6d70d2f76cc1b4f4a57a9fb35fe23f44250904..76763d59f3e9db77ccce57a26b8a92b8085c8f64
+commit_count: 2
+rows:
+  - sha: aa03d0606e60d10a2d00ea125b36ae994d35f47d
+    source_ref: git:aa03d0606e60d10a2d00ea125b36ae994d35f47d
+    short_sha: aa03d06
+    changed_paths:
+      - audiocompose/composer.py
+      - audiocompose/job.py
+      - audiocompose/loudness.py
+      - audiocompose/schemas/audiojob-v1.schema.json
+      - audiocompose/schemas/audiojob-v2.schema.json
+      - spec/audiojob-v1.schema.json
+      - spec/audiojob-v2.schema.json
+      - tests/test_loudness_diagnostics.py
+    stats:
+      files_changed: 8
+      insertions: 204
+      deletions: 41
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: better loudness diagnostic"
+  - sha: 76763d59f3e9db77ccce57a26b8a92b8085c8f64
+    source_ref: git:76763d59f3e9db77ccce57a26b8a92b8085c8f64
+    short_sha: 76763d5
+    changed_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/architecture.md
+      - pyproject.toml
+    stats:
+      files_changed: 5
+      insertions: 5
+      deletions: 4
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "chore: fix dep floor"

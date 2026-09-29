@@ -1,0 +1,34 @@
+rows:
+  - sha: aa03d0606e60d10a2d00ea125b36ae994d35f47d
+    inspected: true
+    inspected_paths:
+      - audiocompose/composer.py
+      - audiocompose/job.py
+      - audiocompose/loudness.py
+      - audiocompose/schemas/audiojob-v1.schema.json
+      - audiocompose/schemas/audiojob-v2.schema.json
+      - spec/audiojob-v1.schema.json
+      - spec/audiojob-v2.schema.json
+      - tests/test_loudness_diagnostics.py
+    observed_behavior: "Loudness completion events now include before-and-after metrics and phase timings; collect_metrics controls optional analysis and is supported in job serialization and schemas."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 76763d59f3e9db77ccce57a26b8a92b8085c8f64
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/architecture.md
+      - pyproject.toml
+    observed_behavior: "The package minimum dependency is now AudioSig 0.1.6, reflected in package metadata, docs, and lower-bound CI checks."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
