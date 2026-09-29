@@ -95,14 +95,17 @@ def _relative_source_path(path: Path, base_dir: str | Path) -> str:
 
 def _policy_to_dict(policy: OutputPolicy) -> dict[str, Any]:
     loudness = policy.loudness
+    loudness_data: dict[str, Any] = {
+        "target_lufs": loudness.target_lufs,
+        "true_peak_ceiling_dbtp": loudness.true_peak_ceiling_dbtp,
+        "peak_policy": loudness.peak_policy,
+    }
+    if not loudness.collect_metrics:
+        loudness_data["collect_metrics"] = False
     return {
         "sample_rate": policy.sample_rate,
         "channels": policy.channels,
-        "loudness": {
-            "target_lufs": loudness.target_lufs,
-            "true_peak_ceiling_dbtp": loudness.true_peak_ceiling_dbtp,
-            "peak_policy": loudness.peak_policy,
-        },
+        "loudness": loudness_data,
         "clip_policy": policy.clip_policy,
     }
 
@@ -271,6 +274,7 @@ def job_from_dict(
         output_data["loudness"],
         "output.loudness",
         required=("target_lufs", "true_peak_ceiling_dbtp", "peak_policy"),
+        optional=("collect_metrics",),
     )
     try:
         output = OutputPolicy(
@@ -281,6 +285,7 @@ def job_from_dict(
                 target_lufs=loudness_data["target_lufs"],
                 true_peak_ceiling_dbtp=loudness_data["true_peak_ceiling_dbtp"],
                 peak_policy=loudness_data["peak_policy"],
+                collect_metrics=loudness_data.get("collect_metrics", True),
             ),
         )
     except (TypeError, ValueError, OverflowError) as exc:

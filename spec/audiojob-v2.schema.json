@@ -126,7 +126,8 @@
           "properties": {
             "target_lufs": { "type": ["number", "null"] },
             "true_peak_ceiling_dbtp": { "type": ["number", "null"] },
-            "peak_policy": { "enum": ["reduce_gain", "error"] }
+            "peak_policy": { "enum": ["reduce_gain", "error"] },
+            "collect_metrics": { "type": "boolean" }
           },
           "additionalProperties": false
         }
