@@ -1,0 +1,24 @@
+rows:
+  - sha: 2fc79a7ccc01cbcd67ba1246c4ac964664187504
+    inspected: true
+    inspected_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.2.1/audit/commit-audit.yaml
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.2.1/entries/entry-0001.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.2.1/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.2.1/entries/entry-0003.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.2.1/release.md
+      - .ledger/releaseledger/work/v0.2.1/audit-decisions.yaml
+      - .ledger/releaseledger/work/v0.2.1/audit.yaml
+      - .ledger/releaseledger/work/v0.2.1/entries.yaml
+      - .ledger/releaseledger/work/v0.2.1/evidence/76763d5.patch
+      - .ledger/releaseledger/work/v0.2.1/evidence/aa03d06.patch
+      - .ledger/releaseledger/work/v0.2.1/evidence/manifest.json
+      - .ledger/releaseledger/work/v0.2.1/range.json
+    observed_behavior: "The commit records Releaseledger release and review artifacts for v0.2.1; it changes no application, package, documentation, or test behavior."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Release bookkeeping only; excluded from the public changelog."
+    stale: false

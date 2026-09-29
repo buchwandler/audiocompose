@@ -3,12 +3,12 @@ schema_version: 2
 object_type: release
 versioning:
   schema_version: 1
-  revision: 11
+  revision: 12
 version: v0.2.0
-status: planned
+status: released
 history_state: curated
 title: AudioCompose v0.2.0
-released_at: null
+released_at: "2026-09-24"
 previous_version: v0.1.1
 cancel_reason: null
 superseded_by: null
