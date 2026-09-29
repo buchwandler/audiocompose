@@ -47,7 +47,7 @@ Timing transformations use generic operation hooks. Static `Tempo` maps offsets 
 
 ## DSP behavior and reproducibility
 
-AudioSig owns band-limited resampling, time-scale modification, static pitch-shift DSP, and the public rate/pitch-envelope DSP API (`audiosig>=0.1.5,<0.2`). AudioCompose owns the numeric operation model, deterministic timeline mapping, and orchestration. Contiguous `Tempo` and `PitchShift` operations are fused only when no other operation intervenes; a `RatePitchEnvelope` is one complete operation and a grouping boundary. Marker and span mapping is based on declared operation semantics, not the DSP implementation.
+AudioSig owns band-limited resampling, time-scale modification, static pitch-shift DSP, and the public rate/pitch-envelope DSP API (`audiosig>=0.1.6,<0.2`). AudioCompose owns the numeric operation model, deterministic timeline mapping, and orchestration. Contiguous `Tempo` and `PitchShift` operations are fused only when no other operation intervenes; a `RatePitchEnvelope` is one complete operation and a grouping boundary. Marker and span mapping is based on declared operation semantics, not the DSP implementation.
 
 AudioCompose represents numeric control trajectories only. The producer decides whether to create an envelope, including eligibility decisions based on voice, segment, language, or engine. AudioCompose does not inspect those semantics or metadata.
 

@@ -87,6 +87,7 @@ jobs:
                   Requirement(value) for value in metadata.get_all("Requires-Dist", [])
               ]
               assert has_minimum(requirements, "numpy", "1.23")
+              assert has_minimum(requirements, "audiosig", "0.1.6")
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY
 
