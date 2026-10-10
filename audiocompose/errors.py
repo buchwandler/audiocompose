@@ -10,5 +10,21 @@ class CompositionError(AudioComposeError):
     """Audio composition failed."""
 
 
+class IntegrationError(AudioComposeError):
+    """An optional producer integration failed."""
+
+
+class HandoffValidationError(IntegrationError):
+    """An upstream handoff or its source artifacts are invalid."""
+
+
+class PausePolicyError(IntegrationError, ValueError):
+    """A pause policy or pause intent is invalid or unresolved."""
+
+
+class MediaResolutionError(IntegrationError):
+    """An external media source cannot be resolved safely."""
+
+
 class CompositionDiagnosticError(CompositionError):
     """A composition diagnostic is fatal under the selected policy."""

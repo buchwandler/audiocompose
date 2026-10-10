@@ -5,11 +5,11 @@
 
 # audiocompose
 
-`audiocompose` declaratively processes and composes existing audio fragments into finalized audio. It is intentionally independent of text-to-speech engines, voices, models, G2P, and semantic speech plans.
+`audiocompose` declaratively processes and composes existing audio fragments into finalized audio. The **AudioCompose core** is independent of text-to-speech engines, voices, models, G2P, and semantic speech plans. Optional integration modules may validate upstream artifacts and materialize them as ordinary producer-neutral `AudioJob` values; the core composer and persisted job schemas remain producer-neutral.
 
 ## AudioJob boundary
 
-A synthesis producer such as PyKokoro or PiperSynth creates an `AudioJob` containing concrete clips, numeric audio operations, explicit silence, anchors, and provenance. `Composer` loads those items, executes operations in order, resamples them to the output rate, assembles the timeline, applies complete-output loudness policy, and writes the final WAV.
+Producers normally create an `AudioJob` containing concrete clips, numeric audio operations, explicit silence, anchors, and provenance. An optional adapter may also materialize a job from a verified upstream handoff. In either case, `Composer` receives only the generic job, executes operations in order, resamples items to the output rate, assembles the timeline, applies complete-output loudness policy, and writes the final WAV.
 
 ```python
 import numpy as np
@@ -79,6 +79,61 @@ audiocompose inspect chapter.audiojob
 audiocompose compose chapter.audiojob chapter.wav
 ```
 
+## Optional VoiceRender materialization
+
+Install the adapter extra when using VoiceRender artifacts; the base AudioCompose install does not require VoiceRender or Readio:
+
+```bash
+pip install 'audiocompose[voicerender]'
+voicerender render chapter.utterplan.toml --voice voice.toml --out-dir render/chapter
+```
+
+Materialize the verified render handoff into a normal, inspectable AudioJob bundle, then use the existing commands:
+
+```bash
+audiocompose materialize chapter.utterplan.toml \
+  --renders render/chapter/render-manifest.json \
+  --pauses pause.toml \
+  --output chapter.audiojob \
+  --sample-rate 24000 \
+  --target-lufs -16 \
+  --true-peak-ceiling-dbtp -1
+
+audiocompose validate chapter.audiojob
+audiocompose inspect chapter.audiojob
+audiocompose compose chapter.audiojob chapter.wav
+```
+
+A pause policy uses the strict `audiocompose.pause-policy.v1` schema and resolves symbolic intents to durations owned by composition:
+
+```toml
+schema = "audiocompose.pause-policy.v1"
+merge = "max"
+
+[default]
+sentence = "280ms"
+clause = "120ms"
+
+[voice.narrator]
+sentence = "320ms"
+```
+
+Exact timed pauses bypass the symbolic table; a boundary combines its left `pause_after` and right `pause_before` with `max`. Missing symbolic durations and malformed policies fail validation. `--take` or `--select` can request a selection only when it exactly matches the manifest selection, and the selected source flow must be contiguous.
+
+Python callers use the same producer-specific boundary and receive a normal `AudioJob`:
+
+```python
+from audiocompose.integrations.voicerender import materialize_voicerender_job
+
+job = materialize_voicerender_job(
+    plan="chapter.utterplan.toml",
+    render_manifest="render/chapter/render-manifest.json",
+    pause_policy="pause.toml",
+)
+```
+
+Speech WAVs come from the verified VoiceRender manifest. External audio stays in source order: plain relative `.wav` paths are resolved safely beneath the UtterPlan directory, while opaque URI schemes require a Python `MediaResolver` supplied to `materialize_voicerender_job()`. The initial AudioJob v2 adapter preserves `alt_text` and `description` as metadata, lowers numeric playback speed and explicit dB gain, and rejects clipping or repetition controls (`clip_begin`, `clip_end`, `repeat_duration`, `repeat_count`) rather than ignoring them. The resulting job uses the regular AudioJob persistence, identity, output-policy, and Composer paths.
+
 ## Debugging and analysis
 
 The CLI also exposes generic, TTS-neutral diagnostics:
@@ -108,7 +163,7 @@ Composition completes in this order: load clips, apply operations, map anchors a
 For producer frame parity, quantize a duration to producer frames before constructing a job: `frames = int(seconds * producer_rate)` and `seconds = frames / producer_rate`. AudioCompose keeps its public rounded seconds-to-samples rule and does not add engine-specific silence types.
 
 `CompositionResult.loudness` exposes typed before/after metrics, requested and applied gain, target and ceiling, and warnings. `CompositionResult.diagnostics` contains generic codes and numeric context for loudness limitations and other composition warnings.
-This checkout contains no PyKokoro or PiperSynth producer source. Producer adaptation and natural-pause calibration remain follow-up integration work. AudioCompose deliberately does not add engine-specific branches or interpret UtterPlan, ONNX, Kokoro, or Piper semantics.
+The core does not add engine-specific branches or interpret upstream semantics. The optional VoiceRender adapter is an explicit boundary module: it validates VoiceRender's public handoff and lowers supported selections, pause policy, and numeric operations into a generic job without changing Composer or AudioJob schemas.
 
 ## Supported operations
 

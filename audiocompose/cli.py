@@ -12,7 +12,8 @@ from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_
 from .composer import Composer
 from .errors import AudioComposeError
 from .job import validate_clip_geometry
-from .model import AudioClip, AudioJob, CompositionResult, Silence
+from .loudness import LoudnessPolicy
+from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
 from .wav import read_wav
 
 
@@ -63,6 +64,23 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("input")
     report.add_argument("-o", "--output", required=True)
     _add_analysis_options(report)
+
+    materialize = subparsers.add_parser(
+        "materialize", help="materialize a verified VoiceRender handoff as an AudioJob bundle"
+    )
+    materialize.add_argument("plan", help="UtterPlan v5 source file")
+    materialize.add_argument("--renders", required=True, help="VoiceRender render-manifest.json")
+    materialize.add_argument("--pauses", required=True, help="AudioCompose pause-policy TOML")
+    materialize.add_argument("--output", required=True, help="output AudioJob bundle directory")
+    materialize.add_argument("--sample-rate", type=int)
+    materialize.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+    materialize.add_argument("--target-lufs", type=float)
+    materialize.add_argument("--true-peak-ceiling-dbtp", type=float)
+    materialize.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    selection = materialize.add_mutually_exclusive_group()
+    selection.add_argument("--take", type=int, help="select the first N source segments")
+    selection.add_argument("--select", help="comma-separated source locators, e.g. f000000.s000")
+    _add_json(materialize)
 
     return parser
 
@@ -225,7 +243,48 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "validate":
+        if args.command == "materialize":
+            from .integrations.voicerender import materialize_voicerender_job
+
+            defaults = OutputPolicy()
+            loudness = LoudnessPolicy(
+                target_lufs=args.target_lufs,
+                true_peak_ceiling_dbtp=(
+                    defaults.loudness.true_peak_ceiling_dbtp
+                    if args.true_peak_ceiling_dbtp is None
+                    else args.true_peak_ceiling_dbtp
+                ),
+                peak_policy=args.peak_policy or defaults.loudness.peak_policy,
+                collect_metrics=defaults.loudness.collect_metrics,
+            )
+            output_policy = OutputPolicy(
+                sample_rate=(
+                    defaults.sample_rate if args.sample_rate is None else args.sample_rate
+                ),
+                clip_policy=args.clip_policy or defaults.clip_policy,
+                loudness=loudness,
+            )
+            requested_selection = args.take if args.take is not None else args.select
+            materialized_job = materialize_voicerender_job(
+                args.plan,
+                args.renders,
+                args.pauses,
+                output_policy=output_policy,
+                selection=requested_selection,
+            )
+            saved_manifest = Path(materialized_job.save(args.output))
+            saved_job = AudioJob.load(str(saved_manifest))
+            result = {
+                "materialized": True,
+                "job_id": saved_job.job_id,
+                "output": str(saved_manifest.parent),
+                "items": len(saved_job.items),
+            }
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"wrote AudioJob bundle: {saved_manifest.parent} ({saved_job.job_id})")
+        elif args.command == "validate":
             validated_job = AudioJob.load(args.manifest)
             result = {
                 "valid": True,
