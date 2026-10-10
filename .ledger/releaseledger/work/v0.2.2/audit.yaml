@@ -1,0 +1,37 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.2.2
+git_base_ref: v0.2.1
+git_base_sha: e5863b120f6a8543b97dab449e24e379d0da08ba
+git_head_ref: HEAD
+git_head_sha: 94c6249e91e2f4b373128982af7e1b6cd6d75319
+git_range: e5863b120f6a8543b97dab449e24e379d0da08ba..94c6249e91e2f4b373128982af7e1b6cd6d75319
+commit_count: 1
+rows:
+  - sha: 94c6249e91e2f4b373128982af7e1b6cd6d75319
+    source_ref: git:94c6249e91e2f4b373128982af7e1b6cd6d75319
+    short_sha: 94c6249
+    changed_paths:
+      - README.md
+      - audiocompose/cli.py
+      - audiocompose/errors.py
+      - audiocompose/integrations/__init__.py
+      - audiocompose/integrations/media.py
+      - audiocompose/integrations/voicerender.py
+      - docs/architecture.md
+      - pyproject.toml
+      - tests/test_voicerender_materialization.py
+    stats:
+      files_changed: 9
+      insertions: 1828
+      deletions: 21
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: support utterplan"

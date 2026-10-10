@@ -1,0 +1,20 @@
+rows:
+  - sha: 94c6249e91e2f4b373128982af7e1b6cd6d75319
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/cli.py
+      - audiocompose/errors.py
+      - audiocompose/integrations/__init__.py
+      - audiocompose/integrations/media.py
+      - audiocompose/integrations/voicerender.py
+      - docs/architecture.md
+      - pyproject.toml
+      - tests/test_voicerender_materialization.py
+    observed_behavior: Added an optional VoiceRender adapter and materialize command that validate UtterPlan v5 handoffs, render manifests, selections, pause policies, and source media before producing a generic AudioJob; numeric speed and gain controls are lowered, unsupported clipping and repetition controls fail closed, and the base Composer remains producer-neutral.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: entry-0001
+    notes: ""
+    stale: false

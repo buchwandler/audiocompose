@@ -1,0 +1,1986 @@
+ README.md                                 |  61 ++-
+ audiocompose/cli.py                       |  63 ++-
+ audiocompose/errors.py                    |  16 +
+ audiocompose/integrations/__init__.py     |   5 +
+ audiocompose/integrations/media.py        | 195 +++++++
+ audiocompose/integrations/voicerender.py  | 873 ++++++++++++++++++++++++++++++
+ docs/architecture.md                      |  45 +-
+ pyproject.toml                            |   1 +
+ tests/test_voicerender_materialization.py | 590 ++++++++++++++++++++
+ 9 files changed, 1828 insertions(+), 21 deletions(-)
+
+diff --git a/README.md b/README.md
+index 3345095..059b356 100644
+--- a/README.md
++++ b/README.md
+@@ -5,11 +5,11 @@
+
+ # audiocompose
+
+-`audiocompose` declaratively processes and composes existing audio fragments into finalized audio. It is intentionally independent of text-to-speech engines, voices, models, G2P, and semantic speech plans.
++`audiocompose` declaratively processes and composes existing audio fragments into finalized audio. The **AudioCompose core** is independent of text-to-speech engines, voices, models, G2P, and semantic speech plans. Optional integration modules may validate upstream artifacts and materialize them as ordinary producer-neutral `AudioJob` values; the core composer and persisted job schemas remain producer-neutral.
+
+ ## AudioJob boundary
+
+-A synthesis producer such as PyKokoro or PiperSynth creates an `AudioJob` containing concrete clips, numeric audio operations, explicit silence, anchors, and provenance. `Composer` loads those items, executes operations in order, resamples them to the output rate, assembles the timeline, applies complete-output loudness policy, and writes the final WAV.
++Producers normally create an `AudioJob` containing concrete clips, numeric audio operations, explicit silence, anchors, and provenance. An optional adapter may also materialize a job from a verified upstream handoff. In either case, `Composer` receives only the generic job, executes operations in order, resamples items to the output rate, assembles the timeline, applies complete-output loudness policy, and writes the final WAV.
+
+ ```python
+ import numpy as np
+@@ -79,6 +79,61 @@ audiocompose inspect chapter.audiojob
+ audiocompose compose chapter.audiojob chapter.wav
+ ```
+
++## Optional VoiceRender materialization
++
++Install the adapter extra when using VoiceRender artifacts; the base AudioCompose install does not require VoiceRender or Readio:
++
++```bash
++pip install 'audiocompose[voicerender]'
++voicerender render chapter.utterplan.toml --voice voice.toml --out-dir render/chapter
++```
++
++Materialize the verified render handoff into a normal, inspectable AudioJob bundle, then use the existing commands:
++
++```bash
++audiocompose materialize chapter.utterplan.toml \
++  --renders render/chapter/render-manifest.json \
++  --pauses pause.toml \
++  --output chapter.audiojob \
++  --sample-rate 24000 \
++  --target-lufs -16 \
++  --true-peak-ceiling-dbtp -1
++
++audiocompose validate chapter.audiojob
++audiocompose inspect chapter.audiojob
++audiocompose compose chapter.audiojob chapter.wav
++```
++
++A pause policy uses the strict `audiocompose.pause-policy.v1` schema and resolves symbolic intents to durations owned by composition:
++
++```toml
++schema = "audiocompose.pause-policy.v1"
++merge = "max"
++
++[default]
++sentence = "280ms"
++clause = "120ms"
++
++[voice.narrator]
++sentence = "320ms"
++```
++
++Exact timed pauses bypass the symbolic table; a boundary combines its left `pause_after` and right `pause_before` with `max`. Missing symbolic durations and malformed policies fail validation. `--take` or `--select` can request a selection only when it exactly matches the manifest selection, and the selected source flow must be contiguous.
++
++Python callers use the same producer-specific boundary and receive a normal `AudioJob`:
++
++```python
++from audiocompose.integrations.voicerender import materialize_voicerender_job
++
++job = materialize_voicerender_job(
++    plan="chapter.utterplan.toml",
++    render_manifest="render/chapter/render-manifest.json",
++    pause_policy="pause.toml",
++)
++```
++
++Speech WAVs come from the verified VoiceRender manifest. External audio stays in source order: plain relative `.wav` paths are resolved safely beneath the UtterPlan directory, while opaque URI schemes require a Python `MediaResolver` supplied to `materialize_voicerender_job()`. The initial AudioJob v2 adapter preserves `alt_text` and `description` as metadata, lowers numeric playback speed and explicit dB gain, and rejects clipping or repetition controls (`clip_begin`, `clip_end`, `repeat_duration`, `repeat_count`) rather than ignoring them. The resulting job uses the regular AudioJob persistence, identity, output-policy, and Composer paths.
++
+ ## Debugging and analysis
+
+ The CLI also exposes generic, TTS-neutral diagnostics:
+@@ -108,7 +163,7 @@ Composition completes in this order: load clips, apply operations, map anchors a
+ For producer frame parity, quantize a duration to producer frames before constructing a job: `frames = int(seconds * producer_rate)` and `seconds = frames / producer_rate`. AudioCompose keeps its public rounded seconds-to-samples rule and does not add engine-specific silence types.
+
+ `CompositionResult.loudness` exposes typed before/after metrics, requested and applied gain, target and ceiling, and warnings. `CompositionResult.diagnostics` contains generic codes and numeric context for loudness limitations and other composition warnings.
+-This checkout contains no PyKokoro or PiperSynth producer source. Producer adaptation and natural-pause calibration remain follow-up integration work. AudioCompose deliberately does not add engine-specific branches or interpret UtterPlan, ONNX, Kokoro, or Piper semantics.
++The core does not add engine-specific branches or interpret upstream semantics. The optional VoiceRender adapter is an explicit boundary module: it validates VoiceRender's public handoff and lowers supported selections, pause policy, and numeric operations into a generic job without changing Composer or AudioJob schemas.
+
+ ## Supported operations
+
+diff --git a/audiocompose/cli.py b/audiocompose/cli.py
+index 622ad87..dbd7923 100644
+--- a/audiocompose/cli.py
++++ b/audiocompose/cli.py
+@@ -12,7 +12,8 @@ from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_
+ from .composer import Composer
+ from .errors import AudioComposeError
+ from .job import validate_clip_geometry
+-from .model import AudioClip, AudioJob, CompositionResult, Silence
++from .loudness import LoudnessPolicy
++from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
+ from .wav import read_wav
+
+
+@@ -64,6 +65,23 @@ def _parser() -> argparse.ArgumentParser:
+     report.add_argument("-o", "--output", required=True)
+     _add_analysis_options(report)
+
++    materialize = subparsers.add_parser(
++        "materialize", help="materialize a verified VoiceRender handoff as an AudioJob bundle"
++    )
++    materialize.add_argument("plan", help="UtterPlan v5 source file")
++    materialize.add_argument("--renders", required=True, help="VoiceRender render-manifest.json")
++    materialize.add_argument("--pauses", required=True, help="AudioCompose pause-policy TOML")
++    materialize.add_argument("--output", required=True, help="output AudioJob bundle directory")
++    materialize.add_argument("--sample-rate", type=int)
++    materialize.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
++    materialize.add_argument("--target-lufs", type=float)
++    materialize.add_argument("--true-peak-ceiling-dbtp", type=float)
++    materialize.add_argument("--peak-policy", choices=("reduce_gain", "error"))
++    selection = materialize.add_mutually_exclusive_group()
++    selection.add_argument("--take", type=int, help="select the first N source segments")
++    selection.add_argument("--select", help="comma-separated source locators, e.g. f000000.s000")
++    _add_json(materialize)
++
+     return parser
+
+
+@@ -225,7 +243,48 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
+ def main(argv: list[str] | None = None) -> int:
+     args = _parser().parse_args(argv)
+     try:
+-        if args.command == "validate":
++        if args.command == "materialize":
++            from .integrations.voicerender import materialize_voicerender_job
++
++            defaults = OutputPolicy()
++            loudness = LoudnessPolicy(
++                target_lufs=args.target_lufs,
++                true_peak_ceiling_dbtp=(
++                    defaults.loudness.true_peak_ceiling_dbtp
++                    if args.true_peak_ceiling_dbtp is None
++                    else args.true_peak_ceiling_dbtp
++                ),
++                peak_policy=args.peak_policy or defaults.loudness.peak_policy,
++                collect_metrics=defaults.loudness.collect_metrics,
++            )
++            output_policy = OutputPolicy(
++                sample_rate=(
++                    defaults.sample_rate if args.sample_rate is None else args.sample_rate
++                ),
++                clip_policy=args.clip_policy or defaults.clip_policy,
++                loudness=loudness,
++            )
++            requested_selection = args.take if args.take is not None else args.select
++            materialized_job = materialize_voicerender_job(
++                args.plan,
++                args.renders,
++                args.pauses,
++                output_policy=output_policy,
++                selection=requested_selection,
++            )
++            saved_manifest = Path(materialized_job.save(args.output))
++            saved_job = AudioJob.load(str(saved_manifest))
++            result = {
++                "materialized": True,
++                "job_id": saved_job.job_id,
++                "output": str(saved_manifest.parent),
++                "items": len(saved_job.items),
++            }
++            if args.json:
++                print(json.dumps(result, indent=2, sort_keys=True))
++            else:
++                print(f"wrote AudioJob bundle: {saved_manifest.parent} ({saved_job.job_id})")
++        elif args.command == "validate":
+             validated_job = AudioJob.load(args.manifest)
+             result = {
+                 "valid": True,
+diff --git a/audiocompose/errors.py b/audiocompose/errors.py
+index 3089684..4d11a68 100644
+--- a/audiocompose/errors.py
++++ b/audiocompose/errors.py
+@@ -10,5 +10,21 @@ class CompositionError(AudioComposeError):
+     """Audio composition failed."""
+
+
++class IntegrationError(AudioComposeError):
++    """An optional producer integration failed."""
++
++
++class HandoffValidationError(IntegrationError):
++    """An upstream handoff or its source artifacts are invalid."""
++
++
++class PausePolicyError(IntegrationError, ValueError):
++    """A pause policy or pause intent is invalid or unresolved."""
++
++
++class MediaResolutionError(IntegrationError):
++    """An external media source cannot be resolved safely."""
++
++
+ class CompositionDiagnosticError(CompositionError):
+     """A composition diagnostic is fatal under the selected policy."""
+diff --git a/audiocompose/integrations/__init__.py b/audiocompose/integrations/__init__.py
+new file mode 100644
+index 0000000..5d1db62
+--- /dev/null
++++ b/audiocompose/integrations/__init__.py
+@@ -0,0 +1,5 @@
++"""Optional adapters that materialize producer artifacts as AudioJobs.
++
++Import producer-specific adapters explicitly; the package root and core models
++remain independent of their optional dependencies.
++"""
+diff --git a/audiocompose/integrations/media.py b/audiocompose/integrations/media.py
+new file mode 100644
+index 0000000..d15d7db
+--- /dev/null
++++ b/audiocompose/integrations/media.py
+@@ -0,0 +1,195 @@
++"""Media-resolution protocol and safe local-WAV resolver for integrations."""
++
++from __future__ import annotations
++
++import math
++import re
++from dataclasses import dataclass, field
++from pathlib import Path, PurePath
++from typing import Any, Protocol
++from urllib.parse import urlsplit
++
++from ..errors import MediaResolutionError
++from ..operations import AudioOperation, Gain, Tempo
++from ..sources import AudioBufferSource, AudioFileSource, AudioSource
++from ..wav import read_wav, sha256_file, wav_info
++
++_NUMERIC = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
++_DECIBELS = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))dB$", re.IGNORECASE)
++
++
++@dataclass(frozen=True, slots=True)
++class MediaRequest:
++    """One opaque UtterPlan external-audio request passed to a resolver."""
++
++    src: str
++    plan_path: Path
++    source_locator: str
++    clip_begin: str | None = None
++    clip_end: str | None = None
++    speed: str | float | int | None = None
++    repeat_duration: str | None = None
++    repeat_count: float | None = None
++    sound_level: str | None = None
++    description: str | None = None
++    alt_text: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class ResolvedMedia:
++    """Generic AudioCompose source, operations, and opaque resolver metadata."""
++
++    source: AudioSource
++    operations: tuple[AudioOperation, ...] = ()
++    metadata: dict[str, Any] = field(default_factory=dict)
++    identity: dict[str, Any] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.source, (AudioBufferSource, AudioFileSource)):
++            raise MediaResolutionError("ResolvedMedia.source must be an AudioCompose audio source")
++        try:
++            operations = tuple(self.operations)
++        except TypeError as exc:
++            raise MediaResolutionError("ResolvedMedia.operations must be a sequence") from exc
++        if any(not isinstance(item, AudioOperation) for item in operations):
++            raise MediaResolutionError("ResolvedMedia.operations contains an unsupported operation")
++        if not isinstance(self.metadata, dict) or not isinstance(self.identity, dict):
++            raise MediaResolutionError("ResolvedMedia metadata and identity must be JSON objects")
++        object.__setattr__(self, "operations", operations)
++        object.__setattr__(self, "metadata", dict(self.metadata))
++        object.__setattr__(self, "identity", dict(self.identity))
++
++
++class MediaResolver(Protocol):
++    """Resolve an opaque producer media request into generic audio values."""
++
++    def resolve(self, request: MediaRequest) -> ResolvedMedia:
++        """Resolve media or raise ``MediaResolutionError`` with a useful message."""
++        ...
++
++
++class LocalWavResolver:
++    """Resolve plain relative WAV paths beneath the UtterPlan directory."""
++
++    def resolve(self, request: MediaRequest) -> ResolvedMedia:
++        src = request.src
++        if not isinstance(src, str) or not src.strip():
++            raise MediaResolutionError(f"{request.source_locator}: audio.src must be non-empty")
++        parsed = urlsplit(src)
++        if parsed.scheme:
++            raise MediaResolutionError(
++                f"{request.source_locator}: no resolver for URI scheme {parsed.scheme!r} in {src!r}"
++            )
++        if "\\" in src or "\x00" in src:
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.src is not a safe relative path"
++            )
++        relative = PurePath(src)
++        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.src must remain beneath the UtterPlan directory"
++            )
++        if Path(src).suffix.lower() != ".wav":
++            raise MediaResolutionError(
++                f"{request.source_locator}: local media supports WAV files only, got {src!r}"
++            )
++        plan_path = Path(request.plan_path)
++        if plan_path.is_symlink() or not plan_path.is_file():
++            raise MediaResolutionError(
++                f"{request.source_locator}: UtterPlan file is not a regular file"
++            )
++        root = plan_path.parent.resolve(strict=True)
++        candidate = root
++        try:
++            for part in relative.parts:
++                candidate = candidate / part
++                candidate.lstat()
++                if candidate.is_symlink():
++                    raise MediaResolutionError(
++                        f"{request.source_locator}: local media path contains a symlink"
++                    )
++            path = candidate.resolve(strict=True)
++        except OSError as exc:
++            raise MediaResolutionError(
++                f"{request.source_locator}: cannot resolve local WAV {src!r}: {exc}"
++            ) from exc
++        if not path.is_relative_to(root) or not path.is_file():
++            raise MediaResolutionError(
++                f"{request.source_locator}: local media is not a regular file beneath the plan directory"
++            )
++        if request.clip_begin is not None or request.clip_end is not None:
++            raise MediaResolutionError(
++                f"{request.source_locator}: clip_begin/clip_end are unsupported by AudioJob v2"
++            )
++        if request.repeat_duration is not None or request.repeat_count is not None:
++            raise MediaResolutionError(
++                f"{request.source_locator}: repeat_duration/repeat_count are unsupported by AudioJob v2"
++            )
++        try:
++            audio, sample_rate = read_wav(path, expected_channels=1)
++            info = wav_info(path)
++            digest = sha256_file(path)
++        except Exception as exc:
++            raise MediaResolutionError(
++                f"{request.source_locator}: invalid local WAV {path}: {exc}"
++            ) from exc
++        if not audio.size or info.channels != 1:
++            raise MediaResolutionError(
++                f"{request.source_locator}: local WAV must be non-empty and mono"
++            )
++        if info.frames != audio.size or info.sample_rate != sample_rate:
++            raise MediaResolutionError(
++                f"{request.source_locator}: local WAV geometry is inconsistent"
++            )
++        return ResolvedMedia(
++            source=AudioFileSource(
++                path=path,
++                expected_sha256=digest,
++                sample_rate=sample_rate,
++                channels=1,
++                frames=int(audio.size),
++            )
++        )
++
++
++def numeric_media_operations(request: MediaRequest) -> tuple[AudioOperation, ...]:
++    """Lower only unambiguous numeric speed/dB controls to native operations."""
++    operations: list[AudioOperation] = []
++    if request.speed is not None:
++        if isinstance(request.speed, bool) or not isinstance(request.speed, (str, int, float)):
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.speed must be a numeric playback factor"
++            )
++        if isinstance(request.speed, str):
++            if _NUMERIC.fullmatch(request.speed) is None:
++                raise MediaResolutionError(
++                    f"{request.source_locator}: audio.speed must be a numeric playback factor"
++                )
++            speed = float(request.speed)
++        else:
++            speed = float(request.speed)
++        if not math.isfinite(speed) or speed <= 0:
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.speed must be finite and > 0"
++            )
++        operations.append(Tempo(speed))
++    if request.sound_level is not None:
++        if not isinstance(request.sound_level, str):
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.sound_level must be an explicit dB value"
++            )
++        match = _DECIBELS.fullmatch(request.sound_level)
++        if match is None:
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.sound_level must use an explicit numeric dB value"
++            )
++        gain = float(match.group(1))
++        if not math.isfinite(gain):
++            raise MediaResolutionError(
++                f"{request.source_locator}: audio.sound_level must be finite"
++            )
++        operations.append(Gain(gain))
++    return tuple(operations)
++
++
++__all__ = ["MediaRequest", "ResolvedMedia", "MediaResolver", "LocalWavResolver"]
+diff --git a/audiocompose/integrations/voicerender.py b/audiocompose/integrations/voicerender.py
+new file mode 100644
+index 0000000..725c3db
+--- /dev/null
++++ b/audiocompose/integrations/voicerender.py
+@@ -0,0 +1,873 @@
++"""Materialize verified UtterPlan v5 / VoiceRender artifacts as AudioJobs.
++
++This adapter is optional and imports VoiceRender only when invoked. The
++AudioCompose core models and Composer do not depend on producer packages.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import importlib
++import json
++import math
++import re
++from collections.abc import Iterable, Mapping
++from dataclasses import dataclass
++from pathlib import Path, PurePosixPath
++from typing import Any
++
++from .._version import __version__
++from ..alignment import AudioAnchor, AudioSpan
++from ..errors import (
++    HandoffValidationError,
++    IntegrationError,
++    MediaResolutionError,
++    PausePolicyError,
++)
++from ..model import AudioClip, AudioJob, OutputPolicy, Silence
++from ..operations import (
++    AutomationPoint,
++    FadeIn,
++    FadeOut,
++    Gain,
++    Operation,
++    PitchShift,
++    RatePitchEnvelope,
++    Tempo,
++)
++from ..sources import AudioFileSource
++from .media import (
++    LocalWavResolver,
++    MediaRequest,
++    MediaResolver,
++    ResolvedMedia,
++    numeric_media_operations,
++)
++
++PAUSE_POLICY_SCHEMA = "audiocompose.pause-policy.v1"
++PAUSE_CLASSES = frozenset(
++    {
++        "none",
++        "x-weak",
++        "weak",
++        "medium",
++        "strong",
++        "x-strong",
++        "clause",
++        "sentence",
++        "paragraph",
++        "parenthetical",
++        "voice_change",
++    }
++)
++_DURATION = re.compile(r"^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(ms|s)$")
++_SHA256 = re.compile(r"^[0-9a-f]{64}$")
++
++
++def _canonical_json(value: Any) -> bytes:
++    return json.dumps(
++        value,
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++        allow_nan=False,
++    ).encode("utf-8")
++
++
++def _policy_id(document: Mapping[str, Any]) -> str:
++    return "sha256:" + hashlib.sha256(_canonical_json(document)).hexdigest()
++
++
++def _duration(value: Any, where: str) -> float:
++    if not isinstance(value, str):
++        raise PausePolicyError(f"{where} must be a non-negative duration such as '320ms'")
++    match = _DURATION.fullmatch(value)
++    if match is None:
++        raise PausePolicyError(f"{where} has invalid duration {value!r}; use ms or s")
++    amount = float(value[: -len(match.group(1))])
++    seconds = amount / 1000.0 if match.group(1) == "ms" else amount
++    if not math.isfinite(seconds) or seconds < 0:
++        raise PausePolicyError(f"{where} must be a finite duration >= 0")
++    return seconds
++
++
++def _parse_pause_table(value: Any, where: str) -> dict[str, float]:
++    if not isinstance(value, Mapping):
++        raise PausePolicyError(f"{where} must be a TOML table or mapping")
++    unknown = set(value).difference(PAUSE_CLASSES)
++    if unknown:
++        raise PausePolicyError(f"{where} has unknown pause class(es): {sorted(unknown)}")
++    parsed = {name: _duration(item, f"{where}.{name}") for name, item in value.items()}
++    if parsed.get("none", 0.0) != 0:
++        raise PausePolicyError(f"{where}.none must resolve to zero")
++    return parsed
++
++
++def _validate_resolved_table(value: Mapping[str, Any], where: str) -> None:
++    if not isinstance(value, Mapping):
++        raise PausePolicyError(f"{where} must be a pause-class mapping")
++    unknown = set(value).difference(PAUSE_CLASSES)
++    if unknown:
++        raise PausePolicyError(f"{where} has unknown pause class(es): {sorted(unknown)}")
++    for name, seconds in value.items():
++        if (
++            isinstance(seconds, bool)
++            or not isinstance(seconds, (int, float))
++            or not math.isfinite(seconds)
++            or seconds < 0
++        ):
++            raise PausePolicyError(f"{where}.{name} must be finite seconds >= 0")
++    if value.get("none", 0) != 0:
++        raise PausePolicyError(f"{where}.none must resolve to zero")
++
++
++def _normalized_policy(
++    default: Mapping[str, float], voices: Mapping[str, Mapping[str, float]]
++) -> dict[str, Any]:
++    return {
++        "schema": PAUSE_POLICY_SCHEMA,
++        "merge": "max",
++        "default": dict(sorted(default.items())),
++        "voice": {role: dict(sorted(table.items())) for role, table in sorted(voices.items())},
++    }
++
++
++@dataclass(frozen=True, slots=True)
++class PausePolicy:
++    """Strict symbolic-to-numeric pause policy owned by AudioCompose."""
++
++    default: Mapping[str, float]
++    voices: Mapping[str, Mapping[str, float]]
++    policy_id: str
++    merge: str = "max"
++
++    def __post_init__(self) -> None:
++        if self.merge != "max":
++            raise PausePolicyError("PausePolicy merge must be 'max'")
++        if not isinstance(self.default, Mapping) or not isinstance(self.voices, Mapping):
++            raise PausePolicyError("PausePolicy defaults and voice overrides must be mappings")
++        if (
++            not isinstance(self.policy_id, str)
++            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.policy_id) is None
++        ):
++            raise PausePolicyError("PausePolicy policy_id must be a canonical SHA-256 identity")
++        _validate_resolved_table(self.default, "default")
++        for voice, values in self.voices.items():
++            if not isinstance(voice, str) or not voice.strip():
++                raise PausePolicyError("voice override names must be non-empty strings")
++            _validate_resolved_table(values, f"voice.{voice}")
++
++    @classmethod
++    def from_mapping(cls, document: Mapping[str, Any]) -> PausePolicy:
++        if not isinstance(document, Mapping):
++            raise PausePolicyError("Pause policy must be a mapping")
++        unknown = set(document).difference({"schema", "merge", "default", "voice"})
++        if unknown:
++            raise PausePolicyError(f"Pause policy has unknown root field(s): {sorted(unknown)}")
++        if document.get("schema") != PAUSE_POLICY_SCHEMA:
++            raise PausePolicyError(f"Expected pause policy schema {PAUSE_POLICY_SCHEMA!r}")
++        if document.get("merge") != "max":
++            raise PausePolicyError("Pause policy merge must be 'max'")
++        default = _parse_pause_table(document.get("default"), "default")
++        raw_voices = document.get("voice", {})
++        if not isinstance(raw_voices, Mapping):
++            raise PausePolicyError("voice must be a table of logical-voice overrides")
++        voices: dict[str, dict[str, float]] = {}
++        for role, table in raw_voices.items():
++            if not isinstance(role, str) or not role.strip():
++                raise PausePolicyError("voice override names must be non-empty strings")
++            voices[role] = _parse_pause_table(table, f"voice.{role}")
++        normalized = _normalized_policy(default, voices)
++        return cls(default, voices, _policy_id(normalized))
++
++    @classmethod
++    def load(cls, path: str | Path) -> PausePolicy:
++        location = Path(path).expanduser()
++        if location.is_symlink():
++            raise PausePolicyError(f"Pause policy must not be a symlink: {location}")
++        try:
++            try:
++                tomllib = importlib.import_module("tomllib")
++            except ImportError:  # Python 3.10; supplied by the optional VoiceRender extra.
++                tomllib = importlib.import_module("tomli")
++            document = tomllib.loads(location.read_text(encoding="utf-8"))
++        except (ImportError, OSError, UnicodeError, ValueError) as exc:
++            raise PausePolicyError(f"Cannot read pause policy {location}: {exc}") from exc
++        return cls.from_mapping(document)
++
++    def resolve(self, intent: Any, *, voice: str, where: str) -> float:
++        if intent is None:
++            return 0.0
++        if isinstance(intent, str):
++            if intent not in PAUSE_CLASSES:
++                raise PausePolicyError(f"{where}: unknown symbolic pause {intent!r}")
++            if intent == "none":
++                return 0.0
++            value = self.voices.get(voice, {}).get(intent, self.default.get(intent))
++            if value is None:
++                raise PausePolicyError(
++                    f"{where}: no duration configured for pause {intent!r} "
++                    f"(logical voice {voice!r})"
++                )
++            return float(value)
++        if isinstance(intent, Mapping):
++            if set(intent) != {"type", "time"} or intent.get("type") != "timed":
++                raise PausePolicyError(f"{where}: timed pause must contain exactly type and time")
++            return _duration(intent["time"], f"{where}.time")
++        raise PausePolicyError(f"{where}: invalid pause intent {intent!r}")
++
++
++def load_pause_policy(value: PausePolicy | str | Path | Mapping[str, Any]) -> PausePolicy:
++    if isinstance(value, PausePolicy):
++        return value
++    if isinstance(value, (str, Path)):
++        return PausePolicy.load(value)
++    if isinstance(value, Mapping):
++        return PausePolicy.from_mapping(value)
++    raise PausePolicyError("pause_policy must be a policy path, mapping, or PausePolicy")
++
++
++def _require_voicerender() -> Any:
++    try:
++        voicerender = importlib.import_module("voicerender")
++    except ImportError as exc:  # pragma: no cover - depends on optional installation.
++        raise IntegrationError(
++            "VoiceRender materialization requires the optional dependency; "
++            "install audiocompose[voicerender]"
++        ) from exc
++    required = (
++        "load_source_plan",
++        "verify_render_manifest",
++        "validate_manifest_source",
++        "select_segments",
++        "RenderSelection",
++        "UtterPlanV5",
++    )
++    missing = [name for name in required if not hasattr(voicerender, name)]
++    if missing:
++        raise IntegrationError(
++            "Installed VoiceRender does not provide the required public handoff API "
++            f"({', '.join(missing)}); install a compatible voicerender>=0.1,<0.2"
++        )
++    return voicerender
++
++
++def _manifest_selection(plan: Any, selection_data: Mapping[str, Any], vr: Any) -> Any:
++    kind = selection_data.get("kind")
++    if kind == "all":
++        chosen = vr.select_segments(plan)
++    elif kind == "take":
++        chosen = vr.select_segments(plan, take=selection_data.get("take"))
++    elif kind == "locators":
++        chosen = vr.select_segments(plan, select=selection_data.get("locators"))
++    else:
++        raise HandoffValidationError(f"Unsupported manifest selection kind: {kind!r}")
++    if chosen.as_dict() != dict(selection_data):
++        raise HandoffValidationError("Render manifest selection does not match the source plan")
++    return chosen
++
++
++def _requested_selection(plan: Any, requested: Any, authoritative: Any, vr: Any) -> Any:
++    if requested is None:
++        return authoritative
++    if isinstance(requested, vr.RenderSelection):
++        locators = [segment.source.locator for segment in requested.segments]
++        chosen = vr.select_segments(plan, select=locators)
++        if chosen.as_dict() != requested.as_dict():
++            raise HandoffValidationError("Explicit RenderSelection is not canonical for this plan")
++    elif type(requested) is int:
++        chosen = vr.select_segments(plan, take=requested)
++    elif isinstance(requested, str):
++        chosen = vr.select_segments(plan, select=requested)
++    elif isinstance(requested, Iterable) and not isinstance(requested, Mapping):
++        chosen = vr.select_segments(plan, select=requested)
++    else:
++        raise HandoffValidationError(
++            "selection must be a source-locator selection, take count, or RenderSelection"
++        )
++    if chosen.as_dict() != authoritative.as_dict():
++        raise HandoffValidationError(
++            "Explicit selection differs from the render manifest selection"
++        )
++    return chosen
++
++
++def _safe_manifest_artifact(manifest_path: Path, relative_path: Any) -> Path:
++    if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
++        raise HandoffValidationError(
++            "Render manifest audio path must be a safe relative POSIX path"
++        )
++    pure = PurePosixPath(relative_path)
++    if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
++        raise HandoffValidationError("Render manifest audio path must not escape its bundle")
++    if manifest_path.is_symlink():
++        raise HandoffValidationError("Render manifest must not be a symlink")
++    root = manifest_path.parent.resolve(strict=True)
++    candidate = root
++    try:
++        for part in pure.parts:
++            candidate = candidate / part
++            candidate.lstat()
++            if candidate.is_symlink():
++                raise HandoffValidationError(
++                    f"Render artifact path contains a symlink: {relative_path}"
++                )
++        resolved = candidate.resolve(strict=True)
++    except OSError as exc:
++        raise HandoffValidationError(
++            f"Render artifact is unavailable: {relative_path}: {exc}"
++        ) from exc
++    if not resolved.is_relative_to(root) or not resolved.is_file():
++        raise HandoffValidationError(
++            f"Render artifact is not a regular file in its bundle: {relative_path}"
++        )
++    return resolved
++
++
++def _validate_source_operation(operation: Mapping[str, Any], segment: Any) -> str:
++    source = operation.get("source")
++    if not isinstance(source, Mapping):
++        raise HandoffValidationError("Render source operation is missing its source record")
++    expected = {
++        "locator": segment.source.locator,
++        "flow_index": segment.source.flow_index,
++        "segment_index": segment.source.segment_index,
++        "flow_hash": segment.source.flow_hash,
++        "semantic_segment_hash": segment.semantic_segment_hash,
++    }
++    for field, value in expected.items():
++        if source.get(field) != value:
++            raise HandoffValidationError(
++                f"{segment.source.locator}: render source operation {field} does not match the plan"
++            )
++    kind = operation.get("kind")
++    if kind not in {"speech", "external_audio"}:
++        raise HandoffValidationError(
++            f"{segment.source.locator}: unsupported source operation kind {kind!r}"
++        )
++    return kind
++
++
++def _operation_from_record(record: Mapping[str, Any], *, locator: str) -> Operation:
++    if set(record) != {"name", "value"}:
++        raise HandoffValidationError(f"{locator}: composition directive has an invalid shape")
++    name, value = record["name"], record["value"]
++    if not isinstance(name, str) or not isinstance(value, Mapping):
++        raise HandoffValidationError(
++            f"{locator}: composition directive must be a named numeric object"
++        )
++    constructors: dict[str, tuple[str, type[Any]]] = {
++        "tempo": ("factor", Tempo),
++        "pitch_shift": ("semitones", PitchShift),
++        "gain": ("db", Gain),
++        "fade_in": ("seconds", FadeIn),
++        "fade_out": ("seconds", FadeOut),
++    }
++    if name in constructors:
++        field, constructor = constructors[name]
++        if set(value) != {field}:
++            raise HandoffValidationError(f"{locator}: malformed numeric {name!r} directive")
++        try:
++            return constructor(value[field])
++        except (TypeError, ValueError) as exc:
++            raise HandoffValidationError(
++                f"{locator}: invalid numeric {name!r} directive: {exc}"
++            ) from exc
++    if name == "rate_pitch_envelope":
++        if set(value) != {"rate", "pitch", "interpolation", "time_base"}:
++            raise HandoffValidationError(f"{locator}: malformed rate_pitch_envelope directive")
++        if not isinstance(value["rate"], list) or not isinstance(value["pitch"], list):
++            raise HandoffValidationError(f"{locator}: envelope curves must be arrays")
++        try:
++            rate = tuple(
++                AutomationPoint(point["seconds"], point["factor"])
++                for point in value["rate"]
++                if isinstance(point, Mapping) and set(point) == {"seconds", "factor"}
++            )
++            pitch = tuple(
++                AutomationPoint(point["seconds"], point["semitones"])
++                for point in value["pitch"]
++                if isinstance(point, Mapping) and set(point) == {"seconds", "semitones"}
++            )
++            if len(rate) != len(value["rate"]) or len(pitch) != len(value["pitch"]):
++                raise ValueError("envelope point fields are invalid")
++            return RatePitchEnvelope(
++                rate=rate,
++                pitch_semitones=pitch,
++                interpolation=value["interpolation"],
++                time_base=value["time_base"],
++            )
++        except (KeyError, TypeError, ValueError) as exc:
++            raise HandoffValidationError(f"{locator}: invalid numeric envelope: {exc}") from exc
++    raise HandoffValidationError(
++        f"{locator}: unknown composition directive {name!r}; refusing to drop semantics"
++    )
++
++
++def _lowering_operations(segment: Any, entry: Mapping[str, Any]) -> tuple[Operation, ...]:
++    lowering = entry.get("semantic_lowering")
++    if not isinstance(lowering, Mapping):
++        raise HandoffValidationError(f"{segment.source.locator}: semantic_lowering is missing")
++    native = lowering.get("native_directives")
++    composition = lowering.get("composition_directives")
++    if not isinstance(native, list) or not isinstance(composition, list):
++        raise HandoffValidationError(
++            f"{segment.source.locator}: semantic lowering lists are invalid"
++        )
++    native_names: list[str] = []
++    for item in native:
++        if not isinstance(item, Mapping) or set(item) != {"name", "value"}:
++            raise HandoffValidationError(
++                f"{segment.source.locator}: invalid native directive record"
++            )
++        name = item["name"]
++        if not isinstance(name, str) or name in native_names:
++            raise HandoffValidationError(
++                f"{segment.source.locator}: duplicate/invalid native directive"
++            )
++        native_names.append(name)
++        if item["value"] != segment.directives.get(name):
++            raise HandoffValidationError(
++                f"{segment.source.locator}: native directive {name!r} differs from plan"
++            )
++    composition_names: list[str] = []
++    for item in composition:
++        if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
++            raise HandoffValidationError(
++                f"{segment.source.locator}: invalid composition directive record"
++            )
++        if item["name"] in composition_names:
++            raise HandoffValidationError(
++                f"{segment.source.locator}: duplicate composition directive"
++            )
++        composition_names.append(item["name"])
++    if set(native_names).intersection(composition_names):
++        raise HandoffValidationError(f"{segment.source.locator}: directive lowered twice")
++    expected_native = set(segment.directives).difference({"voice", "prosody"})
++    if set(native_names) != expected_native:
++        raise HandoffValidationError(
++            f"{segment.source.locator}: native directive set differs from the source plan"
++        )
++    required_composition: set[str] = set()
++    prosody = segment.directives.get("prosody")
++    if isinstance(prosody, Mapping):
++        for field, lowered_name in (
++            ("rate", "tempo"),
++            ("pitch", "pitch_shift"),
++            ("volume", "gain"),
++        ):
++            if prosody.get(field) is not None:
++                required_composition.add(lowered_name)
++    if not required_composition.issubset(composition_names):
++        raise HandoffValidationError(
++            f"{segment.source.locator}: manifest omitted numeric lowering for source prosody"
++        )
++    return tuple(
++        _operation_from_record(item, locator=segment.source.locator) for item in composition
++    )
++
++
++def _span_values(segment: Any, timing: Mapping[str, Any]) -> tuple[AudioSpan, ...]:
++    raw_spans = timing.get("spans")
++    if not isinstance(raw_spans, list):
++        raise HandoffValidationError(f"{segment.source.locator}: timing spans must be an array")
++    spans: list[AudioSpan] = []
++    cursor = 0
++    for index, raw in enumerate(raw_spans):
++        if not isinstance(raw, Mapping):
++            raise HandoffValidationError(
++                f"{segment.source.locator}: timing span {index} is not an object"
++            )
++        start, end = raw.get("start_frame"), raw.get("end_frame")
++        if type(start) is not int or type(end) is not int or start < 0 or end <= start:
++            raise HandoffValidationError(
++                f"{segment.source.locator}: timing span {index} has invalid frames"
++            )
++        text = raw.get("text")
++        if "text_start" in raw or "text_end" in raw:
++            text_start, text_end = raw.get("text_start"), raw.get("text_end")
++            if (
++                type(text_start) is not int
++                or type(text_end) is not int
++                or text_start < 0
++                or text_end < text_start
++                or text_end > len(segment.text)
++            ):
++                raise HandoffValidationError(
++                    f"{segment.source.locator}: timing span {index} has invalid text offsets"
++                )
++            if text is not None and segment.text[text_start:text_end] != text:
++                raise HandoffValidationError(
++                    f"{segment.source.locator}: timing span {index} text does not match offsets"
++                )
++        elif isinstance(text, str):
++            found = segment.text.find(text, cursor)
++            if found < 0:
++                text_start = text_end = 0
++            else:
++                text_start, text_end = found, found + len(text)
++                cursor = text_end
++        else:
++            text_start = text_end = 0
++        metadata: dict[str, Any] = {"timing_provenance": "provided"}
++        if isinstance(text, str):
++            metadata["text"] = text
++        if isinstance(raw.get("kind"), str):
++            metadata["kind"] = raw["kind"]
++        spans.append(
++            AudioSpan(
++                source_start=text_start,
++                source_end=text_end,
++                sample_start=start,
++                sample_end=end,
++                id=f"{segment.source.locator}:span:{index}",
++                metadata=metadata,
++            )
++        )
++    return tuple(spans)
++
++
++def _json_intent(intent: Any) -> Any:
++    if isinstance(intent, Mapping):
++        return {str(key): _json_intent(value) for key, value in intent.items()}
++    if isinstance(intent, (list, tuple)):
++        return [_json_intent(value) for value in intent]
++    return intent
++
++
++def _pause_boundaries(
++    selected: Any,
++    entries_by_locator: Mapping[str, Mapping[str, Any]],
++    policy: PausePolicy,
++    plan_id: str,
++) -> dict[str, dict[str, Any]]:
++    boundaries: dict[str, dict[str, Any]] = {}
++    for left, right in zip(selected.segments, selected.segments[1:], strict=False):
++        left_entry = entries_by_locator.get(left.source.locator, {})
++        right_entry = entries_by_locator.get(right.source.locator, {})
++        left_voice = left_entry.get("logical_voice") or left.logical_voice or ""
++        right_voice = right_entry.get("logical_voice") or right.logical_voice or ""
++        left_seconds = policy.resolve(
++            left.pause_after,
++            voice=left_voice,
++            where=f"plan_id {plan_id} {left.source.locator} pause_after",
++        )
++        right_seconds = policy.resolve(
++            right.pause_before,
++            voice=right_voice,
++            where=f"plan_id {plan_id} {right.source.locator} pause_before",
++        )
++        seconds = max(left_seconds, right_seconds)
++        if not math.isfinite(seconds) or seconds < 0:
++            raise PausePolicyError(
++                f"{left.source.locator}->{right.source.locator}: invalid resolved pause"
++            )
++        authored: list[dict[str, Any]] = []
++        seen_intents: set[bytes] = set()
++        for locator, side, intent in (
++            (left.source.locator, "pause_after", left.pause_after),
++            (right.source.locator, "pause_before", right.pause_before),
++        ):
++            if intent is None:
++                continue
++            identity = _canonical_json(_json_intent(intent))
++            if identity in seen_intents:
++                continue
++            seen_intents.add(identity)
++            authored.append({"id": f"{locator}:{side}", "intent": _json_intent(intent)})
++        if seconds > 0:
++            boundaries[left.source.locator] = {
++                "right": right,
++                "seconds": seconds,
++                "authored": authored,
++            }
++    return boundaries
++
++
++def _selection_as_dict(selection: Any) -> dict[str, Any]:
++    value = selection.as_dict()
++    if not isinstance(value, Mapping):
++        raise HandoffValidationError("VoiceRender selection did not produce a mapping")
++    return dict(value)
++
++
++def materialize_voicerender_job(
++    plan: Any,
++    render_manifest: str | Path,
++    pause_policy: PausePolicy | str | Path | Mapping[str, Any],
++    *,
++    output_policy: OutputPolicy | None = None,
++    selection: Any = None,
++    media_resolver: MediaResolver | None = None,
++) -> AudioJob:
++    """Validate a VoiceRender handoff and return an ordinary AudioCompose job.
++
++    If ``selection`` is supplied, it must exactly repeat the render manifest's
++    source selection. External audio is resolved in source order; callers can
++    provide a ``MediaResolver`` for non-filesystem URIs.
++    """
++    vr = _require_voicerender()
++    try:
++        plan_location: Path | None
++        if isinstance(plan, (str, Path)):
++            plan_location = Path(plan).expanduser().resolve(strict=True)
++            parsed = vr.load_source_plan(plan_location)
++        else:
++            parsed = plan
++            raw_plan_path = getattr(parsed, "path", None)
++            plan_location = (
++                Path(raw_plan_path).expanduser().resolve(strict=True)
++                if isinstance(raw_plan_path, (str, Path))
++                else None
++            )
++        if not isinstance(parsed, vr.UtterPlanV5):
++            raise HandoffValidationError("plan must be an UtterPlan v5 value or path")
++        manifest_path = Path(render_manifest).expanduser().absolute()
++        document = vr.verify_render_manifest(manifest_path)
++        vr.validate_manifest_source(parsed, document)
++        if document.get("complete") is not True:
++            raise HandoffValidationError("Render manifest is incomplete")
++        policy = load_pause_policy(pause_policy)
++        selection_data = document.get("selection")
++        if not isinstance(selection_data, Mapping):
++            raise HandoffValidationError("Render manifest selection must be an object")
++        authoritative = _manifest_selection(parsed, selection_data, vr)
++        chosen = _requested_selection(parsed, selection, authoritative, vr)
++        source_operations = document.get("source_operations")
++        if not isinstance(source_operations, list) or len(source_operations) != len(
++            chosen.segments
++        ):
++            raise HandoffValidationError(
++                "Render manifest lacks complete selected source operations"
++            )
++        raw_entries = document.get("segments", [])
++        if not isinstance(raw_entries, list):
++            raise HandoffValidationError("Render manifest segments must be an array")
++        by_locator: dict[str, list[Mapping[str, Any]]] = {}
++        for entry in raw_entries:
++            source_ref = entry.get("source", {}) if isinstance(entry, Mapping) else {}
++            locator = source_ref.get("locator") if isinstance(source_ref, Mapping) else None
++            if isinstance(locator, str):
++                by_locator.setdefault(locator, []).append(entry)
++
++        positions = {segment.source.locator: index for index, segment in enumerate(parsed.segments)}
++        selected_positions = [
++            positions.get(segment.source.locator, -1) for segment in chosen.segments
++        ]
++        if not selected_positions or selected_positions != list(
++            range(selected_positions[0], selected_positions[0] + len(selected_positions))
++        ):
++            raise HandoffValidationError(
++                "AudioJob composition requires a contiguous source selection"
++            )
++
++        records: dict[str, dict[str, Any]] = {}
++        entries_by_locator: dict[str, Mapping[str, Any]] = {}
++        resolver = media_resolver if media_resolver is not None else LocalWavResolver()
++        for segment, operation in zip(chosen.segments, source_operations, strict=True):
++            locator = segment.source.locator
++            kind = _validate_source_operation(operation, segment)
++            matches = by_locator.get(locator, [])
++            if kind == "speech":
++                if len(matches) != 1:
++                    raise HandoffValidationError(
++                        f"{locator}: expected exactly one render manifest entry, found {len(matches)}"
++                    )
++                entry = matches[0]
++                if entry.get("status") not in {"rendered", "reused"} or not document.get(
++                    "complete"
++                ):
++                    raise HandoffValidationError(
++                        f"{locator}: speech render is incomplete (status={entry.get('status')!r})"
++                    )
++                for field, expected, actual in (
++                    ("language", segment.language, entry.get("language")),
++                    ("logical_voice", segment.logical_voice, entry.get("logical_voice")),
++                ):
++                    if expected is not None and expected != actual:
++                        raise HandoffValidationError(
++                            f"{locator}: manifest {field} differs from the plan"
++                        )
++                audio = entry.get("audio")
++                if not isinstance(audio, Mapping):
++                    raise HandoffValidationError(f"{locator}: rendered WAV metadata is missing")
++                path = _safe_manifest_artifact(manifest_path, audio.get("path"))
++                entries_by_locator[locator] = entry
++                records[locator] = {"kind": kind, "entry": entry, "path": path}
++                continue
++
++            if matches:
++                raise HandoffValidationError(
++                    f"{locator}: external audio must not have a speech render entry"
++                )
++            directive = operation.get("audio_directive")
++            plan_directive = segment.directives.get("audio")
++            if not isinstance(directive, Mapping) or not isinstance(plan_directive, Mapping):
++                raise HandoffValidationError(f"{locator}: external audio directive is missing")
++            if dict(directive) != dict(plan_directive):
++                raise HandoffValidationError(
++                    f"{locator}: manifest audio directive differs from the source plan"
++                )
++            if plan_location is None:
++                raise MediaResolutionError(
++                    f"{locator}: external media resolution requires a plan file path"
++                )
++            request = MediaRequest(
++                src=directive["src"],
++                plan_path=plan_location,
++                source_locator=locator,
++                clip_begin=directive.get("clip_begin"),
++                clip_end=directive.get("clip_end"),
++                speed=directive.get("speed"),
++                repeat_duration=directive.get("repeat_duration"),
++                repeat_count=directive.get("repeat_count"),
++                sound_level=directive.get("sound_level"),
++                description=directive.get("description"),
++                alt_text=directive.get("alt_text"),
++            )
++            if request.clip_begin is not None or request.clip_end is not None:
++                raise MediaResolutionError(
++                    f"{locator}: clip_begin/clip_end are unsupported by AudioJob v2"
++                )
++            if request.repeat_duration is not None or request.repeat_count is not None:
++                raise MediaResolutionError(
++                    f"{locator}: repeat_duration/repeat_count are unsupported by AudioJob v2"
++                )
++            numeric_operations = numeric_media_operations(request)
++            try:
++                resolved = resolver.resolve(request)
++            except MediaResolutionError:
++                raise
++            except Exception as exc:
++                raise MediaResolutionError(f"{locator}: media resolver failed: {exc}") from exc
++            if not isinstance(resolved, ResolvedMedia):
++                raise MediaResolutionError(f"{locator}: MediaResolver must return ResolvedMedia")
++            media_operations = (*resolved.operations, *numeric_operations)
++            records[locator] = {
++                "kind": kind,
++                "request": request,
++                "media": ResolvedMedia(
++                    source=resolved.source,
++                    operations=media_operations,
++                    metadata=resolved.metadata,
++                    identity=resolved.identity,
++                ),
++            }
++
++        boundaries = _pause_boundaries(chosen, entries_by_locator, policy, parsed.plan_id)
++        items: list[AudioClip | Silence] = []
++        for segment in chosen.segments:
++            locator = segment.source.locator
++            record = records[locator]
++            if record["kind"] == "speech":
++                entry = record["entry"]
++                audio = entry["audio"]
++                digest = audio.get("sha256")
++                if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
++                    raise HandoffValidationError(f"{locator}: manifest WAV hash is invalid")
++                operations = _lowering_operations(segment, entry)
++                timing = entry.get("timing")
++                if not isinstance(timing, Mapping):
++                    raise HandoffValidationError(f"{locator}: render timing metadata is missing")
++                spans = _span_values(segment, timing)
++                anchors = tuple(
++                    AudioAnchor(id=f"{locator}:marker:{index}", sample_offset=0, name=name)
++                    for index, name in enumerate(segment.markers)
++                )
++                metadata = {
++                    "kind": "speech",
++                    "utterplan.plan_id": parsed.plan_id,
++                    "utterplan.locator": locator,
++                    "voicerender.render_manifest_id": document["manifest_id"],
++                    "voicerender.acoustic_cache_key": entry["acoustic_cache_key"],
++                    "voicerender.logical_voice": entry["logical_voice"],
++                    "voicerender.timing_provenance": timing["provenance"],
++                    "voicerender.semantic_segment_hash": segment.semantic_segment_hash,
++                }
++                source_item = AudioFileSource(
++                    path=record["path"],
++                    expected_sha256=digest,
++                    sample_rate=audio["sample_rate"],
++                    channels=audio["channels"],
++                    frames=audio["frames"],
++                )
++                items.append(
++                    AudioClip(
++                        f"speech:{locator}", source_item, operations, anchors, spans, metadata
++                    )
++                )
++            else:
++                request = record["request"]
++                resolved = record["media"]
++                anchors = tuple(
++                    AudioAnchor(id=f"{locator}:marker:{index}", sample_offset=0, name=name)
++                    for index, name in enumerate(segment.markers)
++                )
++                metadata = {
++                    "kind": "external_audio",
++                    "utterplan.plan_id": parsed.plan_id,
++                    "utterplan.locator": locator,
++                    "utterplan.audio.src": request.src,
++                    "utterplan.audio.alt_text": request.alt_text,
++                    "utterplan.audio.description": request.description,
++                    "audiocompose.media.metadata": resolved.metadata,
++                    "audiocompose.media.identity": resolved.identity,
++                }
++                items.append(
++                    AudioClip(
++                        f"media:{locator}",
++                        resolved.source,
++                        resolved.operations,
++                        anchors,
++                        metadata=metadata,
++                    )
++                )
++            boundary = boundaries.get(locator)
++            if boundary is not None:
++                right = boundary["right"]
++                items.append(
++                    Silence(
++                        id=f"pause:{locator}->{right.source.locator}",
++                        seconds=boundary["seconds"],
++                        metadata={
++                            "kind": "pause",
++                            "utterplan.plan_id": parsed.plan_id,
++                            "utterplan.left_locator": locator,
++                            "utterplan.right_locator": right.source.locator,
++                            "audiocompose.pause_policy_id": policy.policy_id,
++                            "audiocompose.pause_events": boundary["authored"],
++                        },
++                    )
++                )
++
++        source = {
++            "utterplan.plan_id": parsed.plan_id,
++            "utterplan.plan_file_sha256": "sha256:" + parsed.file_sha256,
++            "voicerender.render_manifest_id": document["manifest_id"],
++            "voicerender.producer_version": document["producer"]["version"],
++            "audiocompose.pause_policy_id": policy.policy_id,
++            "voicerender.selection": _selection_as_dict(chosen),
++            "audiocompose.materializer": "voicerender.v1",
++        }
++        job = AudioJob(
++            items=tuple(items),
++            output=output_policy if output_policy is not None else OutputPolicy(),
++            producer={"name": "audiocompose.voicerender-materializer", "version": __version__},
++            source=source,
++        )
++        job.validate(verify_sources=True)
++        return job
++    except IntegrationError:
++        raise
++    except Exception as exc:
++        raise HandoffValidationError(f"VoiceRender handoff validation failed: {exc}") from exc
++
++
++__all__ = [
++    "PausePolicy",
++    "MediaRequest",
++    "ResolvedMedia",
++    "MediaResolver",
++    "load_pause_policy",
++    "materialize_voicerender_job",
++]
+diff --git a/docs/architecture.md b/docs/architecture.md
+index caa32d0..a270054 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -2,10 +2,12 @@
+
+ ## Boundary
+
+-`audiocompose` is the generic audio composition layer. It accepts a producer-neutral `AudioJob`, not an UtterPlan or speech document. Synthesis ends before composition begins.
++AudioCompose core is the generic audio composition layer. Its `Composer`, `AudioJob`, and schemas accept producer-neutral values; synthesis or upstream artifact interpretation ends at the job boundary. Optional adapters may materialize generic jobs from validated producer artifacts without adding producer-specific semantics to core composition.
+
+ ```text
+-UtterPlan -> PyKokoro / PiperSynth -> AudioJob -> Composer -> final.wav
++any producer -> AudioJob ----------------\
++                                       -> Composer -> final.wav
++UtterPlan + VoiceRender artifacts -> optional adapter -> AudioJob --/
+ ```
+
+ For mixed-engine use, any producer can emit the same generic job shape:
+@@ -16,9 +18,15 @@ engine A -> AudioJob --\
+ engine B -> AudioJob --/
+ ```
+
+-The producer resolves semantic and engine behavior before composition. AudioCompose handles completed audio only and treats producer metadata and span identity as opaque.
++The producer resolves semantic and engine behavior before composition. The AudioCompose core handles completed generic audio only and treats producer metadata and span identity as opaque.
+
+-PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection, inference, engine-native controls, calibration, and timing extraction. They translate unresolved semantic intent into concrete audio and numeric audio-domain operations. Audiocompose has no knowledge of TTS, Kokoro, Piper, voices, phonemes, ONNX, models, or UtterPlan semantics.
++PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection, inference, engine-native controls, calibration, and timing extraction. They translate unresolved semantic intent into concrete audio and numeric audio-domain operations. Core AudioCompose modules do not import TTS engines, UtterPlan readers, model runtimes, or engine semantics.
++
++## Optional VoiceRender materialization
++
++`audiocompose.integrations.voicerender` is an explicit adapter boundary enabled by the `audiocompose[voicerender]` extra. It uses VoiceRender's public handoff APIs to verify UtterPlan v5, render-manifest binding, selection, and speech artifacts, then produces an ordinary v2 `AudioJob`. The base package, `Composer`, and persisted schema do not depend on VoiceRender.
++
++The standalone `audiocompose materialize PLAN --renders MANIFEST --pauses POLICY --output JOB` command resolves output preferences into the existing `OutputPolicy`, persists the job, and leaves validation, inspection, and composition to the normal CLI commands. `PausePolicy` maps symbolic intents to durations at source boundaries. Relative local WAV media is resolved safely beneath the plan directory; opaque URIs need a custom `MediaResolver`. Numeric speed and explicit dB gain are supported, while clip-region and repeat controls fail closed because AudioJob v2 has no generic source-region model.
+
+ ## AudioJob
+
+@@ -59,18 +67,23 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
+
+ ## Ownership matrix
+
+-| Concern                                                                        | Owner                                  |
+-| ------------------------------------------------------------------------------ | -------------------------------------- |
+-| SSMD, language analysis, segmentation, semantic pauses, prosody intent         | UtterPlan                              |
+-| G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package |
+-| AudioJob format and bundle validation                                          | audiocompose                           |
+-| WAV loading, operation model/orchestration, timeline assembly                  | audiocompose                           |
+-| Numeric rate/pitch envelopes and timing maps                                   | audiocompose                           |
+-| Transition eligibility and voice/segment semantics                             | producer                               |
+-| Band-limited resampling, time-scale modification, pitch-shift DSP              | AudioSig                               |
+-| Silence insertion and marker finalization                                      | audiocompose                           |
+-| Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose                           |
++| Concern                                                                        | Owner                                      |
++| ------------------------------------------------------------------------------ | ------------------------------------------ |
++| Concern                                                                        | Owner                                      |
++| ------------------------------------------------------------------------------ | ------------------------------------------ |
++| SSMD, language analysis, segmentation, semantic pauses, prosody intent         | UtterPlan                                  |
++| G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package     |
++| UtterPlan v5 parsing and render-manifest handoff verification                  | VoiceRender public handoff API             |
++| VoiceRender artifact to generic AudioJob materialization                       | optional AudioCompose VoiceRender adapter  |
++| Symbolic pause-to-duration composition policy                                  | AudioCompose integration                   |
++| AudioJob format and bundle validation                                          | audiocompose core                          |
++| WAV loading, operation model/orchestration, timeline assembly                  | audiocompose core                          |
++| Numeric rate/pitch envelopes and timing maps                                   | audiocompose core                          |
++| Transition eligibility and voice/segment semantics                             | producer                                   |
++| Band-limited resampling, time-scale modification, pitch-shift DSP              | AudioSig                                   |
++| Silence insertion and marker finalization                                      | audiocompose core                          |
++| Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose core                          |
+
+ ## Non-TTS guarantee
+
+-`audiocompose` requires NumPy and AudioSig. AudioSig supplies band-limited resampling and WSOLA time/pitch DSP; AudioCompose owns the generic operation model and composition orchestration. The package does not import `utterplan`, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. Canonical tests use deterministic synthetic audio and require no TTS models.
++The base AudioCompose install requires NumPy and AudioSig. Importing `audiocompose`, constructing `AudioJob`, and using `Composer` do not import or require VoiceRender, Readio, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. Only the explicitly invoked VoiceRender adapter depends on the optional `audiocompose[voicerender]` extra. AudioSig supplies band-limited resampling and WSOLA time/pitch DSP; AudioCompose core owns the generic operation model and composition orchestration. Canonical tests use deterministic synthetic audio and require no TTS models.
+diff --git a/pyproject.toml b/pyproject.toml
+index 7f29c85..0309e4e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -31,6 +31,7 @@ classifiers = [
+
+ [project.optional-dependencies]
+ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "twine>=5", "jsonschema>=4.18"]
++voicerender = ["voicerender>=0.1,<0.2"]
+
+ [project.scripts]
+ audiocompose = "audiocompose.cli:main"
+diff --git a/tests/test_voicerender_materialization.py b/tests/test_voicerender_materialization.py
+new file mode 100644
+index 0000000..66a0256
+--- /dev/null
++++ b/tests/test_voicerender_materialization.py
+@@ -0,0 +1,590 @@
++from __future__ import annotations
++
++import hashlib
++import json
++from contextlib import contextmanager
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++voicerender = pytest.importorskip("voicerender")
++from voicerender.engines.api_probe import EngineApiProbe  # noqa: E402
++from voicerender.engines.base import (  # noqa: E402
++    EngineCapabilities,
++    EngineSelection,
++    RenderedSpeech,
++    RequestMeasure,
++    SpeechWordTiming,
++)
++from voicerender.engines.registry import _ADAPTERS  # noqa: E402
++from voicerender.inputs.utterplan_v5 import parse_utterplan_v5  # noqa: E402
++from voicerender.manifest import MANIFEST_FILENAME  # noqa: E402
++from voicerender.models import VoiceBinding, VoiceProfile  # noqa: E402
++from voicerender.render_v5 import render_utterplan_v5  # noqa: E402
++
++from audiocompose import AudioClip, Silence  # noqa: E402
++from audiocompose.errors import HandoffValidationError, PausePolicyError  # noqa: E402
++from audiocompose.integrations.voicerender import (  # noqa: E402
++    PAUSE_POLICY_SCHEMA,
++    PausePolicy,
++    materialize_voicerender_job,
++)
++
++
++def _hash(value) -> str:
++    content = json.dumps(
++        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
++    ).encode()
++    return "sha256:" + hashlib.sha256(content).hexdigest()
++
++
++def _plan(
++    texts, *, pause_before=None, pause_after=None, markers=None, directives=None, file_hash="a" * 64
++):
++    pause_before = pause_before or {}
++    pause_after = pause_after or {}
++    markers = markers or {}
++    directives = directives or {}
++    segments = []
++    semantic_segments = []
++    for index, text in enumerate(texts):
++        segment = {"text": text, "language": "en-US"}
++        projection = {
++            "text": text,
++            "language": "en-US",
++            "directives": {},
++            "tokens": [],
++            "markers": list(markers.get(index, ())),
++        }
++        if index in pause_before:
++            segment["pause_before"] = pause_before[index]
++            projection["pause_before"] = pause_before[index]
++        if index in pause_after:
++            segment["pause_after"] = pause_after[index]
++            projection["pause_after"] = pause_after[index]
++        if index in markers:
++            segment["marker"] = list(markers[index])
++        if index in directives:
++            segment.update(directives[index])
++            normalized = {}
++            for name, value in directives[index].items():
++                if name == "prosody":
++                    normalized[name] = {key: value.get(key) for key in ("rate", "pitch", "volume")}
++                elif name == "audio":
++                    normalized[name] = {
++                        key: value.get(key)
++                        for key in (
++                            "src",
++                            "alt_text",
++                            "clip_begin",
++                            "clip_end",
++                            "speed",
++                            "repeat_duration",
++                            "repeat_count",
++                            "sound_level",
++                        )
++                    }
++                    if value.get("description") is not None:
++                        normalized[name]["description"] = value["description"]
++                else:
++                    normalized[name] = value
++            projection["directives"] = normalized
++        segments.append(segment)
++        semantic_segments.append(projection)
++    flow = [{"hash": _hash({"segments": semantic_segments}), "segment": segments}]
++    data = {
++        "format": "utterplan",
++        "schema_version": 5,
++        "language": "en-US",
++        "unit": "paragraph",
++        "hash_schema": "utterplan-flow-v1",
++        "flow": flow,
++    }
++    data["plan_id"] = _hash(
++        {
++            "format": "utterplan",
++            "schema_version": 5,
++            "language": "en-US",
++            "unit": "paragraph",
++            "hash_schema": "utterplan-flow-v1",
++            "document_semantics": {},
++            "flow": [{"segments": semantic_segments}],
++        }
++    )
++    return parse_utterplan_v5(data, file_sha256=file_hash)
++
++
++class _Session:
++    def __init__(self, calls):
++        self.calls = calls
++
++    def measure(self, request):
++        return RequestMeasure(
++            fits=True,
++            amount=len(request.text),
++            maximum=len(request.text),
++            unit="unknown",
++            source="test-fake",
++        )
++
++    def synthesize(self, request):
++        self.calls.append(request)
++        return RenderedSpeech(
++            id=request.id,
++            audio=np.full(128, 0.1, dtype=np.float32),
++            sample_rate=16_000,
++            word_timings=(
++                SpeechWordTiming(
++                    text=request.text,
++                    char_start=0,
++                    char_end=len(request.text),
++                    start_sample=10,
++                    end_sample=40,
++                ),
++            ),
++        )
++
++
++class _Adapter:
++    id = "audiocompose-test"
++    package_name = "audiocompose-test"
++
++    def __init__(self, composition_semantics=()):
++        self.calls = []
++        self.composition_semantics = frozenset(composition_semantics)
++
++    def capabilities(self):
++        return EngineCapabilities(
++            id=self.id,
++            supports_live=True,
++            supports_timestamps=True,
++            composition_semantics=self.composition_semantics,
++        )
++
++    def version(self):
++        return "1.0"
++
++    def probe_api(self):
++        return EngineApiProbe(
++            engine=self.id,
++            package=self.package_name,
++            compatible=True,
++            status="ready",
++            distribution_version="1.0",
++            expected_api_version=1,
++            api_version=1,
++            contract_source="explicit",
++        )
++
++    def resolve(self, request):
++        return (
++            EngineSelection(
++                engine=self.id,
++                target_id=request.target_id or "fixture-model",
++                language=request.language or "en-US",
++                voice=request.voice,
++                speaker=request.speaker,
++                options=request.options,
++            ),
++            (),
++        )
++
++    def validate_selection(self, selection):
++        assert selection.engine == self.id
++        return ()
++
++    def canonical_synthesis_identity(self, selection):
++        return {
++            "engine": self.id,
++            "target_id": selection.target_id,
++            "voice": selection.voice,
++            "speaker": selection.speaker,
++            "options": dict(selection.options),
++        }
++
++    @contextmanager
++    def open(self, selection):
++        del selection
++        yield _Session(self.calls)
++
++
++@pytest.fixture
++def rendered_bundle(tmp_path, monkeypatch):
++    def render(plan, composition_semantics=(), select=None):
++        adapter = _Adapter(composition_semantics)
++        monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++        profile = VoiceProfile(
++            name="narrator",
++            roles={
++                "narrator": VoiceBinding(engine=adapter.id, target_id="fixture-model"),
++            },
++            defaults={"role": "narrator"},
++        )
++        bundle = tmp_path / "renders"
++        render_utterplan_v5(
++            plan,
++            profile=profile,
++            output_dir=bundle,
++            cache_dir=tmp_path / "cache",
++            select=select,
++        )
++        return bundle / MANIFEST_FILENAME
++
++    return render
++
++
++def _policy(**default):
++    return {
++        "schema": PAUSE_POLICY_SCHEMA,
++        "merge": "max",
++        "default": default,
++    }
++
++
++def test_pause_policy_parsing_exact_timed_and_voice_override():
++    policy = PausePolicy.from_mapping(
++        {
++            "schema": PAUSE_POLICY_SCHEMA,
++            "merge": "max",
++            "default": {"sentence": "250ms"},
++            "voice": {"narrator": {"sentence": "320ms"}},
++        }
++    )
++    assert policy.resolve("sentence", voice="narrator", where="test") == pytest.approx(0.32)
++    assert policy.resolve(
++        {"type": "timed", "time": "125ms"}, voice="narrator", where="test"
++    ) == pytest.approx(0.125)
++    with pytest.raises(PausePolicyError, match="unknown pause class"):
++        PausePolicy.from_mapping(_policy(unknown="10ms"))
++
++
++def test_materialize_verified_speech_pause_spans_markers_and_identity(tmp_path, rendered_bundle):
++    plan = _plan(
++        ["Hello", "world"],
++        pause_after={0: "sentence"},
++        pause_before={1: "sentence"},
++        markers={0: ("opening",)},
++    )
++    manifest = rendered_bundle(plan)
++    job = materialize_voicerender_job(plan, manifest, _policy(sentence="300ms"))
++
++    assert [type(item) for item in job.items] == [AudioClip, Silence, AudioClip]
++    pause = job.items[1]
++    assert isinstance(pause, Silence)
++    assert pause.seconds == pytest.approx(0.3)
++    assert len(pause.metadata["audiocompose.pause_events"]) == 1
++    clip = job.items[0]
++    assert isinstance(clip, AudioClip)
++    assert clip.id == "speech:f000000.s000"
++    assert clip.anchors[0].name == "opening"
++    assert clip.spans[0].source_start == 0
++    assert clip.spans[0].source_end == len("Hello")
++    assert clip.spans[0].sample_start == 10
++    assert clip.metadata["voicerender.render_manifest_id"]
++    job.validate(verify_sources=True)
++
++    first = Path(job.save(tmp_path / "first.audiojob"))
++    restored = type(job).load(str(first))
++    second = Path(restored.save(tmp_path / "second.audiojob"))
++    assert type(job).load(str(second)).job_id == restored.job_id
++
++
++def test_materialize_rejects_plan_mismatch_and_corrupt_speech(rendered_bundle):
++    plan = _plan(["Integrity."])
++    manifest = rendered_bundle(plan)
++    other_plan = _plan(["Integrity."], file_hash="b" * 64)
++    with pytest.raises(HandoffValidationError, match="source|plan"):
++        materialize_voicerender_job(other_plan, manifest, _policy())
++
++    document = voicerender.verify_render_manifest(manifest)
++    audio_path = manifest.parent / document["segments"][0]["audio"]["path"]
++    audio_path.write_bytes(b"corrupt WAV")
++    with pytest.raises(HandoffValidationError, match="manifest|WAV|audio"):
++        materialize_voicerender_job(plan, manifest, _policy())
++
++
++def test_numeric_composition_directives_lower_to_audiocompose_operations(rendered_bundle):
++    from audiocompose import Tempo
++
++    plan = _plan(["Slowly."], directives={0: {"prosody": {"rate": "slow"}}})
++    manifest = rendered_bundle(plan)
++    job = materialize_voicerender_job(plan, manifest, _policy())
++    assert isinstance(job.items[0], AudioClip)
++    assert len(job.items[0].operations) == 1
++    assert isinstance(job.items[0].operations[0], Tempo)
++    assert job.items[0].operations[0].factor == pytest.approx(0.8)
++
++
++def _with_plan_path(plan, tmp_path):
++    from dataclasses import replace
++
++    path = tmp_path / "fixture.utterplan.toml"
++    path.write_text("in-memory UtterPlan fixture\n", encoding="utf-8")
++    return replace(plan, path=path)
++
++
++def test_mixed_speech_local_wav_speech_preserves_source_order_and_numeric_controls(
++    tmp_path, rendered_bundle
++):
++    from audiocompose import Gain, Tempo
++    from audiocompose.sources import AudioFileSource
++    from audiocompose.wav import write_wav
++
++    plan = _plan(
++        ["Before.", "", "After."],
++        pause_after={0: "sentence"},
++        pause_before={2: "sentence"},
++        directives={
++            1: {
++                "audio": {
++                    "src": "music.wav",
++                    "alt_text": "music",
++                    "speed": 1.25,
++                    "sound_level": "-3dB",
++                }
++            }
++        },
++    )
++    plan = _with_plan_path(plan, tmp_path)
++    write_wav(tmp_path / "music.wav", np.full(160, 0.1, dtype=np.float32), 16_000)
++    manifest = rendered_bundle(plan)
++
++    job = materialize_voicerender_job(
++        plan,
++        manifest,
++        _policy(sentence="100ms"),
++    )
++
++    assert [item.id for item in job.items] == [
++        "speech:f000000.s000",
++        "pause:f000000.s000->f000000.s001",
++        "media:f000000.s001",
++        "pause:f000000.s001->f000000.s002",
++        "speech:f000000.s002",
++    ]
++    media = job.items[2]
++    assert isinstance(media, AudioClip)
++    assert isinstance(media.source, AudioFileSource)
++    assert media.metadata["utterplan.audio.alt_text"] == "music"
++    assert isinstance(media.operations[0], Tempo)
++    assert media.operations[0].factor == pytest.approx(1.25)
++    assert isinstance(media.operations[1], Gain)
++    assert media.operations[1].db == pytest.approx(-3.0)
++    job.validate(verify_sources=True)
++
++
++def test_all_media_uses_custom_resolver_and_rejects_unknown_scheme_by_default(
++    tmp_path, rendered_bundle
++):
++    from audiocompose import AudioBufferSource
++    from audiocompose.errors import MediaResolutionError
++    from audiocompose.integrations.media import ResolvedMedia
++
++    plan = _with_plan_path(
++        _plan([""], directives={0: {"audio": {"src": "sfx:impact.knock?seed=42"}}}),
++        tmp_path,
++    )
++    manifest = rendered_bundle(plan)
++    with pytest.raises(MediaResolutionError, match="no resolver for URI scheme"):
++        materialize_voicerender_job(plan, manifest, _policy())
++
++    class Resolver:
++        request = None
++
++        def resolve(self, request):
++            self.request = request
++            return ResolvedMedia(
++                AudioBufferSource(np.full(32, 0.2, dtype=np.float32), 16_000),
++                metadata={"provider": "fixture"},
++                identity={"asset": "impact.knock"},
++            )
++
++    resolver = Resolver()
++    job = materialize_voicerender_job(plan, manifest, _policy(), media_resolver=resolver)
++    assert len(job.items) == 1
++    media = job.items[0]
++    assert isinstance(media, AudioClip)
++    assert media.id == "media:f000000.s000"
++    assert resolver.request.src == "sfx:impact.knock?seed=42"
++    assert media.metadata["audiocompose.media.identity"] == {"asset": "impact.knock"}
++    job.validate(verify_sources=True)
++
++
++def test_unsupported_external_audio_controls_fail_closed(tmp_path, rendered_bundle):
++    from audiocompose.errors import MediaResolutionError
++    from audiocompose.wav import write_wav
++
++    plan = _with_plan_path(
++        _plan([""], directives={0: {"audio": {"src": "music.wav", "clip_begin": "1s"}}}),
++        tmp_path,
++    )
++    write_wav(tmp_path / "music.wav", np.zeros(16, dtype=np.float32), 16_000)
++    manifest = rendered_bundle(plan)
++
++    with pytest.raises(MediaResolutionError, match="clip_begin/clip_end are unsupported"):
++        materialize_voicerender_job(plan, manifest, _policy())
++
++
++def test_noncontiguous_selected_source_flow_is_rejected(rendered_bundle):
++    plan = _plan(["First.", "Skipped.", "Third."])
++    manifest = rendered_bundle(plan, select=["f000000.s000", "f000000.s002"])
++
++    with pytest.raises(HandoffValidationError, match="contiguous source selection"):
++        materialize_voicerender_job(plan, manifest, _policy())
++
++
++def test_explicit_selection_must_exactly_match_manifest_selection(rendered_bundle):
++    plan = _plan(["First.", "Second."])
++    manifest = rendered_bundle(plan)
++
++    with pytest.raises(HandoffValidationError, match="Explicit selection differs"):
++        materialize_voicerender_job(plan, manifest, _policy(), selection=1)
++
++
++def _write_cli_source_plan(path: Path, text: str):
++    plan = _plan([text])
++    segment = plan.segments[0]
++    path.write_text(
++        "\n".join(
++            (
++                'format = "utterplan"',
++                "schema_version = 5",
++                f"plan_id = {json.dumps(plan.plan_id)}",
++                'language = "en-US"',
++                'unit = "paragraph"',
++                'hash_schema = "utterplan-flow-v1"',
++                "",
++                "[[flow]]",
++                f"hash = {json.dumps(segment.source.flow_hash)}",
++                "",
++                "[[flow.segment]]",
++                f"text = {json.dumps(text, ensure_ascii=False)}",
++                'language = "en-US"',
++                "",
++            )
++        ),
++        encoding="utf-8",
++    )
++    loaded = voicerender.load_source_plan(path)
++    assert loaded.plan_id == plan.plan_id
++    return loaded
++
++
++def test_cli_manual_materialize_validate_inspect_compose_without_readio(
++    tmp_path, rendered_bundle, capsys
++):
++    from audiocompose.cli import main
++    from audiocompose.wav import read_wav
++
++    plan_path = tmp_path / "chapter.utterplan.toml"
++    plan = _write_cli_source_plan(plan_path, "CLI workflow.")
++    manifest = rendered_bundle(plan)
++    pause_path = tmp_path / "pause.toml"
++    pause_path.write_text(
++        'schema = "audiocompose.pause-policy.v1"\nmerge = "max"\n[default]\nsentence = "250ms"\n',
++        encoding="utf-8",
++    )
++    bundle = tmp_path / "chapter.audiojob"
++
++    assert (
++        main(
++            [
++                "materialize",
++                str(plan_path),
++                "--renders",
++                str(manifest),
++                "--pauses",
++                str(pause_path),
++                "--output",
++                str(bundle),
++                "--sample-rate",
++                "16000",
++                "--clip-policy",
++                "warn",
++                "--target-lufs",
++                "-16",
++                "--true-peak-ceiling-dbtp",
++                "-1.5",
++                "--peak-policy",
++                "error",
++                "--json",
++            ]
++        )
++        == 0
++    )
++    materialized = json.loads(capsys.readouterr().out)
++    assert materialized["materialized"] is True
++    assert materialized["job_id"].startswith("sha256:")
++    manifest_path = bundle / "audiojob.json"
++
++    assert main(["validate", str(manifest_path), "--json"]) == 0
++    assert json.loads(capsys.readouterr().out)["valid"] is True
++    assert main(["inspect", str(manifest_path), "--json"]) == 0
++    inspected = json.loads(capsys.readouterr().out)
++    assert inspected["expected_output_rate"] == 16_000
++    assert inspected["loudness"] == {
++        "target_lufs": -16.0,
++        "true_peak_ceiling_dbtp": -1.5,
++    }
++
++    output_wav = tmp_path / "chapter.wav"
++    assert main(["compose", str(manifest_path), str(output_wav)]) == 0
++    capsys.readouterr()
++    audio, sample_rate = read_wav(output_wav)
++    assert sample_rate == 16_000
++    assert audio.size > 0
++
++
++def test_optional_extra_metadata_and_base_import_boundary(tmp_path):
++    import subprocess
++    import sys
++
++    try:
++        import tomllib
++    except ImportError:
++        import tomli as tomllib
++
++    project = Path("pyproject.toml").read_text(encoding="utf-8")
++    dependencies = tomllib.loads(project)["project"]["optional-dependencies"]
++    assert dependencies["voicerender"] == ["voicerender>=0.1,<0.2"]
++    subprocess.run(
++        [
++            sys.executable,
++            "-c",
++            "import sys; import audiocompose; "
++            "assert not any(name == 'voicerender' or name.startswith('voicerender.') "
++            "for name in sys.modules)",
++        ],
++        cwd=Path(__file__).resolve().parents[1],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++
++
++def test_local_media_resolver_rejects_plan_directory_traversal(tmp_path, rendered_bundle):
++    from audiocompose.errors import MediaResolutionError
++
++    plan = _with_plan_path(
++        _plan([""], directives={0: {"audio": {"src": "../escape.wav"}}}),
++        tmp_path,
++    )
++    manifest = rendered_bundle(plan)
++
++    with pytest.raises(MediaResolutionError, match="remain beneath the UtterPlan directory"):
++        materialize_voicerender_job(plan, manifest, _policy())
++
++
++def test_malformed_local_wav_is_reported_as_media_resolution_error(tmp_path, rendered_bundle):
++    from audiocompose.errors import MediaResolutionError
++
++    plan = _with_plan_path(
++        _plan([""], directives={0: {"audio": {"src": "broken.wav"}}}),
++        tmp_path,
++    )
++    (tmp_path / "broken.wav").write_bytes(b"not a wav")
++    manifest = rendered_bundle(plan)
++
++    with pytest.raises(MediaResolutionError, match="invalid local WAV"):
++        materialize_voicerender_job(plan, manifest, _policy())

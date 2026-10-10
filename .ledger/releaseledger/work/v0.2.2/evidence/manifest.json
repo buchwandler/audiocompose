@@ -1,0 +1,33 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 1828,
+      "deletions": 21,
+      "patch_file": "94c6249.patch",
+      "patch_sha256": "1693758a836b5b38fb1cc1eab86adcfae3ccd1125160c24537a942b7c2bebf63",
+      "paths": [
+        "README.md",
+        "audiocompose/cli.py",
+        "audiocompose/errors.py",
+        "audiocompose/integrations/__init__.py",
+        "audiocompose/integrations/media.py",
+        "audiocompose/integrations/voicerender.py",
+        "docs/architecture.md",
+        "pyproject.toml",
+        "tests/test_voicerender_materialization.py"
+      ],
+      "sha": "94c6249e91e2f4b373128982af7e1b6cd6d75319",
+      "short_sha": "94c6249",
+      "source_ref": "git:94c6249e91e2f4b373128982af7e1b6cd6d75319"
+    }
+  ],
+  "git_base_ref": "e5863b120f6a8543b97dab449e24e379d0da08ba",
+  "git_base_sha": "e5863b120f6a8543b97dab449e24e379d0da08ba",
+  "git_head_ref": "94c6249e91e2f4b373128982af7e1b6cd6d75319",
+  "git_head_sha": "94c6249e91e2f4b373128982af7e1b6cd6d75319",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.2.2",
+  "schema_version": 1
+}
