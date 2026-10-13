@@ -14,7 +14,7 @@ from .errors import AudioComposeError
 from .job import validate_clip_geometry
 from .loudness import LoudnessPolicy
 from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
-from .wav import read_wav
+from .wav import read_wav, write_wav
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
@@ -55,6 +55,33 @@ def _parser() -> argparse.ArgumentParser:
     timeline.add_argument("manifest")
     _add_json(timeline)
 
+    compose_renderplan = subparsers.add_parser(
+        "compose-renderplan", help="verify and directly compose a RenderPlan and RenderManifest"
+    )
+    compose_renderplan.add_argument("plan", help="shared RenderPlan TOML file")
+    compose_renderplan.add_argument(
+        "--manifest", help="RenderManifest TOML (defaults inside render-dir)"
+    )
+    compose_renderplan.add_argument(
+        "--render-dir", required=True, help="directory containing speech WAVs"
+    )
+    compose_renderplan.add_argument(
+        "--media-root", help="base directory for relative external AudioItems"
+    )
+    compose_renderplan.add_argument("--output", required=True, help="final output WAV path")
+    compose_renderplan.add_argument(
+        "--save-audiojob", help="optional directory for saving the intermediate AudioJob"
+    )
+    compose_renderplan.add_argument("--sample-rate", type=int)
+    compose_renderplan.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+    compose_renderplan.add_argument("--target-lufs", type=float)
+    compose_renderplan.add_argument("--true-peak-ceiling-dbtp", type=float)
+    compose_renderplan.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    compose_renderplan.add_argument(
+        "--explain", action="store_true", help="print ordered RenderPlan provenance"
+    )
+    _add_json(compose_renderplan)
+
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -64,23 +91,6 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("input")
     report.add_argument("-o", "--output", required=True)
     _add_analysis_options(report)
-
-    materialize = subparsers.add_parser(
-        "materialize", help="materialize a verified VoiceRender handoff as an AudioJob bundle"
-    )
-    materialize.add_argument("plan", help="UtterPlan v5 source file")
-    materialize.add_argument("--renders", required=True, help="VoiceRender render-manifest.json")
-    materialize.add_argument("--pauses", required=True, help="AudioCompose pause-policy TOML")
-    materialize.add_argument("--output", required=True, help="output AudioJob bundle directory")
-    materialize.add_argument("--sample-rate", type=int)
-    materialize.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
-    materialize.add_argument("--target-lufs", type=float)
-    materialize.add_argument("--true-peak-ceiling-dbtp", type=float)
-    materialize.add_argument("--peak-policy", choices=("reduce_gain", "error"))
-    selection = materialize.add_mutually_exclusive_group()
-    selection.add_argument("--take", type=int, help="select the first N source segments")
-    selection.add_argument("--select", help="comma-separated source locators, e.g. f000000.s000")
-    _add_json(materialize)
 
     return parser
 
@@ -198,6 +208,80 @@ def _timeline(job: AudioJob) -> dict[str, Any]:
     }
 
 
+def _output_policy_from_args(args: argparse.Namespace) -> OutputPolicy:
+    defaults = OutputPolicy()
+    loudness = LoudnessPolicy(
+        target_lufs=args.target_lufs,
+        true_peak_ceiling_dbtp=(
+            defaults.loudness.true_peak_ceiling_dbtp
+            if args.true_peak_ceiling_dbtp is None
+            else args.true_peak_ceiling_dbtp
+        ),
+        peak_policy=args.peak_policy or defaults.loudness.peak_policy,
+        collect_metrics=defaults.loudness.collect_metrics,
+    )
+    return OutputPolicy(
+        sample_rate=defaults.sample_rate if args.sample_rate is None else args.sample_rate,
+        clip_policy=args.clip_policy or defaults.clip_policy,
+        loudness=loudness,
+    )
+
+
+def _renderplan_timeline(job: AudioJob, composition: CompositionResult) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    for item, composed in zip(job.items, composition.items, strict=True):
+        metadata = dict(item.metadata)
+        kind = str(metadata.get("kind", composed.kind))
+        entry: dict[str, Any] = {
+            "id": item.id,
+            "kind": kind,
+            "start_sample": composed.start_sample,
+            "end_sample": composed.end_sample,
+            "duration_seconds": composed.duration_samples / composition.sample_rate,
+        }
+        for key in (
+            "renderplan.segment_number",
+            "renderplan.segment_id",
+            "renderplan.source",
+            "renderplan.pause_id",
+            "renderplan.pause_reason",
+            "renderplan.pause_source",
+            "renderplan.audio_id",
+            "renderplan.audio.src",
+            "renderplan.audio.options",
+            "render_manifest.wav",
+            "render_manifest.wav_sha256",
+        ):
+            if key in metadata:
+                entry[key] = metadata[key]
+        timeline.append(entry)
+    return timeline
+
+
+def _print_renderplan_explanation(
+    plan_id: str, manifest_id: str, timeline: list[dict[str, Any]]
+) -> None:
+    print(f"RenderPlan: {plan_id}")
+    print(f"RenderManifest: {manifest_id}")
+    for index, item in enumerate(timeline, start=1):
+        kind = item["kind"]
+        duration = item["duration_seconds"]
+        label = item.get("render_manifest.wav", item.get("renderplan.audio.src", ""))
+        print(f"{index:06d} {kind:<12} {duration:.3f}s  {label}")
+        if "renderplan.segment_id" in item:
+            print(f"       segment: {item['renderplan.segment_id']}")
+        if "renderplan.source" in item:
+            spans = item["renderplan.source"]
+            rendered = ", ".join(
+                f"{span['locator']}[{span['start']}:{span['end']}]" for span in spans
+            )
+            print(f"       source:  {rendered}")
+        if "renderplan.pause_reason" in item:
+            print(f"       reason:  {item['renderplan.pause_reason']}")
+        if "renderplan.audio.options" in item and item["renderplan.audio.options"]:
+            print(f"       options: {item['renderplan.audio.options']}")
+
+
 def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str:
     width = 1000
     height = 260
@@ -243,47 +327,51 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "materialize":
-            from .integrations.voicerender import materialize_voicerender_job
+        if args.command == "compose-renderplan":
+            from .integrations.renderplan import load_and_materialize_renderplan_job
 
-            defaults = OutputPolicy()
-            loudness = LoudnessPolicy(
-                target_lufs=args.target_lufs,
-                true_peak_ceiling_dbtp=(
-                    defaults.loudness.true_peak_ceiling_dbtp
-                    if args.true_peak_ceiling_dbtp is None
-                    else args.true_peak_ceiling_dbtp
-                ),
-                peak_policy=args.peak_policy or defaults.loudness.peak_policy,
-                collect_metrics=defaults.loudness.collect_metrics,
+            plan_path = Path(args.plan).expanduser()
+            media_root = (
+                Path(args.media_root).expanduser()
+                if args.media_root is not None
+                else plan_path.absolute().parent
             )
-            output_policy = OutputPolicy(
-                sample_rate=(
-                    defaults.sample_rate if args.sample_rate is None else args.sample_rate
-                ),
-                clip_policy=args.clip_policy or defaults.clip_policy,
-                loudness=loudness,
-            )
-            requested_selection = args.take if args.take is not None else args.select
-            materialized_job = materialize_voicerender_job(
+            job = load_and_materialize_renderplan_job(
                 args.plan,
-                args.renders,
-                args.pauses,
-                output_policy=output_policy,
-                selection=requested_selection,
+                args.manifest,
+                render_dir=args.render_dir,
+                output_policy=_output_policy_from_args(args),
+                media_root=media_root,
             )
-            saved_manifest = Path(materialized_job.save(args.output))
-            saved_job = AudioJob.load(str(saved_manifest))
+            audiojob_path = job.save(args.save_audiojob) if args.save_audiojob else None
+            composition = Composer().compose(job)
+            output_path = write_wav(
+                args.output,
+                composition.audio,
+                composition.sample_rate,
+                clip_policy=job.output.clip_policy,
+            )
+            timeline = _renderplan_timeline(job, composition)
             result = {
-                "materialized": True,
-                "job_id": saved_job.job_id,
-                "output": str(saved_manifest.parent),
-                "items": len(saved_job.items),
+                "composed": True,
+                "output": str(output_path),
+                "plan_id": job.source["renderplan.plan_id"],
+                "manifest_id": job.source["render_manifest.manifest_id"],
+                "sample_rate": composition.sample_rate,
+                "frames": len(composition.audio),
+                "duration_seconds": composition.duration_seconds,
+                "timeline": timeline,
             }
+            if audiojob_path is not None:
+                result["audiojob"] = str(audiojob_path)
             if args.json:
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
-                print(f"wrote AudioJob bundle: {saved_manifest.parent} ({saved_job.job_id})")
+                print(f"wrote {output_path} ({composition.duration_seconds:.3f}s)")
+                if args.explain:
+                    _print_renderplan_explanation(
+                        result["plan_id"], result["manifest_id"], timeline
+                    )
         elif args.command == "validate":
             validated_job = AudioJob.load(args.manifest)
             result = {

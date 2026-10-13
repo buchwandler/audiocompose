@@ -18,10 +18,6 @@ class HandoffValidationError(IntegrationError):
     """An upstream handoff or its source artifacts are invalid."""
 
 
-class PausePolicyError(IntegrationError, ValueError):
-    """A pause policy or pause intent is invalid or unresolved."""
-
-
 class MediaResolutionError(IntegrationError):
     """An external media source cannot be resolved safely."""
 

@@ -79,60 +79,39 @@ audiocompose inspect chapter.audiojob
 audiocompose compose chapter.audiojob chapter.wav
 ```
 
-## Optional VoiceRender materialization
+## Direct RenderPlan composition
 
-Install the adapter extra when using VoiceRender artifacts; the base AudioCompose install does not require VoiceRender or Readio:
+AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
 
-```bash
-pip install 'audiocompose[voicerender]'
-voicerender render chapter.utterplan.toml --voice voice.toml --out-dir render/chapter
-```
-
-Materialize the verified render handoff into a normal, inspectable AudioJob bundle, then use the existing commands:
+Compose a plan directly without first saving an AudioJob:
 
 ```bash
-audiocompose materialize chapter.utterplan.toml \
-  --renders render/chapter/render-manifest.json \
-  --pauses pause.toml \
-  --output chapter.audiojob \
+audiocompose compose-renderplan chapter.renderplan.toml \
+  --render-dir render/chapter \
+  --output chapter.wav \
   --sample-rate 24000 \
   --target-lufs -16 \
-  --true-peak-ceiling-dbtp -1
-
-audiocompose validate chapter.audiojob
-audiocompose inspect chapter.audiojob
-audiocompose compose chapter.audiojob chapter.wav
+  --true-peak-ceiling-dbtp -1 \
+  --explain
 ```
 
-A pause policy uses the strict `audiocompose.pause-policy.v1` schema and resolves symbolic intents to durations owned by composition:
+`--manifest` defaults to `<render-dir>/render-manifest.toml`. The CLI defaults `--media-root` to the plan file's directory; relative external `AudioItem` WAV paths must resolve beneath that root. The built-in Python local-WAV resolver requires an explicit `media_root` for relative paths. Local media is mono WAV; custom URI schemes require a Python `MediaResolver`. Only `clip_begin_ms`, `clip_end_ms`, `speed`, and `gain_db` are supported; unknown options and unsafe paths are rejected. Speed and gain become existing `Tempo` and `Gain` operations, and trims are checked against the resolved WAV.
 
-```toml
-schema = "audiocompose.pause-policy.v1"
-merge = "max"
+The adapter follows `RenderPlan.flow` in order. It materializes each pause using its declared millisecond duration, including zero-duration pauses; there is no symbolic pause policy or inferred timing. Source spans are retained as opaque provenance metadata, not fabricated sample-aligned `AudioSpan` values. The Composer's normal seconds-to-samples behavior and output policy still apply.
 
-[default]
-sentence = "280ms"
-clause = "120ms"
-
-[voice.narrator]
-sentence = "320ms"
-```
-
-Exact timed pauses bypass the symbolic table; a boundary combines its left `pause_after` and right `pause_before` with `max`. Missing symbolic durations and malformed policies fail validation. `--take` or `--select` can request a selection only when it exactly matches the manifest selection, and the selected source flow must be contiguous.
-
-Python callers use the same producer-specific boundary and receive a normal `AudioJob`:
+Python callers can load and materialize the handoff directly:
 
 ```python
-from audiocompose.integrations.voicerender import materialize_voicerender_job
+from audiocompose.integrations.renderplan import load_and_materialize_renderplan_job
 
-job = materialize_voicerender_job(
-    plan="chapter.utterplan.toml",
-    render_manifest="render/chapter/render-manifest.json",
-    pause_policy="pause.toml",
+job = load_and_materialize_renderplan_job(
+    "chapter.renderplan.toml",
+    render_dir="render/chapter",
+    media_root="media",
 )
 ```
 
-Speech WAVs come from the verified VoiceRender manifest. External audio stays in source order: plain relative `.wav` paths are resolved safely beneath the UtterPlan directory, while opaque URI schemes require a Python `MediaResolver` supplied to `materialize_voicerender_job()`. The initial AudioJob v2 adapter preserves `alt_text` and `description` as metadata, lowers numeric playback speed and explicit dB gain, and rejects clipping or repetition controls (`clip_begin`, `clip_end`, `repeat_duration`, `repeat_count`) rather than ignoring them. The resulting job uses the regular AudioJob persistence, identity, output-policy, and Composer paths.
+The manifest path is optional and uses the same default as the CLI. The result is an ordinary, inspectable `AudioJob`; use `--save-audiojob` on the direct CLI or `job.save("chapter.audiojob")` to persist it, then continue with the existing generic `validate`, `inspect`, `timeline`, and `compose` workflows.
 
 ## Debugging and analysis
 
@@ -163,7 +142,7 @@ Composition completes in this order: load clips, apply operations, map anchors a
 For producer frame parity, quantize a duration to producer frames before constructing a job: `frames = int(seconds * producer_rate)` and `seconds = frames / producer_rate`. AudioCompose keeps its public rounded seconds-to-samples rule and does not add engine-specific silence types.
 
 `CompositionResult.loudness` exposes typed before/after metrics, requested and applied gain, target and ceiling, and warnings. `CompositionResult.diagnostics` contains generic codes and numeric context for loudness limitations and other composition warnings.
-The core does not add engine-specific branches or interpret upstream semantics. The optional VoiceRender adapter is an explicit boundary module: it validates VoiceRender's public handoff and lowers supported selections, pause policy, and numeric operations into a generic job without changing Composer or AudioJob schemas.
+The core does not add engine-specific branches or interpret upstream semantics. The RenderPlan adapter is an explicit boundary module: it verifies the shared plan, manifest, and speech artifacts, then lowers the ordered flow into a generic job without changing Composer or AudioJob schemas.
 
 ## Supported operations
 

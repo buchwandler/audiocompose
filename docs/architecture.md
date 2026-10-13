@@ -2,12 +2,15 @@
 
 ## Boundary
 
-AudioCompose core is the generic audio composition layer. Its `Composer`, `AudioJob`, and schemas accept producer-neutral values; synthesis or upstream artifact interpretation ends at the job boundary. Optional adapters may materialize generic jobs from validated producer artifacts without adding producer-specific semantics to core composition.
+AudioCompose core is the generic audio composition layer. Its `Composer`, `AudioJob`, and schemas accept producer-neutral values. Optional adapters verify upstream handoffs and translate completed audio plus its provenance into ordinary jobs; synthesis, planning, and semantic interpretation remain outside the core.
+
+The RenderPlan adapter is an explicit consumer boundary. It takes values from the shared `renderplan` contract and separately located media; it does not generate plans, run preflight, or invoke speech synthesis.
 
 ```text
-any producer -> AudioJob ----------------\
-                                       -> Composer -> final.wav
-UtterPlan + VoiceRender artifacts -> optional adapter -> AudioJob --/
+any producer -> AudioJob --------------------------------\
+                                                         -> Composer -> final.wav
+RenderPlan + complete RenderManifest -> adapter -> AudioJob --/
+                                  + speech WAVs + media
 ```
 
 For mixed-engine use, any producer can emit the same generic job shape:
@@ -20,13 +23,24 @@ engine B -> AudioJob --/
 
 The producer resolves semantic and engine behavior before composition. The AudioCompose core handles completed generic audio only and treats producer metadata and span identity as opaque.
 
-PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection, inference, engine-native controls, calibration, and timing extraction. They translate unresolved semantic intent into concrete audio and numeric audio-domain operations. Core AudioCompose modules do not import TTS engines, UtterPlan readers, model runtimes, or engine semantics.
+PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection, inference, engine-native controls, calibration, and timing extraction. They translate unresolved semantic intent into concrete audio and numeric audio-domain operations. Core AudioCompose modules do not import TTS engines, producer-specific planners, model runtimes, or engine semantics.
 
-## Optional VoiceRender materialization
+## Direct RenderPlan consumption
 
-`audiocompose.integrations.voicerender` is an explicit adapter boundary enabled by the `audiocompose[voicerender]` extra. It uses VoiceRender's public handoff APIs to verify UtterPlan v5, render-manifest binding, selection, and speech artifacts, then produces an ordinary v2 `AudioJob`. The base package, `Composer`, and persisted schema do not depend on VoiceRender.
+AudioCompose's `renderplan>=0.1,<0.2` runtime dependency supplies the shared contract types and TOML loaders. `audiocompose.integrations.renderplan` validates plan and manifest identity, requires `complete=true`, and checks exact manifest correspondence. Before constructing an `AudioJob`, it verifies each speech occurrence, segment ID, manifest WAV name, safe containment under the render directory, regular-file and symlink safety, SHA-256, and WAV sample-rate/channel/frame geometry. Speech artifacts must be mono.
 
-The standalone `audiocompose materialize PLAN --renders MANIFEST --pauses POLICY --output JOB` command resolves output preferences into the existing `OutputPolicy`, persists the job, and leaves validation, inspection, and composition to the normal CLI commands. `PausePolicy` maps symbolic intents to durations at source boundaries. Relative local WAV media is resolved safely beneath the plan directory; opaque URIs need a custom `MediaResolver`. Numeric speed and explicit dB gain are supported, while clip-region and repeat controls fail closed because AudioJob v2 has no generic source-region model.
+The adapter iterates `RenderPlan.flow` literally. Pauses become `Silence` items at the declared `duration_ms / 1000`, including zero-duration pauses; AudioCompose does not infer pause meaning or apply a symbolic pause policy. Shared source spans are retained only as opaque provenance metadata, not fabricated `AudioSpan` alignment. The resulting job uses the same persistence, `OutputPolicy`, Composer, and output paths as any other AudioJob.
+
+External `AudioItem` media is resolved separately from the speech manifest. The built-in local-WAV resolver requires an explicit `media_root` for relative paths and rejects traversal, symlinks, non-WAV files, and invalid or non-mono WAVs. `compose-renderplan` defaults the media root to the plan directory. The built-in resolver accepts local WAV paths; a Python `MediaResolver` can handle explicit URI schemes. The adapter fail-closes on unknown options and supports validated trim ranges, playback `speed` as `Tempo`, and `gain_db` as `Gain`.
+
+The direct CLI composes without first persisting an AudioJob:
+
+```text
+audiocompose compose-renderplan PLAN --manifest MANIFEST \
+  --render-dir DIR --output WAV [--media-root DIR] [--explain]
+```
+
+The manifest defaults to `<render-dir>/render-manifest.toml`. The command accepts the existing output-policy controls, writes the final WAV, and reports a RenderPlan-derived timeline; `--explain` prints ordered provenance. Use `--save-audiojob` for an optional intermediate bundle. The generic `validate`, `inspect`, `compose`, `timeline`, and save/load workflows are unchanged.
 
 ## AudioJob
 
@@ -67,23 +81,21 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 
 ## Ownership matrix
 
-| Concern                                                                        | Owner                                      |
-| ------------------------------------------------------------------------------ | ------------------------------------------ |
-| Concern                                                                        | Owner                                      |
-| ------------------------------------------------------------------------------ | ------------------------------------------ |
-| SSMD, language analysis, segmentation, semantic pauses, prosody intent         | UtterPlan                                  |
-| G2P, voice/model choice, model assets, inference, native controls, calibration | PyKokoro / PiperSynth / engine package     |
-| UtterPlan v5 parsing and render-manifest handoff verification                  | VoiceRender public handoff API             |
-| VoiceRender artifact to generic AudioJob materialization                       | optional AudioCompose VoiceRender adapter  |
-| Symbolic pause-to-duration composition policy                                  | AudioCompose integration                   |
-| AudioJob format and bundle validation                                          | audiocompose core                          |
-| WAV loading, operation model/orchestration, timeline assembly                  | audiocompose core                          |
-| Numeric rate/pitch envelopes and timing maps                                   | audiocompose core                          |
-| Transition eligibility and voice/segment semantics                             | producer                                   |
-| Band-limited resampling, time-scale modification, pitch-shift DSP              | AudioSig                                   |
-| Silence insertion and marker finalization                                      | audiocompose core                          |
-| Complete-output LUFS, true peak, clipping, and final WAV                       | audiocompose core                          |
+| Concern                                                             | Owner                             |
+| ------------------------------------------------------------------- | --------------------------------- |
+| Language analysis, segmentation, semantic intent, speech planning   | Upstream planner / producer       |
+| Voice/model choice, inference, calibration, native controls         | Speech producer / engine          |
+| RenderPlan and RenderManifest contracts and TOML loading            | RenderPlan package                |
+| Speech artifact production                                          | Upstream renderer                 |
+| Manifest correspondence and speech artifact integrity               | AudioCompose RenderPlan adapter   |
+| RenderPlan flow ordering and provenance lowering to AudioJob values | AudioCompose RenderPlan adapter   |
+| Media-root policy, media resolver contract, and option lowering     | AudioCompose integration boundary |
+| AudioJob format, schema, persistence, and bundle validation         | AudioCompose core                 |
+| Numeric operation model and timing maps                             | AudioCompose core                 |
+| Resampling, time-scale modification, and pitch-shift DSP            | AudioSig                          |
+| AudioJob order, silence placement, markers, and timeline assembly   | AudioCompose core                 |
+| Complete-output loudness, clipping policy, and final WAV            | AudioCompose core                 |
 
 ## Non-TTS guarantee
 
-The base AudioCompose install requires NumPy and AudioSig. Importing `audiocompose`, constructing `AudioJob`, and using `Composer` do not import or require VoiceRender, Readio, PyKokoro, PiperSynth, Kokoro or Piper G2P packages, or ONNX Runtime. Only the explicitly invoked VoiceRender adapter depends on the optional `audiocompose[voicerender]` extra. AudioSig supplies band-limited resampling and WSOLA time/pitch DSP; AudioCompose core owns the generic operation model and composition orchestration. Canonical tests use deterministic synthetic audio and require no TTS models.
+The base AudioCompose install requires NumPy, AudioSig, and the shared RenderPlan contract package. Importing `audiocompose`, constructing a generic `AudioJob`, and using `Composer` do not import or require TTS engines, producer-specific planners, model runtimes, or inference frameworks. The RenderPlan adapter is a consumer-only boundary; it verifies completed artifacts and resolves audio into generic job values. AudioSig supplies band-limited resampling and WSOLA time/pitch DSP, while AudioCompose core owns the generic operation model and composition orchestration. Canonical tests use deterministic synthetic audio and require no TTS models.
