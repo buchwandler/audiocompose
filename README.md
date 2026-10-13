@@ -113,6 +113,37 @@ job = load_and_materialize_renderplan_job(
 
 The manifest path is optional and uses the same default as the CLI. The result is an ordinary, inspectable `AudioJob`; use `--save-audiojob` on the direct CLI or `job.save("chapter.audiojob")` to persist it, then continue with the existing generic `validate`, `inspect`, `timeline`, and `compose` workflows.
 
+## Book-level composition for rendered variants
+
+After VoiceRender has produced a complete RenderManifest and verified speech WAVs for each chapter, compose a RenderPlan-set variant with:
+
+```bash
+audiocompose compose-book . --variant narration--525856299523
+```
+
+`BOOK` may be the workspace root or its canonical `chapters/` directory. The required `--variant` is the exact `<profile-label>--<profile-fingerprint>` directory present under both `renderplan/` and `voicerender/`. AudioCompose loads `renderplan/<variant>/renderplan-set.toml` through `renderplan`; this set is authoritative for selected chapter IDs and order. A number selector, inclusive range, comma-separated selectors, or `all` may be passed with `--chapters` (default `all`):
+
+```bash
+audiocompose compose-book . --variant narration--525856299523 --chapters 5
+audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
+audiocompose compose-book . --variant narration--525856299523 --chapters 5,8,10-12
+```
+
+By default, one final WAV per selected chapter and an atomic report are written under `audiocompose/<variant>/`:
+
+```text
+audiocompose/<variant>/
+├── compose-report.toml
+├── chapter-0005.wav
+└── chapter-0006.wav
+```
+
+Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override the corresponding book roots. `--media-root` is forwarded to every RenderPlan materialization; when omitted, relative external `AudioItem` WAV paths use the same default as `compose-renderplan` (the individual plan's directory). Output mastering options (`--sample-rate`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`) match the direct command and apply to every selected chapter. AudioJob bundles are not saved unless `--save-audiojobs DIR` is requested.
+
+Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC but `compose-book --chapters N` rejects its `complete = false` manifest; use VoiceRender to finish that chapter before composing it. For each chapter AudioCompose still verifies the exact set/plan identities and delegates complete-manifest, speech WAV hash/geometry, path-safety, and external-media checks to the existing strict RenderPlan materializer. It then calls the ordinary `Composer`; pauses remain literal RenderPlan flow items. No VoiceRender or UtterPlan runtime dependency is added.
+
+A prior output is reused only when its report proves matching RenderPlan ID, RenderManifest ID, output-policy identity, output SHA-256, and WAV geometry. An existing output without matching provenance fails with `output.exists`; `--force` recomposes and atomically replaces the selected WAVs. The default batch continues after independent chapter failures and writes per-chapter details to the report; `--fail-fast` marks remaining selections skipped. `--json` emits a machine-readable batch result.
+
 ## Debugging and analysis
 
 The CLI also exposes generic, TTS-neutral diagnostics:

@@ -82,6 +82,37 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_json(compose_renderplan)
 
+    compose_book = subparsers.add_parser(
+        "compose-book", help="compose selected chapters from a rendered book variant"
+    )
+    compose_book.add_argument("book", help="book/workspace root (or its chapters directory)")
+    compose_book.add_argument(
+        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
+    )
+    compose_book.add_argument(
+        "--chapters", default="all", help="source chapter numbers: all, 5, 5-7, or 5,8,10-12"
+    )
+    compose_book.add_argument("--renderplan-root", help="override the book RenderPlan root")
+    compose_book.add_argument("--voicerender-root", help="override the book VoiceRender root")
+    compose_book.add_argument("--output-root", help="override the AudioCompose output root")
+    compose_book.add_argument(
+        "--media-root", help="explicit base directory for relative external AudioItems"
+    )
+    compose_book.add_argument("--sample-rate", type=int)
+    compose_book.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+    compose_book.add_argument("--target-lufs", type=float)
+    compose_book.add_argument("--true-peak-ceiling-dbtp", type=float)
+    compose_book.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    compose_book.add_argument(
+        "--save-audiojobs", help="optional root for intermediate chapter AudioJobs"
+    )
+    compose_book.add_argument(
+        "--force", action="store_true", help="recompose and replace selected chapter outputs"
+    )
+    compose_book.add_argument(
+        "--fail-fast", action="store_true", help="skip later chapters after the first failure"
+    )
+    _add_json(compose_book)
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -327,7 +358,52 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "compose-renderplan":
+        if args.command == "compose-book":
+            from .book import compose_book, resolve_book
+
+            context = resolve_book(
+                args.book,
+                args.variant,
+                chapters=args.chapters,
+                renderplan_root=args.renderplan_root,
+                voicerender_root=args.voicerender_root,
+                output_root=args.output_root,
+                media_root=args.media_root,
+                save_audiojobs=args.save_audiojobs,
+            )
+            result = compose_book(
+                context,
+                _output_policy_from_args(args),
+                force=args.force,
+                fail_fast=args.fail_fast,
+            )
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print("AudioCompose book compose")
+                print(f"  workspace:   {context.workspace}")
+                print(f"  variant:     {context.variant}")
+                print(f"  renderplans: {context.renderplan_variant_dir}")
+                print(f"  speech:      {context.voicerender_variant_dir}")
+                print(f"  output:      {context.output_variant_dir}")
+                print(f"  chapters:    {context.selector}")
+                print(f"  selected:    {result['requested']}")
+                for item in result["items"]:
+                    print(f"[{item['index']}/{result['requested']}] {item['id']}: {item['status']}")
+                    if item.get("status") == "written":
+                        print(
+                            f"       wrote {item.get('output')} ({item.get('duration_seconds', 0):.3f}s)"
+                        )
+                    elif item.get("status") == "failed":
+                        print(f"       {item.get('error_code')}: {item.get('error_message')}")
+                print("AudioCompose summary")
+                print(f"  requested: {result['requested']}")
+                print(f"  written:   {result['written']}")
+                print(f"  reused:    {result['reused']}")
+                print(f"  failed:    {result['failed']}")
+                print(f"  skipped:   {result['skipped']}")
+            return 2 if result["failed"] or result["report_error"] else 0
+        elif args.command == "compose-renderplan":
             from .integrations.renderplan import load_and_materialize_renderplan_job
 
             plan_path = Path(args.plan).expanduser()
@@ -434,7 +510,12 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "json", False):
             print(
                 json.dumps(
-                    {"valid": False, "errors": [{"code": "validation_error", "message": str(exc)}]},
+                    {
+                        "valid": False,
+                        "errors": [
+                            {"code": getattr(exc, "code", "validation_error"), "message": str(exc)}
+                        ],
+                    },
                     indent=2,
                 ),
                 file=sys.stderr,

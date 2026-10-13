@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,4 +149,32 @@ def write_wav(
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(pcm.tobytes())
+    return destination
+
+
+def atomic_write_wav(
+    path: str | Path,
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    clip_policy: ClipPolicy = "clamp",
+) -> Path:
+    """Write a WAV beside its destination and atomically replace the final path."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.tmp-", suffix=".wav", dir=destination.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        write_wav(temporary, audio, sample_rate, clip_policy=clip_policy)
+        info = wav_info(temporary)
+        if info.sample_rate != sample_rate or info.channels != 1:
+            raise AudioValidationError("temporary WAV failed output geometry verification")
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return destination
