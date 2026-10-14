@@ -33,6 +33,8 @@ The adapter iterates `RenderPlan.flow` literally. Pauses become `Silence` items 
 
 External `AudioItem` media is resolved separately from the speech manifest. The built-in local-WAV resolver requires an explicit `media_root` for relative paths and rejects traversal, symlinks, non-WAV files, and invalid or non-mono WAVs. `compose-renderplan` defaults the media root to the plan directory. The built-in resolver accepts local WAV paths; a Python `MediaResolver` can handle explicit URI schemes. The adapter fail-closes on unknown options and supports validated trim ranges, playback `speed` as `Tempo`, and `gain_db` as `Gain`.
 
+Speech `emphasis` is interpreted only at this RenderPlan materialization boundary. AudioCompose validates the `level` parameter and turns the selected bounded gain into a real `Gain` operation on the speech clip; policy version, source controls/ranges, policy, gain, and application scope are provenance metadata. Without trusted character-to-sample alignment, a full-span control is exact at clip scope; partial controls either fail in `strict` mode or boost the complete segment under the integrated `segment_fallback` default, with a visible warning and original character ranges. Overlaps use the strongest level, not cumulative gain. The generic AudioJob model remains speech-control agnostic, and downstream output-wide loudness/peak processing may reduce the relative boost.
+
 The direct CLI composes without first persisting an AudioJob:
 
 ```text

@@ -12,12 +12,13 @@ from renderplan import (
     RenderPlan,
     SourceSpan,
     SpeechArtifact,
+    SpeechControl,
     SpeechItem,
     save_manifest,
     save_plan,
 )
 
-from audiocompose import AudioClip, AudioSpan, OutputPolicy, Silence
+from audiocompose import AudioClip, AudioJob, AudioSpan, Gain, OutputPolicy, Silence
 from audiocompose.errors import HandoffValidationError
 from audiocompose.integrations.renderplan import (
     load_and_materialize_renderplan_job,
@@ -30,13 +31,19 @@ def _id(seed: str) -> str:
     return "sha256:" + hashlib.sha256(seed.encode()).hexdigest()
 
 
-def _speech(number: int = 1, *, text: str = "Hello") -> SpeechItem:
+def _speech(
+    number: int = 1,
+    *,
+    text: str = "Hello",
+    controls=(),
+) -> SpeechItem:
     return SpeechItem(
         number=number,
         text=text,
         language="en-US",
         role="narrator",
         binding={"engine": "fixture"},
+        controls=tuple(controls),
         source=(SourceSpan("source.txt", 12, 12 + len(text)),),
     ).with_identity()
 
@@ -100,6 +107,222 @@ def test_matching_contract_materializes_verified_speech_and_provenance(tmp_path)
     assert job.source["renderplan.plan_id"] == plan.plan_id
     assert job.output.sample_rate == 16_000
     job.validate(verify_sources=True)
+    assert clip.operations == ()
+
+
+@pytest.mark.parametrize(
+    ("level", "expected_db"),
+    [(None, 1.5), ("moderate", 1.5), ("reduced", 0.75), ("strong", 2.5)],
+)
+def test_full_span_emphasis_maps_gain_and_roundtrips_audiojob(tmp_path, level, expected_db):
+    params = {} if level is None else {"level": level}
+    speech = _speech(controls=(SpeechControl(0, 5, "emphasis", params),))
+    wav_path, artifact = _rendered(tmp_path, speech)
+    original_bytes = wav_path.read_bytes()
+    plan = _plan(speech)
+    job = materialize_renderplan_job(plan, _manifest(plan, [artifact]), render_dir=tmp_path)
+
+    clip = job.items[0]
+    assert isinstance(clip, AudioClip)
+    assert clip.operations == (Gain(expected_db),)
+    assert clip.metadata["renderplan.emphasis"] == {
+        "policy_version": 1,
+        "policy": "strict",
+        "scope": "full_span",
+        "approximation": False,
+        "controls": [
+            {
+                "name": "emphasis",
+                "start": 0,
+                "end": 5,
+                "params": params,
+                "level": level or "moderate",
+            }
+        ],
+        "partial_ranges": [],
+        "selected_level": level or "moderate",
+        "gain_db": expected_db,
+    }
+    assert clip.metadata["renderplan.segment_id"] == speech.segment_id
+    assert clip.metadata["render_manifest.wav_sha256"] == artifact.sha256
+    assert wav_path.read_bytes() == original_bytes
+
+    saved = job.save(tmp_path / f"emphasis-{level or 'default'}.audiojob")
+    loaded = AudioJob.load(saved)
+    loaded_clip = loaded.items[0]
+    assert isinstance(loaded_clip, AudioClip)
+    assert loaded.schema_version == 2
+    assert loaded_clip.operations == (Gain(expected_db),)
+    assert loaded_clip.metadata["renderplan.emphasis"] == clip.metadata["renderplan.emphasis"]
+    assert loaded.job_id
+
+
+def test_partial_emphasis_uses_explicit_fallback_and_strict_rejects(tmp_path):
+    from audiocompose.operations import apply_operation
+
+    speech = _speech(controls=(SpeechControl(1, 3, "emphasis", {}),))
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    manifest = _manifest(plan, [artifact])
+
+    job = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, emphasis_policy="segment_fallback"
+    )
+    clip = job.items[0]
+    assert isinstance(clip, AudioClip)
+    report = clip.metadata["renderplan.emphasis"]
+    assert clip.operations == (Gain(1.5),)
+    assert report["scope"] == "segment_fallback"
+    assert report["approximation"] is True
+    assert report["controls"][0]["start"] == 1
+    assert report["controls"][0]["end"] == 3
+    boosted = apply_operation(np.full(32, 0.125, dtype=np.float32), 16_000, clip.operations[0])
+    assert np.sqrt(np.mean(boosted**2)) / 0.125 == pytest.approx(10 ** (1.5 / 20))
+
+    with pytest.raises(HandoffValidationError, match=r"speech 1 emphasis range.*segment_fallback"):
+        materialize_renderplan_job(plan, manifest, render_dir=tmp_path, emphasis_policy="strict")
+
+
+def test_overlapping_emphasis_uses_strongest_gain_once(tmp_path):
+    speech = _speech(
+        controls=(
+            SpeechControl(0, 5, "emphasis", {"level": "moderate"}),
+            SpeechControl(1, 4, "emphasis", {"level": "strong"}),
+        )
+    )
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    job = materialize_renderplan_job(
+        plan,
+        _manifest(plan, [artifact]),
+        render_dir=tmp_path,
+        emphasis_policy="segment_fallback",
+    )
+    clip = job.items[0]
+    assert isinstance(clip, AudioClip)
+    assert clip.operations == (Gain(2.5),)
+    assert clip.metadata["renderplan.emphasis"]["selected_level"] == "strong"
+
+
+@pytest.mark.parametrize(
+    ("control", "message"),
+    [
+        (SpeechControl(1, 3, "emphasis", {"unknown": 1}), "unsupported emphasis parameter"),
+        (SpeechControl(1, 3, "emphasis", {"level": "mild"}), "unsupported emphasis level"),
+        (SpeechControl(1, 3, "prosody", {"level": "moderate"}), "unsupported speech control"),
+        (SpeechControl(1, 3, "emphasis", {"level": True}), "unsupported emphasis level"),
+    ],
+)
+def test_invalid_emphasis_controls_fail_with_segment_range(tmp_path, control, message):
+    speech = _speech(controls=(control,))
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    with pytest.raises(
+        HandoffValidationError, match=rf"speech 1 control range \[1, 3\).*{message}"
+    ):
+        materialize_renderplan_job(plan, _manifest(plan, [artifact]), render_dir=tmp_path)
+
+
+def test_invalid_mutated_control_range_is_rejected():
+    from audiocompose.integrations.renderplan import _speech_emphasis
+
+    speech = _speech()
+    control = SpeechControl(0, 1, "emphasis", {})
+    object.__setattr__(control, "end", len(speech.text) + 1)
+    object.__setattr__(speech, "controls", (control,))
+    with pytest.raises(
+        HandoffValidationError, match="speech 1 control range.*expected character offsets"
+    ):
+        _speech_emphasis(speech, "segment_fallback")
+
+
+def test_emphasis_policy_and_metadata_affect_audiojob_identity(tmp_path):
+    speech = _speech(controls=(SpeechControl(0, 5, "emphasis", {}),))
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    manifest = _manifest(plan, [artifact])
+    strict = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, emphasis_policy="strict"
+    )
+    fallback = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, emphasis_policy="segment_fallback"
+    )
+    strict_id = AudioJob.load(strict.save(tmp_path / "strict.audiojob")).job_id
+    fallback_id = AudioJob.load(fallback.save(tmp_path / "fallback.audiojob")).job_id
+    assert strict_id != fallback_id
+
+
+def test_emphasis_preserves_peak_limits_and_clip_policy(tmp_path):
+    from audiocompose import Composer, LoudnessPolicy
+    from audiocompose.errors import CompositionError
+
+    speech = _speech(controls=(SpeechControl(0, 5, "emphasis", {"level": "strong"}),))
+    wav_path = tmp_path / speech.wav
+    write_wav(wav_path, np.full(32, 0.9, dtype=np.float32), 16_000)
+    artifact = _artifact(speech, wav_path)
+    plan = _plan(speech)
+    manifest = _manifest(plan, [artifact])
+    no_limit = OutputPolicy(
+        sample_rate=16_000,
+        clip_policy="error",
+        loudness=LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=None),
+    )
+    job = materialize_renderplan_job(plan, manifest, render_dir=tmp_path, output_policy=no_limit)
+    assert job.output.clip_policy == "error"
+    emphasized_clip = job.items[0]
+    assert isinstance(emphasized_clip, AudioClip)
+    assert emphasized_clip.operations == (Gain(2.5),)
+    with pytest.raises(CompositionError, match="outside the PCM range"):
+        Composer().compose(job)
+
+    limited_policy = OutputPolicy(
+        sample_rate=16_000,
+        loudness=LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=-1.0),
+    )
+    limited_job = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, output_policy=limited_policy
+    )
+    composition = Composer().compose(limited_job)
+    assert np.max(np.abs(composition.audio)) <= 10 ** (-1.0 / 20) + 1e-6
+    assert composition.loudness is not None
+    assert composition.loudness.applied_gain_db < 0
+
+
+def test_unemphasized_job_identity_and_operations_ignore_emphasis_policy(tmp_path):
+    speech = _speech()
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    manifest = _manifest(plan, [artifact])
+    strict = materialize_renderplan_job(plan, manifest, render_dir=tmp_path)
+    fallback = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, emphasis_policy="segment_fallback"
+    )
+    strict_clip = strict.items[0]
+    fallback_clip = fallback.items[0]
+    assert isinstance(strict_clip, AudioClip)
+    assert isinstance(fallback_clip, AudioClip)
+    assert strict_clip.operations == fallback_clip.operations == ()
+    assert "renderplan.emphasis" not in strict_clip.metadata
+    assert "renderplan.emphasis" not in fallback_clip.metadata
+    strict_id = AudioJob.load(strict.save(tmp_path / "plain-strict.audiojob")).job_id
+    fallback_id = AudioJob.load(fallback.save(tmp_path / "plain-fallback.audiojob")).job_id
+    assert strict_id == fallback_id
+
+
+def test_multiple_full_span_emphasis_uses_strongest_gain_once(tmp_path):
+    speech = _speech(
+        controls=(
+            SpeechControl(0, 5, "emphasis", {"level": "moderate"}),
+            SpeechControl(0, 5, "emphasis", {"level": "strong"}),
+        )
+    )
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    job = materialize_renderplan_job(plan, _manifest(plan, [artifact]), render_dir=tmp_path)
+    clip = job.items[0]
+    assert isinstance(clip, AudioClip)
+    assert clip.operations == (Gain(2.5),)
+    assert clip.metadata["renderplan.emphasis"]["scope"] == "full_span"
 
 
 def test_exact_flow_pauses_include_leading_and_zero_duration_events(tmp_path):
@@ -411,6 +634,65 @@ def test_compose_renderplan_cli_matches_explicit_materialize_and_composition(tmp
         }
         for item, composed in zip(expected_job.items, expected.items, strict=True)
     ]
+
+
+def test_renderplan_cli_defaults_to_fallback_and_strict_writes_no_output(tmp_path, capsys):
+    import json
+
+    from audiocompose.cli import main
+    from audiocompose.wav import read_wav
+
+    speech = _speech(controls=(SpeechControl(1, 3, "emphasis", {}),))
+    _, artifact = _rendered(tmp_path, speech)
+    plan = _plan(speech)
+    plan_path = tmp_path / "emphasis.renderplan.toml"
+    save_plan(plan, plan_path)
+    save_manifest(_manifest(plan, [artifact]), tmp_path / "render-manifest.toml")
+
+    output = tmp_path / "fallback.wav"
+    assert (
+        main(
+            [
+                "compose-renderplan",
+                str(plan_path),
+                "--render-dir",
+                str(tmp_path),
+                "--output",
+                str(output),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    response = json.loads(capsys.readouterr().out)
+    assert response["emphasis_policy"] == "segment_fallback"
+    assert response["timeline"][0]["renderplan.emphasis"]["scope"] == "segment_fallback"
+    assert response["diagnostics"][0]["code"] == "emphasis.segment_fallback"
+    assert output.is_file()
+    audible, sample_rate = read_wav(output)
+    assert sample_rate == 24_000
+    assert np.max(np.abs(audible)) > 0
+
+    strict_output = tmp_path / "strict.wav"
+    assert (
+        main(
+            [
+                "compose-renderplan",
+                str(plan_path),
+                "--render-dir",
+                str(tmp_path),
+                "--output",
+                str(strict_output),
+                "--emphasis-policy",
+                "strict",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert "split the speech upstream" in error["errors"][0]["message"]
+    assert not strict_output.exists()
 
 
 def test_compose_renderplan_cli_explains_provenance_without_pause_policy_options(tmp_path, capsys):

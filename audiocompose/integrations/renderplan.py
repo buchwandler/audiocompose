@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from renderplan import AudioItem, PauseItem, RenderManifest, RenderPlan, SpeechItem
 
 from .._version import __version__
 from ..errors import HandoffValidationError, MediaResolutionError
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
+from ..operations import Gain
 from ..sources import AudioFileSource
 from ..wav import read_wav, sha256_file, wav_info
 from .media import (
@@ -34,6 +36,7 @@ from .renderplan_metadata import (
     RENDERPLAN_AUDIO_ID,
     RENDERPLAN_AUDIO_OPTIONS,
     RENDERPLAN_AUDIO_SOURCE,
+    RENDERPLAN_EMPHASIS,
     RENDERPLAN_PAUSE_ID,
     RENDERPLAN_PAUSE_REASON,
     RENDERPLAN_PAUSE_SOURCE,
@@ -184,14 +187,108 @@ def _source_metadata(item: SpeechItem) -> list[dict[str, Any]]:
     return [span.to_dict() for span in item.source]
 
 
+_EMPHASIS_GAIN_DB = {"reduced": 0.75, "moderate": 1.5, "strong": 2.5}
+
+
+def _speech_emphasis(
+    item: SpeechItem, policy: Literal["segment_fallback", "strict"]
+) -> tuple[Gain | None, dict[str, Any] | None]:
+    """Validate speech emphasis and return its bounded clip-level gain/report."""
+    if policy not in ("segment_fallback", "strict"):
+        raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
+
+    controls = item.controls
+    if not isinstance(controls, (tuple, list)):
+        raise HandoffValidationError(
+            f"speech {item.number} control range [unknown]: controls must be a sequence"
+        )
+    if not controls:
+        return None, None
+
+    normalized: list[dict[str, Any]] = []
+    for control in controls:
+        start = getattr(control, "start", None)
+        end = getattr(control, "end", None)
+        range_label = f"[{start!r}, {end!r})"
+        context = f"speech {item.number} control range {range_label}"
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or start < 0
+            or end <= start
+            or end > len(item.text)
+        ):
+            raise HandoffValidationError(
+                f"{context}: expected character offsets satisfying 0 <= start < end <= {len(item.text)}"
+            )
+        name = getattr(control, "name", None)
+        if name != "emphasis":
+            raise HandoffValidationError(
+                f"{context}: unsupported speech control {name!r}; AudioCompose supports 'emphasis' only"
+            )
+        params = getattr(control, "params", None)
+        if not isinstance(params, Mapping):
+            raise HandoffValidationError(f"{context}: emphasis params must be a mapping")
+        unknown = sorted(set(params).difference({"level"}))
+        if unknown:
+            raise HandoffValidationError(
+                f"{context}: unsupported emphasis parameter(s): {', '.join(map(str, unknown))}"
+            )
+        level = params.get("level", "moderate")
+        if not isinstance(level, str) or level not in _EMPHASIS_GAIN_DB:
+            raise HandoffValidationError(
+                f"{context}: unsupported emphasis level {level!r}; choose reduced, moderate, or strong"
+            )
+        normalized.append(
+            {
+                "name": name,
+                "start": start,
+                "end": end,
+                "params": dict(params),
+                "level": level,
+            }
+        )
+
+    partial = [
+        control
+        for control in normalized
+        if (control["start"], control["end"]) != (0, len(item.text))
+    ]
+    if partial and policy == "strict":
+        ranges = ", ".join(f"[{c['start']}, {c['end']})" for c in partial)
+        raise HandoffValidationError(
+            f"speech {item.number} emphasis range(s) {ranges}: partial-span emphasis has no trusted sample alignment; "
+            "use segment_fallback or split the speech upstream"
+        )
+
+    selected = max(normalized, key=lambda control: _EMPHASIS_GAIN_DB[control["level"]])
+    scope = "segment_fallback" if partial else "full_span"
+    gain_db = _EMPHASIS_GAIN_DB[selected["level"]]
+    report = {
+        "policy_version": 1,
+        "policy": policy,
+        "scope": scope,
+        "approximation": bool(partial),
+        "controls": normalized,
+        "partial_ranges": [[control["start"], control["end"]] for control in partial],
+        "selected_level": selected["level"],
+        "gain_db": gain_db,
+    }
+    return Gain(gain_db), report
+
+
 def _materialize_speech(
     item: SpeechItem,
     plan_id: str,
     manifest: RenderManifest,
     verified: dict[int, tuple[Any, Path, str]],
+    emphasis_policy: Literal["segment_fallback", "strict"],
 ) -> AudioClip:
     artifact, path, digest = verified[item.number]
     segment_id = item.segment_id or item.computed_id()
+    gain, emphasis_report = _speech_emphasis(item, emphasis_policy)
     metadata: dict[str, Any] = {
         "kind": "speech",
         RENDERPLAN_PLAN_ID: plan_id,
@@ -205,6 +302,9 @@ def _materialize_speech(
         MANIFEST_CHANNELS: artifact.channels,
         MANIFEST_FRAMES: artifact.frames,
     }
+    operations = (gain,) if gain is not None else ()
+    if emphasis_report is not None:
+        metadata[RENDERPLAN_EMPHASIS] = emphasis_report
     return AudioClip(
         id=f"speech:{item.number:06d}",
         source=AudioFileSource(
@@ -214,6 +314,7 @@ def _materialize_speech(
             channels=1,
             frames=artifact.frames,
         ),
+        operations=operations,
         metadata=metadata,
     )
 
@@ -303,6 +404,7 @@ def materialize_renderplan_job(
     output_policy: OutputPolicy | None = None,
     media_resolver: MediaResolver | None = None,
     media_root: str | Path | None = None,
+    emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
 ) -> AudioJob:
     """Verify a complete RenderPlan handoff and return a generic AudioJob.
 
@@ -310,6 +412,8 @@ def materialize_renderplan_job(
     validated before AudioJob construction. Relative external paths use only the
     explicit ``media_root`` supplied for this in-memory plan.
     """
+    if emphasis_policy not in ("segment_fallback", "strict"):
+        raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
     plan_id = _validate_contract(plan, manifest)
     render_root = _safe_directory(render_dir, label="render_dir")
     verified = _verify_speech_artifacts(plan, manifest, render_root)
@@ -327,7 +431,7 @@ def materialize_renderplan_job(
     items: list[AudioClip | Silence] = []
     for flow_index, item in enumerate(plan.flow):
         if isinstance(item, SpeechItem):
-            items.append(_materialize_speech(item, plan_id, manifest, verified))
+            items.append(_materialize_speech(item, plan_id, manifest, verified, emphasis_policy))
         elif isinstance(item, PauseItem):
             items.append(_materialize_pause(item, plan_id, flow_index))
         elif isinstance(item, AudioItem):
@@ -362,6 +466,7 @@ def load_and_materialize_renderplan_job(
     output_policy: OutputPolicy | None = None,
     media_resolver: MediaResolver | None = None,
     media_root: str | Path | None = None,
+    emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
 ) -> AudioJob:
     """Load shared-contract TOML files and materialize them as an AudioJob."""
     from renderplan import load_manifest, load_plan
@@ -386,6 +491,7 @@ def load_and_materialize_renderplan_job(
         output_policy=output_policy,
         media_resolver=media_resolver,
         media_root=media_root,
+        emphasis_policy=emphasis_policy,
     )
 
 

@@ -14,7 +14,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 
 try:
     tomllib = importlib.import_module("tomllib")
@@ -31,6 +31,7 @@ from renderplan import (
 )
 
 from .errors import AudioComposeError
+from .integrations.renderplan_metadata import RENDERPLAN_EMPHASIS
 
 SET_FILENAME = "renderplan-set.toml"
 MANIFEST_FILENAME = "render-manifest.toml"
@@ -359,6 +360,30 @@ def _policy_id(policy_dict: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _emphasis_diagnostics(job: Any) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for item in job.items:
+        report = item.metadata.get(RENDERPLAN_EMPHASIS)
+        if not isinstance(report, dict) or report.get("scope") != "segment_fallback":
+            continue
+        ranges = report.get("partial_ranges", [])
+        segment_number = item.metadata.get("renderplan.segment_number")
+        diagnostics.append(
+            {
+                "code": "emphasis.segment_fallback",
+                "severity": "warning",
+                "segment_number": segment_number,
+                "character_ranges": ranges,
+                "gain_db": report.get("gain_db"),
+                "message": (
+                    f"speech {segment_number}: applied +{report.get('gain_db')} dB to the entire "
+                    f"segment for character range(s) {ranges}; no trusted word-level sample alignment is available"
+                ),
+            }
+        )
+    return diagnostics
+
+
 def _toml_scalar(value: str | int | float | bool) -> str:
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
@@ -374,6 +399,7 @@ def _report_toml(report: dict[str, Any]) -> str:
     lines = [
         'format = "audiocompose-book-report"',
         "version = 1",
+        f"emphasis_policy = {_toml_scalar(report.get('emphasis_policy', 'segment_fallback'))}",
         f"variant = {_toml_scalar(report['variant'])}",
         f"render_profile_id = {_toml_scalar(report['render_profile_id'])}",
         f"requested = {report['requested']}",
@@ -499,6 +525,7 @@ def compose_book(
     *,
     force: bool = False,
     fail_fast: bool = False,
+    emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
 ) -> dict[str, Any]:
     """Materialize and compose selected chapters, recording a provenance report."""
     from .composer import Composer
@@ -506,12 +533,17 @@ def compose_book(
     from .wav import atomic_write_wav
 
     policy_dict = _output_policy_dict(output_policy)
-    policy_id = _policy_id(policy_dict)
+    base_policy_id = _policy_id(policy_dict)
+    if emphasis_policy not in ("segment_fallback", "strict"):
+        raise BookComposeError(
+            "emphasis.invalid", "emphasis_policy must be 'segment_fallback' or 'strict'"
+        )
     prior_items = _read_prior_items(
         context.report_path, context.variant, context.renderplan_set.profile_id
     )
     item_by_id = dict(prior_items)
     results: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
     failed = written = reused = skipped = 0
     stop = False
 
@@ -559,6 +591,7 @@ def compose_book(
                 render_dir=render_dir,
                 output_policy=output_policy,
                 media_root=media_root,
+                emphasis_policy=emphasis_policy,
             )
             handoff = VerifiedRenderHandoff(
                 chapter=chapter,
@@ -568,6 +601,24 @@ def compose_book(
                 job=job,
             )
             job = handoff.job
+            emphasis_reports = [
+                item.metadata[RENDERPLAN_EMPHASIS]
+                for item in job.items
+                if RENDERPLAN_EMPHASIS in item.metadata
+            ]
+            chapter_policy_id = (
+                _policy_id({"output": policy_dict, "emphasis": emphasis_reports})
+                if emphasis_reports
+                else base_policy_id
+            )
+            chapter_diagnostics = _emphasis_diagnostics(job)
+            for diagnostic in chapter_diagnostics:
+                diagnostic["chapter_id"] = chapter.id
+            diagnostics.extend(chapter_diagnostics)
+            if chapter_diagnostics:
+                entry["emphasis_warning"] = "; ".join(
+                    diagnostic["message"] for diagnostic in chapter_diagnostics
+                )
             manifest_id = handoff.manifest_id
             entry["manifest_id"] = manifest_id
             entry["output"] = paths.output_path.name
@@ -578,7 +629,7 @@ def compose_book(
                     prior,
                     plan_id=plan.plan_id or plan.computed_id(),
                     manifest_id=manifest_id,
-                    policy_id=policy_id,
+                    policy_id=chapter_policy_id,
                     expected_output=paths.output_path.name,
                     expected_sample_rate=policy_dict["sample_rate"],
                     expected_channels=policy_dict["channels"],
@@ -620,7 +671,7 @@ def compose_book(
                 entry.update(_wav_result(paths.output_path))
                 entry["status"] = "written"
                 written += 1
-            entry["output_policy_id"] = policy_id
+            entry["output_policy_id"] = chapter_policy_id
             if context.save_audiojobs_dir is not None:
                 if entry["status"] in {"written", "reused"}:
                     job.save(context.save_audiojobs_dir / f"{chapter.id}.audiojob")
@@ -645,6 +696,7 @@ def compose_book(
     ]
     report = {
         "variant": context.variant,
+        "emphasis_policy": emphasis_policy,
         "render_profile_id": context.renderplan_set.profile_id,
         "requested": len(context.chapters),
         "written": written,
@@ -662,6 +714,8 @@ def compose_book(
     return {
         "format": "audiocompose-book-result",
         "variant": context.variant,
+        "emphasis_policy": emphasis_policy,
+        "diagnostics": diagnostics,
         "workspace": str(context.workspace),
         "renderplan_root": str(context.renderplan_variant_dir),
         "voicerender_root": str(context.voicerender_variant_dir),

@@ -70,6 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     compose_renderplan.add_argument("--output", required=True, help="final output WAV path")
     compose_renderplan.add_argument(
+        "--emphasis-policy",
+        choices=("segment_fallback", "strict"),
+        default="segment_fallback",
+        help="partial-span emphasis policy (default: segment_fallback)",
+    )
+    compose_renderplan.add_argument(
         "--save-audiojob", help="optional directory for saving the intermediate AudioJob"
     )
     compose_renderplan.add_argument("--sample-rate", type=int)
@@ -97,6 +103,12 @@ def _parser() -> argparse.ArgumentParser:
     compose_book.add_argument("--output-root", help="override the AudioCompose output root")
     compose_book.add_argument(
         "--media-root", help="explicit base directory for relative external AudioItems"
+    )
+    compose_book.add_argument(
+        "--emphasis-policy",
+        choices=("segment_fallback", "strict"),
+        default="segment_fallback",
+        help="partial-span emphasis policy (default: segment_fallback)",
     )
     compose_book.add_argument("--sample-rate", type=int)
     compose_book.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
@@ -282,11 +294,36 @@ def _renderplan_timeline(job: AudioJob, composition: CompositionResult) -> list[
             "renderplan.audio.options",
             "render_manifest.wav",
             "render_manifest.wav_sha256",
+            "renderplan.emphasis",
         ):
             if key in metadata:
                 entry[key] = metadata[key]
         timeline.append(entry)
     return timeline
+
+
+def _renderplan_emphasis_diagnostics(job: AudioJob) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for item in job.items:
+        report = item.metadata.get("renderplan.emphasis")
+        if not isinstance(report, dict) or report.get("scope") != "segment_fallback":
+            continue
+        segment_number = item.metadata.get("renderplan.segment_number")
+        ranges = report.get("partial_ranges", [])
+        diagnostics.append(
+            {
+                "code": "emphasis.segment_fallback",
+                "severity": "warning",
+                "segment_number": segment_number,
+                "character_ranges": ranges,
+                "gain_db": report.get("gain_db"),
+                "message": (
+                    f"speech {segment_number}: applied +{report.get('gain_db')} dB to the entire "
+                    f"segment for character range(s) {ranges}; no trusted word-level sample alignment is available"
+                ),
+            }
+        )
+    return diagnostics
 
 
 def _print_renderplan_explanation(
@@ -376,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
                 _output_policy_from_args(args),
                 force=args.force,
                 fail_fast=args.fail_fast,
+                emphasis_policy=args.emphasis_policy,
             )
             if args.json:
                 print(json.dumps(result, indent=2, sort_keys=True))
@@ -396,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     elif item.get("status") == "failed":
                         print(f"       {item.get('error_code')}: {item.get('error_message')}")
+                    if item.get("emphasis_warning"):
+                        print(f"       warning: {item['emphasis_warning']}")
                 print("AudioCompose summary")
                 print(f"  requested: {result['requested']}")
                 print(f"  written:   {result['written']}")
@@ -418,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
                 render_dir=args.render_dir,
                 output_policy=_output_policy_from_args(args),
                 media_root=media_root,
+                emphasis_policy=args.emphasis_policy,
             )
             audiojob_path = job.save(args.save_audiojob) if args.save_audiojob else None
             composition = Composer().compose(job)
@@ -428,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 clip_policy=job.output.clip_policy,
             )
             timeline = _renderplan_timeline(job, composition)
+            diagnostics = _renderplan_emphasis_diagnostics(job)
             result = {
                 "composed": True,
                 "output": str(output_path),
@@ -437,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
                 "frames": len(composition.audio),
                 "duration_seconds": composition.duration_seconds,
                 "timeline": timeline,
+                "emphasis_policy": args.emphasis_policy,
+                "diagnostics": diagnostics,
             }
             if audiojob_path is not None:
                 result["audiojob"] = str(audiojob_path)
@@ -444,6 +488,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
                 print(f"wrote {output_path} ({composition.duration_seconds:.3f}s)")
+                for diagnostic in diagnostics:
+                    print(f"warning: {diagnostic['message']}")
                 if args.explain:
                     _print_renderplan_explanation(
                         result["plan_id"], result["manifest_id"], timeline

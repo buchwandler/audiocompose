@@ -18,6 +18,7 @@ from renderplan import (
     RoleProfile,
     SourceSpan,
     SpeechArtifact,
+    SpeechControl,
     SpeechItem,
     load_manifest,
     load_plan,
@@ -45,7 +46,12 @@ def _profile() -> RenderProfile:
     ).with_identity()
 
 
-def _fixture_book(tmp_path: Path, source_numbers=(7, 6, 5, 8)):
+def _fixture_book(
+    tmp_path: Path,
+    source_numbers=(7, 6, 5, 8),
+    *,
+    emphasis_controls=(),
+):
     workspace = tmp_path / "book"
     profile = _profile()
     profile_id = profile.profile_id or profile.computed_id()
@@ -67,6 +73,7 @@ def _fixture_book(tmp_path: Path, source_numbers=(7, 6, 5, 8)):
             language="en-US",
             role="narrator",
             binding={"renderer": "fixture"},
+            controls=tuple(emphasis_controls),
             source=(SourceSpan(f"{chapter_id}.txt", 0, 10),),
         ).with_identity()
         plan = RenderPlan(
@@ -197,6 +204,68 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
     second = json.loads(capsys.readouterr().out)
     assert second["written"] == 0 and second["reused"] == 1
     assert second["items"][0]["status"] == "reused"
+
+
+def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, capsys):
+    import json
+
+    from audiocompose import AudioClip, AudioJob, Gain
+    from audiocompose.cli import main
+    from audiocompose.wav import read_wav
+
+    controls = (SpeechControl(1, 3, "emphasis", {}),)
+    workspace, variant, _, _ = _fixture_book(
+        tmp_path / "fallback", source_numbers=(5,), emphasis_controls=controls
+    )
+    jobs_root = tmp_path / "jobs"
+    assert (
+        main(
+            [
+                "compose-book",
+                str(workspace),
+                "--variant",
+                variant,
+                "--save-audiojobs",
+                str(jobs_root),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["emphasis_policy"] == "segment_fallback"
+    assert result["diagnostics"][0]["code"] == "emphasis.segment_fallback"
+    assert "entire segment" in result["items"][0]["emphasis_warning"]
+    job = AudioJob.load(jobs_root / "chapter-0005.audiojob")
+    speech_clip = job.items[1]
+    assert isinstance(speech_clip, AudioClip)
+    assert speech_clip.operations == (Gain(1.5),)
+    report = Path(result["report"]).read_text(encoding="utf-8")
+    assert "emphasis_warning" in report and "segment_fallback" in report
+    chapter_audio, _ = read_wav(workspace / "audiocompose" / variant / "chapter-0005.wav")
+    assert np.max(np.abs(chapter_audio)) > 0
+
+    strict_workspace, strict_variant, _, _ = _fixture_book(
+        tmp_path / "strict", source_numbers=(5,), emphasis_controls=controls
+    )
+    assert (
+        main(
+            [
+                "compose-book",
+                str(strict_workspace),
+                "--variant",
+                strict_variant,
+                "--emphasis-policy",
+                "strict",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    strict_result = json.loads(capsys.readouterr().out)
+    assert strict_result["items"][0]["status"] == "failed"
+    assert "split the speech upstream" in strict_result["items"][0]["error_message"]
+    assert not (strict_workspace / "audiocompose" / strict_variant / "chapter-0005.wav").exists()
 
 
 def test_compose_book_uses_set_order_for_full_book_ranges_and_commas(tmp_path, capsys):
