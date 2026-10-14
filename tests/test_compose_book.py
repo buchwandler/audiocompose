@@ -184,6 +184,11 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
     assert first["written"] == 1 and first["reused"] == 0
     assert first["items"][0]["status"] == "written"
     assert first["items"][0]["frames"] == 9_048
+    assert first["items"][0]["source_plan_id"] == "sha256:" + f"{5:064d}"
+    assert first["items"][0]["render_profile_id"]
+    assert first["items"][0]["manifest_id"]
+    assert first["items"][0]["sha256"].startswith("sha256:")
+    assert first["items"][0]["duration_seconds"] > 0
     output = workspace / "audiocompose" / variant / "chapter-0005.wav"
     assert output.is_file()
     assert Path(first["report"]).is_file()
@@ -403,20 +408,20 @@ def test_unknown_existing_output_requires_force(tmp_path, capsys):
     assert forced["items"][0]["status"] == "written"
 
 
-def test_unsafe_set_chapter_id_cannot_escape_output_root(tmp_path, capsys):
-    import json
-
-    from audiocompose.cli import main
+def test_unsafe_set_chapter_id_is_rejected_by_shared_set_loader(tmp_path):
+    from renderplan import RenderPlanSetError
 
     workspace, variant, plan_variant, _ = _fixture_book(tmp_path, source_numbers=(5,))
     set_path = plan_variant / "renderplan-set.toml"
     renderplan_set = load_renderplan_set(set_path)
-    unsafe = replace(renderplan_set.chapters[0], id="../escape")
-    save_renderplan_set(set_path, replace(renderplan_set, chapters=(unsafe,)))
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
-    result = json.loads(capsys.readouterr().out)
-    assert result["items"][0]["error_code"] == "index.invalid"
-    assert not (workspace / "audiocompose" / "escape.wav").exists()
+    chapter_id = renderplan_set.chapters[0].id
+    raw = set_path.read_text(encoding="utf-8")
+    raw = raw.replace(f'id = "{chapter_id}"', 'id = "../escape"', 1)
+    set_path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(RenderPlanSetError, match="safe single basename"):
+        load_renderplan_set(set_path)
+    assert not (workspace / "audiocompose" / variant / "escape.wav").exists()
 
 
 def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys):

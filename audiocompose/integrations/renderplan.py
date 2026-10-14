@@ -21,6 +21,29 @@ from .media import (
     apply_renderplan_media_options,
     renderplan_media_request,
 )
+from .renderplan_metadata import (
+    AUDIOCOMPOSE_MATERIALIZER,
+    AUDIOCOMPOSE_MEDIA_IDENTITY,
+    AUDIOCOMPOSE_MEDIA_METADATA,
+    MANIFEST_CHANNELS,
+    MANIFEST_FRAMES,
+    MANIFEST_ID,
+    MANIFEST_SAMPLE_RATE,
+    MANIFEST_WAV,
+    MANIFEST_WAV_SHA256,
+    RENDERPLAN_AUDIO_ID,
+    RENDERPLAN_AUDIO_OPTIONS,
+    RENDERPLAN_AUDIO_SOURCE,
+    RENDERPLAN_PAUSE_ID,
+    RENDERPLAN_PAUSE_REASON,
+    RENDERPLAN_PAUSE_SOURCE,
+    RENDERPLAN_PLAN_ID,
+    RENDERPLAN_PROFILE_ID,
+    RENDERPLAN_SEGMENT_ID,
+    RENDERPLAN_SEGMENT_NUMBER,
+    RENDERPLAN_SOURCE,
+    RENDERPLAN_SOURCE_PLAN_ID,
+)
 
 MANIFEST_FILENAME = "render-manifest.toml"
 
@@ -113,6 +136,7 @@ def _verify_speech_artifacts(
         )
 
     verified: dict[int, tuple[Any, Path, str]] = {}
+
     for number, item in speeches.items():
         artifact = artifacts[number]
         expected_segment_id = item.segment_id or item.computed_id()
@@ -170,16 +194,16 @@ def _materialize_speech(
     segment_id = item.segment_id or item.computed_id()
     metadata: dict[str, Any] = {
         "kind": "speech",
-        "renderplan.plan_id": plan_id,
-        "renderplan.segment_number": item.number,
-        "renderplan.segment_id": segment_id,
-        "renderplan.source": _source_metadata(item),
-        "render_manifest.manifest_id": manifest.manifest_id or manifest.computed_id(),
-        "render_manifest.wav_sha256": artifact.sha256,
-        "render_manifest.wav": artifact.wav,
-        "render_manifest.sample_rate": artifact.sample_rate,
-        "render_manifest.channels": artifact.channels,
-        "render_manifest.frames": artifact.frames,
+        RENDERPLAN_PLAN_ID: plan_id,
+        RENDERPLAN_SEGMENT_NUMBER: item.number,
+        RENDERPLAN_SEGMENT_ID: segment_id,
+        RENDERPLAN_SOURCE: _source_metadata(item),
+        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
+        MANIFEST_WAV_SHA256: artifact.sha256,
+        MANIFEST_WAV: artifact.wav,
+        MANIFEST_SAMPLE_RATE: artifact.sample_rate,
+        MANIFEST_CHANNELS: artifact.channels,
+        MANIFEST_FRAMES: artifact.frames,
     }
     return AudioClip(
         id=f"speech:{item.number:06d}",
@@ -198,12 +222,12 @@ def _materialize_pause(item: PauseItem, plan_id: str, flow_index: int) -> Silenc
     pause_id = item.pause_id or item.computed_id()
     metadata: dict[str, Any] = {
         "kind": "pause",
-        "renderplan.plan_id": plan_id,
-        "renderplan.pause_id": pause_id,
-        "renderplan.pause_reason": item.reason,
+        RENDERPLAN_PLAN_ID: plan_id,
+        RENDERPLAN_PAUSE_ID: pause_id,
+        RENDERPLAN_PAUSE_REASON: item.reason,
     }
     if item.source:
-        metadata["renderplan.pause_source"] = [span.to_dict() for span in item.source]
+        metadata[RENDERPLAN_PAUSE_SOURCE] = [span.to_dict() for span in item.source]
     return Silence(
         id=f"pause:{flow_index + 1:06d}:{pause_id}",
         seconds=item.duration_ms / 1000.0,
@@ -255,13 +279,13 @@ def _materialize_audio(
     audio_id = item.audio_id or item.computed_id()
     metadata = {
         "kind": "external_audio",
-        "renderplan.plan_id": plan_id,
-        "renderplan.audio_id": audio_id,
-        "renderplan.source": [span.to_dict() for span in item.source],
-        "renderplan.audio.src": item.src,
-        "renderplan.audio.options": dict(item.options),
-        "audiocompose.media.metadata": resolved.metadata,
-        "audiocompose.media.identity": resolved.identity,
+        RENDERPLAN_PLAN_ID: plan_id,
+        RENDERPLAN_AUDIO_ID: audio_id,
+        RENDERPLAN_SOURCE: [span.to_dict() for span in item.source],
+        RENDERPLAN_AUDIO_SOURCE: item.src,
+        RENDERPLAN_AUDIO_OPTIONS: dict(item.options),
+        AUDIOCOMPOSE_MEDIA_METADATA: resolved.metadata,
+        AUDIOCOMPOSE_MEDIA_IDENTITY: resolved.identity,
     }
     return AudioClip(
         id=f"media:{flow_index + 1:06d}",
@@ -316,11 +340,11 @@ def materialize_renderplan_job(
         output=output_policy if output_policy is not None else OutputPolicy(),
         producer={"name": "audiocompose.renderplan-materializer", "version": __version__},
         source={
-            "renderplan.plan_id": plan_id,
-            "renderplan.source_plan_id": plan.source_plan_id,
-            "renderplan.render_profile_id": plan.render_profile_id,
-            "render_manifest.manifest_id": manifest.manifest_id or manifest.computed_id(),
-            "audiocompose.materializer": "renderplan.v1",
+            RENDERPLAN_PLAN_ID: plan_id,
+            RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
+            RENDERPLAN_PROFILE_ID: plan.render_profile_id,
+            MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
+            AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
         },
     )
     try:

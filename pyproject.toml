@@ -12,7 +12,7 @@ authors = [{name = "AudioCompose contributors"}]
 dependencies = [
   "numpy>=1.23",
   "audiosig>=0.1.6,<0.2",
-  "renderplan>=0.1,<0.2",
+  "renderplan>=0.1.1,<0.2",
 ]
 keywords = ["audio", "composition", "wav", "dsp"]
 classifiers = [

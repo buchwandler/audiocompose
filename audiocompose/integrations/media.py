@@ -141,17 +141,17 @@ class LocalWavResolver:
             )
         try:
             audio, sample_rate = read_wav(path, expected_channels=1)
-            info = wav_info(path)
+            wav_geometry = wav_info(path)
             digest = sha256_file(path)
         except Exception as exc:
             raise MediaResolutionError(
                 f"{request.source_locator}: invalid local WAV {path}: {exc}"
             ) from exc
-        if not audio.size or info.channels != 1:
+        if not audio.size or wav_geometry.channels != 1:
             raise MediaResolutionError(
                 f"{request.source_locator}: local media WAV must be non-empty and mono"
             )
-        if info.frames != audio.size or info.sample_rate != sample_rate:
+        if wav_geometry.frames != audio.size or wav_geometry.sample_rate != sample_rate:
             raise MediaResolutionError(
                 f"{request.source_locator}: local media WAV geometry is inconsistent"
             )

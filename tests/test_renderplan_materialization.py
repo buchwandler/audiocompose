@@ -629,7 +629,7 @@ assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in 
 def test_runtime_dependency_replaces_voice_render_extra():
     project_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     project = project_path.read_text(encoding="utf-8")
-    assert '"renderplan>=0.1,<0.2"' in project
+    assert '"renderplan>=0.1.1,<0.2"' in project
     assert "voicerender" not in project
     assert "utterplan" not in project.lower()
     assert not (project_path.parent / "audiocompose/integrations/voicerender.py").exists()

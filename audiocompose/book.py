@@ -27,6 +27,7 @@ from renderplan import (
     load_plan,
     load_renderplan_set,
     validate_renderplan_set_profile,
+    validate_set_chapter_plan,
 )
 
 from .errors import AudioComposeError
@@ -70,6 +71,15 @@ class BookContext:
     chapters: tuple[RenderPlanSetChapter, ...]
     explicit_media_root: Path | None = None
     save_audiojobs_dir: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRenderHandoff:
+    chapter: RenderPlanSetChapter
+    plan: Any
+    manifest_id: str
+    render_dir: Path
+    job: Any
 
 
 def _path_without_symlinks(path: Path, *, label: str) -> Path:
@@ -133,20 +143,6 @@ def _validate_variant_name(variant: str) -> None:
         or PureWindowsPath(variant).drive
     ):
         raise BookComposeError("variant.not_found", "--variant must be a single directory basename")
-
-
-def _safe_chapter_id(chapter_id: str) -> str:
-    if (
-        not isinstance(chapter_id, str)
-        or not chapter_id
-        or chapter_id in {".", ".."}
-        or "/" in chapter_id
-        or "\\" in chapter_id
-        or "\x00" in chapter_id
-        or PureWindowsPath(chapter_id).drive
-    ):
-        raise BookComposeError("index.invalid", f"unsafe RenderPlan-set chapter id: {chapter_id!r}")
-    return chapter_id
 
 
 def parse_chapter_selector(
@@ -299,7 +295,6 @@ def resolve_book(
 
 def paths_for_chapter(context: BookContext, chapter: RenderPlanSetChapter) -> ChapterPaths:
     """Derive safe chapter input and output paths from a validated set entry."""
-    _safe_chapter_id(chapter.id)
     relative = PurePosixPath(chapter.renderplan)
     plan_path = context.renderplan_variant_dir.joinpath(*relative.parts)
     try:
@@ -335,16 +330,13 @@ def load_chapter_plan(context: BookContext, paths: ChapterPaths) -> Any:
         raise BookComposeError(
             "plan.missing", f"cannot load RenderPlan {paths.plan_path}: {exc}"
         ) from exc
-    plan_id = plan.plan_id or plan.computed_id()
-    if (
-        plan_id != paths.chapter.render_plan_id
-        or plan.source_plan_id != paths.chapter.source_plan_id
-        or plan.render_profile_id != context.renderplan_set.profile_id
-    ):
+    try:
+        validate_set_chapter_plan(context.renderplan_set, paths.chapter, plan)
+    except Exception as exc:
         raise BookComposeError(
             "plan.identity_mismatch",
-            f"RenderPlan identity does not match RenderPlan set for {paths.chapter.id}",
-        )
+            f"RenderPlan identity does not match RenderPlan set for {paths.chapter.id}: {exc}",
+        ) from exc
     return plan
 
 
@@ -513,7 +505,6 @@ def compose_book(
     from .integrations.renderplan import load_and_materialize_renderplan_job
     from .wav import atomic_write_wav
 
-    _ensure_output_directory(context.output_variant_dir)
     policy_dict = _output_policy_dict(output_policy)
     policy_id = _policy_id(policy_dict)
     prior_items = _read_prior_items(
@@ -530,6 +521,8 @@ def compose_book(
             "id": chapter.id,
             "source_number": chapter.source_number,
             "render_plan_id": chapter.render_plan_id,
+            "source_plan_id": chapter.source_plan_id,
+            "render_profile_id": context.renderplan_set.profile_id,
             "status": "failed",
         }
         if stop:
@@ -559,7 +552,7 @@ def compose_book(
                 )
             except BookComposeError as exc:
                 raise BookComposeError("manifest.missing", str(exc)) from exc
-            media_root = context.explicit_media_root or paths.plan_path.parent
+            media_root = context.explicit_media_root
             job = load_and_materialize_renderplan_job(
                 paths.plan_path,
                 manifest_path,
@@ -567,7 +560,15 @@ def compose_book(
                 output_policy=output_policy,
                 media_root=media_root,
             )
-            manifest_id = str(job.source["render_manifest.manifest_id"])
+            handoff = VerifiedRenderHandoff(
+                chapter=chapter,
+                plan=plan,
+                manifest_id=str(job.source["render_manifest.manifest_id"]),
+                render_dir=render_dir,
+                job=job,
+            )
+            job = handoff.job
+            manifest_id = handoff.manifest_id
             entry["manifest_id"] = manifest_id
             entry["output"] = paths.output_path.name
             prior = prior_items.get(chapter.id)
@@ -596,6 +597,7 @@ def compose_book(
                         raise BookComposeError(
                             "output.write_failed", f"refusing symlink output: {paths.output_path}"
                         )
+                    _ensure_output_directory(context.output_variant_dir)
                     composition = Composer().compose(job)
                     atomic_write_wav(
                         paths.output_path,
@@ -607,6 +609,7 @@ def compose_book(
                     entry["status"] = "written"
                     written += 1
             else:
+                _ensure_output_directory(context.output_variant_dir)
                 composition = Composer().compose(job)
                 atomic_write_wav(
                     paths.output_path,
@@ -714,6 +717,7 @@ __all__ = [
     "BookComposeError",
     "BookContext",
     "ChapterPaths",
+    "VerifiedRenderHandoff",
     "load_chapter_plan",
     "parse_chapter_selector",
     "paths_for_chapter",

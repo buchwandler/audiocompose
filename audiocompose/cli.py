@@ -470,15 +470,19 @@ def main(argv: list[str] | None = None) -> int:
             result = _timeline(AudioJob.load(args.manifest, verify_sources=False))
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command in {"analyze", "report"}:
-            audio, sample_rate, job, composition = _load_input(args.input)
+            audio, sample_rate, analysis_job, analysis_composition = _load_input(args.input)
             report = analyze_activity(audio, sample_rate, _analysis_config(args))
             if args.command == "analyze":
                 result = _report_dict(report)
                 if args.near_marker:
-                    if job is None or composition is None:
+                    if analysis_job is None or analysis_composition is None:
                         raise AudioComposeError("--near-marker requires an AudioJob input")
                     marker = next(
-                        (marker for marker in composition.markers if marker.id == args.near_marker),
+                        (
+                            marker
+                            for marker in analysis_composition.markers
+                            if marker.id == args.near_marker
+                        ),
                         None,
                     )
                     if marker is None:
@@ -503,7 +507,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
-                Path(args.output).write_text(_svg_report(audio, report, job), encoding="utf-8")
+                Path(args.output).write_text(
+                    _svg_report(audio, report, analysis_job), encoding="utf-8"
+                )
                 print(f"wrote {args.output}")
         return 0
     except (AudioComposeError, ValueError, OSError) as exc:
