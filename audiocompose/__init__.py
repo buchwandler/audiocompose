@@ -1,5 +1,17 @@
 from ._version import __version__
 from .alignment import AudioAnchor, AudioSpan, ComposedMarker, ComposedSpan
+from .book import (
+    BookComposeError,
+    BookComposeOptions,
+    BookComposeProgress,
+    BookComposeProgressCallback,
+    BookComposeResult,
+    ChapterComposeOutcome,
+    ChapterComposeStatus,
+    compose_book,
+    default_book_output_policy,
+    resolve_book,
+)
 from .composer import Composer
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import AudioComposeError, AudioValidationError, CompositionError
@@ -26,6 +38,13 @@ __all__ = [
     "AudioBufferSource",
     "AudioClip",
     "AudioComposeError",
+    "BookComposeError",
+    "BookComposeOptions",
+    "BookComposeProgress",
+    "BookComposeProgressCallback",
+    "BookComposeResult",
+    "ChapterComposeOutcome",
+    "ChapterComposeStatus",
     "AudioFileSource",
     "AudioJob",
     "AudioSpan",
@@ -40,6 +59,9 @@ __all__ = [
     "ComposedMarker",
     "ComposedSpan",
     "Composer",
+    "compose_book",
+    "default_book_output_policy",
+    "resolve_book",
     "DiagnosticSeverity",
     "FadeIn",
     "FadeOut",

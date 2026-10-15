@@ -29,11 +29,12 @@ from renderplan import (
     save_renderplan_set,
 )
 
+from audiocompose import BookComposeResult, compose_book
 from audiocompose.integrations.renderplan import materialize_renderplan_job
 from audiocompose.wav import write_wav
 
 assert Path(sys.prefix).resolve() in Path(__import__("audiocompose").__file__).resolve().parents
-assert version("renderplan").startswith("0.1.")
+assert tuple(map(int, version("renderplan").split(".")[:3])) >= (0, 1, 1)
 assert hasattr(renderplan, "validate_set_chapter_plan")
 
 root = Path(tempfile.mkdtemp(prefix="audiocompose-renderplan-smoke-"))
@@ -43,8 +44,9 @@ profile = RenderProfile(
 ).with_identity()
 profile_id = profile.profile_id or profile.computed_id()
 fingerprint = profile_id.removeprefix("sha256:")[:12]
-variant_dir = root / "renderplan" / f"smoke--{fingerprint}"
-render_dir = root / "voicerender" / f"smoke--{fingerprint}" / "chapter-0001"
+variant = f"smoke--{fingerprint}"
+variant_dir = root / "renderplan" / variant
+render_dir = root / "voicerender" / variant / "chapter-0001"
 variant_dir.mkdir(parents=True)
 render_dir.mkdir(parents=True)
 save_profile(profile, variant_dir / "renderprofile.toml")
@@ -110,4 +112,10 @@ assert job.source["renderplan.source_plan_id"] == loaded_plan.source_plan_id
 assert job.source["renderplan.render_profile_id"] == profile_id
 assert job.source["render_manifest.manifest_id"] == loaded_manifest.manifest_id
 job.validate(verify_sources=True)
+book_result = compose_book(root, variant=variant)
+assert isinstance(book_result, BookComposeResult)
+assert book_result.requested == book_result.written == 1
+assert book_result.exit_code == 0
+assert book_result.report_path.is_file()
+assert (book_result.output_variant_dir / "chapter-0001.wav").is_file()
 print("installed RenderPlan set/plan/manifest -> AudioJob smoke passed")

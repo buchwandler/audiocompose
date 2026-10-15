@@ -81,7 +81,7 @@ audiocompose compose chapter.audiojob chapter.wav
 
 ## Direct RenderPlan composition
 
-AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
+AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1.1,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
 
 Compose a plan directly without first saving an AudioJob:
 
@@ -144,6 +144,32 @@ Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override
 Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC but `compose-book --chapters N` rejects its `complete = false` manifest; use VoiceRender to finish that chapter before composing it. For each chapter AudioCompose still verifies the exact set/plan identities and delegates complete-manifest, speech WAV hash/geometry, path-safety, and external-media checks to the existing strict RenderPlan materializer. It then calls the ordinary `Composer`; pauses remain literal RenderPlan flow items. No VoiceRender or UtterPlan runtime dependency is added.
 
 A prior output is reused only when its report proves matching RenderPlan ID, RenderManifest ID, output-policy identity, output SHA-256, and WAV geometry. An existing output without matching provenance fails with `output.exists`; `--force` recomposes and atomically replaces the selected WAVs. The default batch continues after independent chapter failures and writes per-chapter details to the report; `--fail-fast` marks remaining selections skipped. `--json` emits a machine-readable batch result.
+
+### Public Python service
+
+Python orchestrators can compose the same exact variant without constructing an internal `BookContext` or reimplementing CLI defaults:
+
+```python
+from audiocompose import BookComposeOptions, compose_book
+
+result = compose_book(
+    "BOOK",
+    variant="narration--525856299523",
+    chapters="5-7",  # source chapter numbers, not positional indexes
+    options=BookComposeOptions(sample_rate=24000, target_lufs=-16.0),
+    on_progress=lambda event: print(event.completed_chapters, event.outcome.id),
+)
+
+assert result.exit_code == 0
+for outcome in result.outcomes:
+    print(outcome.id, outcome.status, outcome.output, outcome.sha256)
+```
+
+`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with `workspace`, `variant`, `output_variant_dir`, `report_path`, `render_profile_id`, typed `outcomes`, and `requested`, `written`, `reused`, `failed`, and `skipped` counts. `exit_code` is `2` when any chapter failed or the report could not be written, otherwise `0`. Each `ChapterComposeOutcome` has a `status` of `written`, `reused`, `failed`, or `skipped`; successful output paths are `Path` values. Per-chapter error codes/messages are provided when composition fails. Progress callbacks receive `BookComposeProgress` after each selected chapter, including a typed outcome.
+
+Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
+
+The `compose-report.toml` file remains the version-1 filesystem hand-off (`format = "audiocompose-book-report"`, `version = 1`). Its root records variant, RenderProfile identity, requested/written/reused/failed/skipped counts, and the output policy. Every item records its selection index and chapter/plan/profile identity (`index`, `id`, `source_number`, `render_plan_id`, `source_plan_id`, `render_profile_id`, `status`). A `written` or `reused` item also records `manifest_id`, output basename, SHA-256, sample rate, channels, frames, and `output_policy_id`; `duration_seconds` is recorded for newly written outputs and may be absent on reused outputs. Failed and fail-fast-skipped items record `error_code` and `error_message`; other provenance fields may be present if validation had progressed before failure. Emphasis warnings and optional AudioJob names are additional optional fields. Unselected prior item records remain in set order when a subset is composed.
 
 ## Debugging and analysis
 

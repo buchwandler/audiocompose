@@ -206,6 +206,107 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
     assert second["items"][0]["status"] == "reused"
 
 
+def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsys):
+    import json
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+        import tomli as tomllib
+
+    from audiocompose import BookComposeResult, compose_book
+    from audiocompose.cli import main
+
+    api_workspace, api_variant, _, _ = _fixture_book(tmp_path / "api", source_numbers=(7, 6, 5, 8))
+    cli_workspace, cli_variant, _, _ = _fixture_book(tmp_path / "cli", source_numbers=(7, 6, 5, 8))
+    progress = []
+    api_result = compose_book(
+        api_workspace, variant=api_variant, chapters="5,8", on_progress=progress.append
+    )
+    assert isinstance(api_result, BookComposeResult)
+    assert [item.source_number for item in api_result.outcomes] == [5, 8]
+    assert [item.completed_chapters for item in progress] == [1, 2]
+    assert api_result.exit_code == 0
+
+    cli_command = [
+        "compose-book",
+        str(cli_workspace),
+        "--variant",
+        cli_variant,
+        "--chapters",
+        "5,8",
+        "--json",
+    ]
+    assert main(cli_command) == 0
+    cli_result = json.loads(capsys.readouterr().out)
+    api_items = api_result.to_dict()["items"]
+    assert api_items == cli_result["items"]
+    assert [item["id"] for item in api_items] == ["chapter-0005", "chapter-0008"]
+    assert [item["sha256"] for item in api_items] == [
+        item["sha256"] for item in cli_result["items"]
+    ]
+    assert [item["output_policy_id"] for item in api_items] == [
+        item["output_policy_id"] for item in cli_result["items"]
+    ]
+    with Path(api_result.report_path).open("rb") as stream:
+        api_report = tomllib.load(stream)
+    with Path(cli_result["report"]).open("rb") as stream:
+        cli_report = tomllib.load(stream)
+    assert api_report["item"] == cli_report["item"]
+
+    api_reused = compose_book(api_workspace, variant=api_variant, chapters="5,8")
+    assert main(cli_command) == 0
+    cli_reused = json.loads(capsys.readouterr().out)
+    assert [item.status for item in api_reused.outcomes] == ["reused", "reused"]
+    assert api_reused.to_dict()["items"] == cli_reused["items"]
+
+
+def test_public_book_api_and_cli_report_matching_chapter_errors(tmp_path, capsys):
+    import json
+
+    from audiocompose import compose_book
+    from audiocompose.cli import main
+
+    api_workspace, api_variant, _, chapters = _fixture_book(tmp_path / "api", source_numbers=(5,))
+    cli_workspace, cli_variant, _, cli_chapters = _fixture_book(
+        tmp_path / "cli", source_numbers=(5,)
+    )
+    (api_workspace / "voicerender" / api_variant / chapters[0].id / "render-manifest.toml").unlink()
+    (
+        cli_workspace / "voicerender" / cli_variant / cli_chapters[0].id / "render-manifest.toml"
+    ).unlink()
+
+    api_result = compose_book(api_workspace, variant=api_variant)
+    cli_command = ["compose-book", str(cli_workspace), "--variant", cli_variant, "--json"]
+    assert main(cli_command) == api_result.exit_code == 2
+    cli_result = json.loads(capsys.readouterr().out)
+    assert api_result.outcomes[0].status == "failed"
+    assert api_result.outcomes[0].error_code == "manifest.missing"
+    api_item = api_result.to_dict()["items"][0]
+    cli_item = cli_result["items"][0]
+    assert {
+        key: api_item[key]
+        for key in ("id", "source_number", "render_plan_id", "status", "error_code")
+    } == {
+        key: cli_item[key]
+        for key in ("id", "source_number", "render_plan_id", "status", "error_code")
+    }
+
+
+def test_installed_package_metadata_rejects_renderplan_010():
+    from importlib.metadata import requires
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    requirements = [Requirement(value) for value in requires("audiocompose") or ()]
+    renderplan = next(
+        requirement for requirement in requirements if requirement.name == "renderplan"
+    )
+    assert Version("0.1.0") not in renderplan.specifier
+    assert Version("0.1.1") in renderplan.specifier
+
+
 def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, capsys):
     import json
 

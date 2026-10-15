@@ -12,7 +12,6 @@ from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_
 from .composer import Composer
 from .errors import AudioComposeError
 from .job import validate_clip_geometry
-from .loudness import LoudnessPolicy
 from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
 from .wav import read_wav, write_wav
 
@@ -252,21 +251,16 @@ def _timeline(job: AudioJob) -> dict[str, Any]:
 
 
 def _output_policy_from_args(args: argparse.Namespace) -> OutputPolicy:
-    defaults = OutputPolicy()
-    loudness = LoudnessPolicy(
-        target_lufs=args.target_lufs,
-        true_peak_ceiling_dbtp=(
-            defaults.loudness.true_peak_ceiling_dbtp
-            if args.true_peak_ceiling_dbtp is None
-            else args.true_peak_ceiling_dbtp
-        ),
-        peak_policy=args.peak_policy or defaults.loudness.peak_policy,
-        collect_metrics=defaults.loudness.collect_metrics,
-    )
-    return OutputPolicy(
-        sample_rate=defaults.sample_rate if args.sample_rate is None else args.sample_rate,
-        clip_policy=args.clip_policy or defaults.clip_policy,
-        loudness=loudness,
+    from .book import BookComposeOptions, default_book_output_policy
+
+    return default_book_output_policy(
+        BookComposeOptions(
+            sample_rate=args.sample_rate,
+            clip_policy=args.clip_policy,
+            target_lufs=args.target_lufs,
+            true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+            peak_policy=args.peak_policy,
+        )
     )
 
 
@@ -396,53 +390,56 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "compose-book":
-            from .book import compose_book, resolve_book
+            from .book import BookComposeOptions, compose_book
 
-            context = resolve_book(
+            book_result = compose_book(
                 args.book,
-                args.variant,
+                variant=args.variant,
                 chapters=args.chapters,
+                options=BookComposeOptions(
+                    sample_rate=args.sample_rate,
+                    clip_policy=args.clip_policy,
+                    target_lufs=args.target_lufs,
+                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+                    peak_policy=args.peak_policy,
+                ),
                 renderplan_root=args.renderplan_root,
                 voicerender_root=args.voicerender_root,
                 output_root=args.output_root,
                 media_root=args.media_root,
                 save_audiojobs=args.save_audiojobs,
-            )
-            result = compose_book(
-                context,
-                _output_policy_from_args(args),
                 force=args.force,
                 fail_fast=args.fail_fast,
                 emphasis_policy=args.emphasis_policy,
             )
             if args.json:
-                print(json.dumps(result, indent=2, sort_keys=True))
+                print(json.dumps(book_result.to_dict(), indent=2, sort_keys=True))
             else:
                 print("AudioCompose book compose")
-                print(f"  workspace:   {context.workspace}")
-                print(f"  variant:     {context.variant}")
-                print(f"  renderplans: {context.renderplan_variant_dir}")
-                print(f"  speech:      {context.voicerender_variant_dir}")
-                print(f"  output:      {context.output_variant_dir}")
-                print(f"  chapters:    {context.selector}")
-                print(f"  selected:    {result['requested']}")
-                for item in result["items"]:
-                    print(f"[{item['index']}/{result['requested']}] {item['id']}: {item['status']}")
-                    if item.get("status") == "written":
-                        print(
-                            f"       wrote {item.get('output')} ({item.get('duration_seconds', 0):.3f}s)"
-                        )
-                    elif item.get("status") == "failed":
-                        print(f"       {item.get('error_code')}: {item.get('error_message')}")
-                    if item.get("emphasis_warning"):
-                        print(f"       warning: {item['emphasis_warning']}")
+                print(f"  workspace:   {book_result.workspace}")
+                print(f"  variant:     {book_result.variant}")
+                print(f"  renderplans: {book_result.renderplan_variant_dir}")
+                print(f"  speech:      {book_result.voicerender_variant_dir}")
+                print(f"  output:      {book_result.output_variant_dir}")
+                print(f"  chapters:    {book_result.selector}")
+                print(f"  selected:    {book_result.requested}")
+                for item in book_result.outcomes:
+                    print(f"[{item.index}/{book_result.requested}] {item.id}: {item.status}")
+                    if item.status == "written":
+                        output_name = item.output.name if item.output is not None else ""
+                        duration = item.duration_seconds or 0.0
+                        print(f"       wrote {output_name} ({duration:.3f}s)")
+                    elif item.status == "failed":
+                        print(f"       {item.error_code}: {item.error_message}")
+                    if item.emphasis_warning:
+                        print(f"       warning: {item.emphasis_warning}")
                 print("AudioCompose summary")
-                print(f"  requested: {result['requested']}")
-                print(f"  written:   {result['written']}")
-                print(f"  reused:    {result['reused']}")
-                print(f"  failed:    {result['failed']}")
-                print(f"  skipped:   {result['skipped']}")
-            return 2 if result["failed"] or result["report_error"] else 0
+                print(f"  requested: {book_result.requested}")
+                print(f"  written:   {book_result.written}")
+                print(f"  reused:    {book_result.reused}")
+                print(f"  failed:    {book_result.failed}")
+                print(f"  skipped:   {book_result.skipped}")
+            return book_result.exit_code
         elif args.command == "compose-renderplan":
             from .integrations.renderplan import load_and_materialize_renderplan_job
 

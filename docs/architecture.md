@@ -27,7 +27,7 @@ PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection
 
 ## Direct RenderPlan consumption
 
-AudioCompose's `renderplan>=0.1,<0.2` runtime dependency supplies the shared contract types and TOML loaders. `audiocompose.integrations.renderplan` validates plan and manifest identity, requires `complete=true`, and checks exact manifest correspondence. Before constructing an `AudioJob`, it verifies each speech occurrence, segment ID, manifest WAV name, safe containment under the render directory, regular-file and symlink safety, SHA-256, and WAV sample-rate/channel/frame geometry. Speech artifacts must be mono.
+AudioCompose's `renderplan>=0.1.1,<0.2` runtime dependency supplies the shared contract types and TOML loaders. `audiocompose.integrations.renderplan` validates plan and manifest identity, requires `complete=true`, and checks exact manifest correspondence. Before constructing an `AudioJob`, it verifies each speech occurrence, segment ID, manifest WAV name, safe containment under the render directory, regular-file and symlink safety, SHA-256, and WAV sample-rate/channel/frame geometry. Speech artifacts must be mono.
 
 The adapter iterates `RenderPlan.flow` literally. Pauses become `Silence` items at the declared `duration_ms / 1000`, including zero-duration pauses; AudioCompose does not infer pause meaning or apply a symbolic pause policy. Shared source spans are retained only as opaque provenance metadata, not fabricated `AudioSpan` alignment. The resulting job uses the same persistence, `OutputPolicy`, Composer, and output paths as any other AudioJob.
 

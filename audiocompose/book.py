@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
@@ -32,6 +33,8 @@ from renderplan import (
 
 from .errors import AudioComposeError
 from .integrations.renderplan_metadata import RENDERPLAN_EMPHASIS
+from .loudness import LoudnessPolicy
+from .model import OutputPolicy
 
 SET_FILENAME = "renderplan-set.toml"
 MANIFEST_FILENAME = "render-manifest.toml"
@@ -44,6 +47,177 @@ class BookComposeError(AudioComposeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+ChapterComposeStatus = Literal["written", "reused", "failed", "skipped"]
+
+
+@dataclass(frozen=True, slots=True)
+class BookComposeOptions:
+    """Optional output/loudness overrides for :func:`compose_book`.
+
+    ``None`` inherits the corresponding :class:`OutputPolicy` default.
+    """
+
+    sample_rate: int | None = None
+    channels: int | None = None
+    clip_policy: Literal["clamp", "warn", "error"] | None = None
+    target_lufs: float | None = None
+    true_peak_ceiling_dbtp: float | None = None
+    peak_policy: Literal["reduce_gain", "error"] | None = None
+    collect_metrics: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChapterComposeOutcome:
+    """Typed outcome for one selected chapter."""
+
+    id: str
+    source_number: int
+    render_plan_id: str
+    status: ChapterComposeStatus
+    output: Path | None = None
+    sha256: str | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    frames: int | None = None
+    duration_seconds: float | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    index: int | None = None
+    source_plan_id: str | None = None
+    render_profile_id: str | None = None
+    manifest_id: str | None = None
+    output_policy_id: str | None = None
+    emphasis_warning: str | None = None
+    audiojob: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the legacy CLI/report-item shape, omitting absent optional fields."""
+        result: dict[str, Any] = {
+            "id": self.id,
+            "source_number": self.source_number,
+            "render_plan_id": self.render_plan_id,
+            "status": self.status,
+        }
+        for name in (
+            "index",
+            "source_plan_id",
+            "render_profile_id",
+            "manifest_id",
+            "sha256",
+            "sample_rate",
+            "channels",
+            "frames",
+            "duration_seconds",
+            "error_code",
+            "error_message",
+            "output_policy_id",
+            "emphasis_warning",
+            "audiojob",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                result[name] = value
+        if self.output is not None:
+            result["output"] = self.output.name
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class BookComposeProgress:
+    """Progress notification emitted after each selected chapter is processed."""
+
+    completed_chapters: int
+    requested_chapters: int
+    outcome: ChapterComposeOutcome
+
+
+BookComposeProgressCallback = Callable[[BookComposeProgress], None]
+
+
+@dataclass(frozen=True, slots=True)
+class BookComposeResult:
+    """Typed summary and per-chapter outcomes for a book composition."""
+
+    workspace: Path
+    variant: str
+    output_variant_dir: Path
+    report_path: Path
+    render_profile_id: str
+    outcomes: tuple[ChapterComposeOutcome, ...]
+    requested: int
+    written: int
+    reused: int
+    failed: int
+    skipped: int
+    renderplan_variant_dir: Path
+    voicerender_variant_dir: Path
+    selector: str = "all"
+    emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback"
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
+    report_error: Mapping[str, str] | None = None
+
+    @property
+    def exit_code(self) -> int:
+        """Return the CLI-compatible status code for composition/report failures."""
+        return 2 if self.failed or self.report_error is not None else 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable JSON-compatible result shape used by the CLI."""
+        return {
+            "format": "audiocompose-book-result",
+            "variant": self.variant,
+            "emphasis_policy": self.emphasis_policy,
+            "diagnostics": [dict(item) for item in self.diagnostics],
+            "workspace": str(self.workspace),
+            "renderplan_root": str(self.renderplan_variant_dir),
+            "voicerender_root": str(self.voicerender_variant_dir),
+            "output_root": str(self.output_variant_dir),
+            "selector": self.selector,
+            "requested": self.requested,
+            "written": self.written,
+            "reused": self.reused,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "report": str(self.report_path),
+            "items": [outcome.to_dict() for outcome in self.outcomes],
+            "report_error": dict(self.report_error) if self.report_error is not None else None,
+        }
+
+
+def default_book_output_policy(
+    options: BookComposeOptions | None = None,
+) -> OutputPolicy:
+    """Build a policy from CLI-compatible defaults and optional public overrides."""
+    settings = options or BookComposeOptions()
+    defaults = OutputPolicy()
+    loudness_defaults = defaults.loudness
+    return OutputPolicy(
+        sample_rate=(
+            defaults.sample_rate if settings.sample_rate is None else settings.sample_rate
+        ),
+        channels=defaults.channels if settings.channels is None else settings.channels,
+        clip_policy=defaults.clip_policy if settings.clip_policy is None else settings.clip_policy,
+        loudness=LoudnessPolicy(
+            target_lufs=settings.target_lufs,
+            true_peak_ceiling_dbtp=(
+                loudness_defaults.true_peak_ceiling_dbtp
+                if settings.true_peak_ceiling_dbtp is None
+                else settings.true_peak_ceiling_dbtp
+            ),
+            peak_policy=(
+                loudness_defaults.peak_policy
+                if settings.peak_policy is None
+                else settings.peak_policy
+            ),
+            collect_metrics=(
+                loudness_defaults.collect_metrics
+                if settings.collect_metrics is None
+                else settings.collect_metrics
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,13 +693,14 @@ def _chapter_error(exc: Exception) -> tuple[str, str]:
     return "compose.failed", str(exc)
 
 
-def compose_book(
+def _compose_resolved_book(
     context: BookContext,
-    output_policy: Any,
+    output_policy: OutputPolicy,
     *,
     force: bool = False,
     fail_fast: bool = False,
     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
+    on_progress: BookComposeProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Materialize and compose selected chapters, recording a provenance report."""
     from .composer import Composer
@@ -566,6 +741,14 @@ def compose_book(
             skipped += 1
             results.append(entry)
             item_by_id[chapter.id] = entry
+            if on_progress is not None:
+                on_progress(
+                    BookComposeProgress(
+                        completed_chapters=len(results),
+                        requested_chapters=len(context.chapters),
+                        outcome=_chapter_outcome(entry, context.output_variant_dir),
+                    )
+                )
             continue
         try:
             paths = paths_for_chapter(context, chapter)
@@ -688,6 +871,14 @@ def compose_book(
         results.append(entry)
         item_by_id[chapter.id] = entry
 
+        if on_progress is not None:
+            on_progress(
+                BookComposeProgress(
+                    completed_chapters=len(results),
+                    requested_chapters=len(context.chapters),
+                    outcome=_chapter_outcome(entry, context.output_variant_dir),
+                )
+            )
     # Reports retain records for unselected chapters, ordered by the authoritative set.
     ordered_entries = [
         item_by_id[chapter.id]
@@ -732,6 +923,105 @@ def compose_book(
     }
 
 
+def _chapter_outcome(entry: Mapping[str, Any], output_variant_dir: Path) -> ChapterComposeOutcome:
+    output_name = entry.get("output")
+    output = output_variant_dir / output_name if isinstance(output_name, str) else None
+    return ChapterComposeOutcome(
+        id=entry["id"],
+        source_number=entry["source_number"],
+        render_plan_id=entry["render_plan_id"],
+        status=entry["status"],
+        output=output,
+        sha256=entry.get("sha256"),
+        sample_rate=entry.get("sample_rate"),
+        channels=entry.get("channels"),
+        frames=entry.get("frames"),
+        duration_seconds=entry.get("duration_seconds"),
+        error_code=entry.get("error_code"),
+        error_message=entry.get("error_message"),
+        index=entry.get("index"),
+        source_plan_id=entry.get("source_plan_id"),
+        render_profile_id=entry.get("render_profile_id"),
+        manifest_id=entry.get("manifest_id"),
+        output_policy_id=entry.get("output_policy_id"),
+        emphasis_warning=entry.get("emphasis_warning"),
+        audiojob=entry.get("audiojob"),
+    )
+
+
+def _book_result_from_dict(context: BookContext, result: Mapping[str, Any]) -> BookComposeResult:
+    return BookComposeResult(
+        workspace=context.workspace,
+        variant=context.variant,
+        output_variant_dir=context.output_variant_dir,
+        report_path=context.report_path,
+        render_profile_id=context.renderplan_set.profile_id,
+        outcomes=tuple(
+            _chapter_outcome(entry, context.output_variant_dir) for entry in result["items"]
+        ),
+        requested=result["requested"],
+        written=result["written"],
+        reused=result["reused"],
+        failed=result["failed"],
+        skipped=result["skipped"],
+        renderplan_variant_dir=context.renderplan_variant_dir,
+        voicerender_variant_dir=context.voicerender_variant_dir,
+        selector=context.selector,
+        emphasis_policy=result["emphasis_policy"],
+        diagnostics=tuple(result["diagnostics"]),
+        report_error=result["report_error"],
+    )
+
+
+def compose_book(
+    book: str | Path,
+    *,
+    variant: str,
+    chapters: str = "all",
+    output_policy: OutputPolicy | None = None,
+    options: BookComposeOptions | None = None,
+    renderplan_root: str | Path | None = None,
+    voicerender_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+    media_root: str | Path | None = None,
+    save_audiojobs: str | Path | None = None,
+    force: bool = False,
+    fail_fast: bool = False,
+    emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
+    on_progress: BookComposeProgressCallback | None = None,
+) -> BookComposeResult:
+    """Resolve and compose a book variant through the stable public service.
+
+    ``output_policy`` accepts a fully constructed policy. Alternatively,
+    ``options`` supplies individual output/loudness overrides using
+    :func:`default_book_output_policy`; passing both is an error.
+    """
+    if output_policy is not None and options is not None:
+        raise ValueError("pass either output_policy or options, not both")
+    if output_policy is not None and not isinstance(output_policy, OutputPolicy):
+        raise TypeError("output_policy must be an AudioCompose OutputPolicy")
+    policy = output_policy or default_book_output_policy(options)
+    context = resolve_book(
+        book,
+        variant,
+        chapters=chapters,
+        renderplan_root=renderplan_root,
+        voicerender_root=voicerender_root,
+        output_root=output_root,
+        media_root=media_root,
+        save_audiojobs=save_audiojobs,
+    )
+    result = _compose_resolved_book(
+        context,
+        policy,
+        force=force,
+        fail_fast=fail_fast,
+        emphasis_policy=emphasis_policy,
+        on_progress=on_progress,
+    )
+    return _book_result_from_dict(context, result)
+
+
 def _wav_result(path: Path) -> dict[str, Any]:
     from .wav import sha256_file, wav_info
 
@@ -769,6 +1059,14 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
 
 __all__ = [
     "BookComposeError",
+    "BookComposeOptions",
+    "BookComposeProgress",
+    "BookComposeProgressCallback",
+    "BookComposeResult",
+    "ChapterComposeOutcome",
+    "ChapterComposeStatus",
+    "compose_book",
+    "default_book_output_policy",
     "BookContext",
     "ChapterPaths",
     "VerifiedRenderHandoff",
