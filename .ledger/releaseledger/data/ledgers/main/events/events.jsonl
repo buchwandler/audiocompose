@@ -55,3 +55,5 @@
 {"data":{"updated_rows":1},"event":"audit.updated","event_id":"event-0055","record_revisions":{"commit_audit_sheet":2},"release_version":"v0.2.2","schema_version":2}
 {"data":{"entry_ids":["entry-0001"],"synced_audit_rows":0},"event":"entry.batch_added","event_id":"event-0056","record_revisions":{"commit_audit_sheet":2,"entry:v0.2.2/entry-0001":1,"release:v0.2.2":3},"release_version":"v0.2.2","schema_version":2}
 {"data":{"released_at":"2026-10-10"},"event":"release.finalized","event_id":"event-0057","record_revisions":{"release:v0.2.2":4},"release_version":"v0.2.2","schema_version":2}
+{"data":{"status":"planned"},"event":"release.created","event_id":"event-0058","record_revisions":{"release:v0.3.0":1},"release_version":"v0.3.0","schema_version":2}
+{"data":{"kind":"added","status":"accepted"},"entry_id":"entry-0001","event":"entry.added","event_id":"event-0059","record_revisions":{"entry:v0.3.0/entry-0001":1,"release:v0.3.0":2},"release_version":"v0.3.0","schema_version":2}

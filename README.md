@@ -129,21 +129,28 @@ audiocompose compose-book . --variant narration--525856299523 --chapters 5
 audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
 audiocompose compose-book . --variant narration--525856299523 --chapters 5,8,10-12
 ```
+Use the RenderProfile snapshot's pause values by default. An explicit strict AudioCompose policy can override it:
+
+```bash
+audiocompose compose-book . --variant narration--525856299523 \\
+  --pauses narration.pause.toml
+```
 
 By default, one final WAV per selected chapter and an atomic report are written under `audiocompose/<variant>/`:
 
 ```text
 audiocompose/<variant>/
 ├── compose-report.toml
+├── chapter-0005.audiojob/
 ├── chapter-0005.wav
 └── chapter-0006.wav
 ```
 
-Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override the corresponding book roots. `--media-root` is forwarded to every RenderPlan materialization; when omitted, relative external `AudioItem` WAV paths use the same default as `compose-renderplan` (the individual plan's directory). Output mastering options (`--sample-rate`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`) match the direct command and apply to every selected chapter. AudioJob bundles are not saved unless `--save-audiojobs DIR` is requested.
+Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override the corresponding book roots. `--media-root` is forwarded to every RenderPlan materialization; when omitted, relative external `AudioItem` WAV paths use the individual plan's directory. Output mastering options (`--sample-rate`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`) match the direct command. Reproducible AudioJob bundles are always saved beside the chapter WAVs by default; `--save-audiojobs DIR` overrides their root. Supply `--pauses POLICY.toml` to override the default policy derived from the selected RenderProfile snapshot.
 
-Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC but `compose-book --chapters N` rejects its `complete = false` manifest; use VoiceRender to finish that chapter before composing it. For each chapter AudioCompose still verifies the exact set/plan identities and delegates complete-manifest, speech WAV hash/geometry, path-safety, and external-media checks to the existing strict RenderPlan materializer. It then calls the ordinary `Composer`; pauses remain literal RenderPlan flow items. No VoiceRender or UtterPlan runtime dependency is added.
+Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC, but `compose-book` rejects a selected chapter whose manifest is incomplete; finish rendering before composing. The specialist book facade verifies the chapter handoff and persists its reproducible AudioJob, then invokes the ordinary producer-neutral `Composer`. For books, symbolic UtterPlan pause intents resolve through a strict AudioCompose policy derived from the selected RenderProfile snapshot by default or supplied with `--pauses`; direct `compose-renderplan` continues to use literal RenderPlan pause durations. The base install does not require UtterPlan or VoiceRender; install `audiocompose[voicerender]` for the book integration.
 
-A prior output is reused only when its report proves matching RenderPlan ID, RenderManifest ID, output-policy identity, output SHA-256, and WAV geometry. An existing output without matching provenance fails with `output.exists`; `--force` recomposes and atomically replaces the selected WAVs. The default batch continues after independent chapter failures and writes per-chapter details to the report; `--fail-fast` marks remaining selections skipped. `--json` emits a machine-readable batch result.
+Reuse is conservative: the report, persisted AudioJob, and WAV must match the current variant, source chapter/plan, RenderManifest identity and file hash, pause/output policies, AudioJob ID/schema, AudioCompose version, output hash, and WAV geometry. Symlinked or stale artifacts are never reused; an existing output without matching provenance fails with `output.exists`, while `--force` recomposes and atomically replaces selected WAVs. The batch continues after independent chapter failures by default; `--fail-fast` marks later selections skipped. Ordered progress callbacks receive book and chapter events; callback exceptions become `progress.callback_failed`. `--json` writes only the machine-readable result to stdout, while the human summary includes the report path.
 
 ### Public Python service
 
@@ -157,7 +164,7 @@ result = compose_book(
     variant="narration--525856299523",
     chapters="5-7",  # source chapter numbers, not positional indexes
     options=BookComposeOptions(sample_rate=24000, target_lufs=-16.0),
-    on_progress=lambda event: print(event.completed_chapters, event.outcome.id),
+    on_progress=lambda event: print(event.kind, event.completed_chapters, event.chapter_id),
 )
 
 assert result.exit_code == 0
@@ -165,11 +172,11 @@ for outcome in result.outcomes:
     print(outcome.id, outcome.status, outcome.output, outcome.sha256)
 ```
 
-`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with `workspace`, `variant`, `output_variant_dir`, `report_path`, `render_profile_id`, typed `outcomes`, and `requested`, `written`, `reused`, `failed`, and `skipped` counts. `exit_code` is `2` when any chapter failed or the report could not be written, otherwise `0`. Each `ChapterComposeOutcome` has a `status` of `written`, `reused`, `failed`, or `skipped`; successful output paths are `Path` values. Per-chapter error codes/messages are provided when composition fails. Progress callbacks receive `BookComposeProgress` after each selected chapter, including a typed outcome.
+`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`); a callback failure is recorded as `progress.callback_failed`.
 
 Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
 
-The `compose-report.toml` file remains the version-1 filesystem hand-off (`format = "audiocompose-book-report"`, `version = 1`). Its root records variant, RenderProfile identity, requested/written/reused/failed/skipped counts, and the output policy. Every item records its selection index and chapter/plan/profile identity (`index`, `id`, `source_number`, `render_plan_id`, `source_plan_id`, `render_profile_id`, `status`). A `written` or `reused` item also records `manifest_id`, output basename, SHA-256, sample rate, channels, frames, and `output_policy_id`; `duration_seconds` is recorded for newly written outputs and may be absent on reused outputs. Failed and fail-fast-skipped items record `error_code` and `error_message`; other provenance fields may be present if validation had progressed before failure. Emphasis warnings and optional AudioJob names are additional optional fields. Unselected prior item records remain in set order when a subset is composed.
+`compose-report.toml` is the version-1 filesystem hand-off (`format = "audiocompose-book-report"`, `version = 1`). Its root records the variant, profile and pause-policy identities/provenance, AudioCompose version, relative workspace/AudioJob roots, counts, and output policy. Each item includes source/order and handoff identity, report-relative UtterPlan/RenderManifest paths, output basename, status, and any available errors. Successful items also record RenderManifest ID and file hash, pause/output-policy IDs, AudioJob ID/schema and bundle name, WAV SHA-256, sample rate, channels, and frames; newly written outputs include duration. Paths stay relative to their owning book/report roots where practical. Unselected prior item records remain in RenderPlan-set order when a subset is composed.
 
 ## Debugging and analysis
 

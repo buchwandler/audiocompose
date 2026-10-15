@@ -44,6 +44,33 @@ audiocompose compose-renderplan PLAN --manifest MANIFEST \
 
 The manifest defaults to `<render-dir>/render-manifest.toml`. The command accepts the existing output-policy controls, writes the final WAV, and reports a RenderPlan-derived timeline; `--explain` prints ordered provenance. Use `--save-audiojob` for an optional intermediate bundle. The generic `validate`, `inspect`, `compose`, `timeline`, and save/load workflows are unchanged.
 
+## Native book composition
+
+`audiocompose.book.compose_book` is the specialist orchestration facade for a completed `.ssmdbook` RenderPlan-set variant. It resolves the set-owned RenderProfile snapshot and chapter order, verifies each selected UtterPlan/RenderPlan/VoiceRender handoff through the public integration boundary, materializes the chapter as an ordinary AudioJob, and calls the same generic `Composer`. It does not change AudioJob, Composer, or DSP semantics.
+
+The dependency boundary remains asymmetric: `renderplan` is the shared base contract dependency; UtterPlan and VoiceRender are optional and are imported only when book materialization runs. Generic package-root imports and generic AudioJob composition do not require the `[voicerender]` extra.
+
+```text
+.ssmdbook + RenderPlan-set variant
+          |                         RenderProfile snapshot
+          |                                  |
+          +---- UtterPlan + RenderManifest --+--> book pause policy
+                              |
+                   optional book adapter
+                              |
+                reproducible AudioJob bundle
+                              |
+                    generic Composer
+                              |
+             atomic chapter WAV + TOML report
+```
+
+For book composition, symbolic source pause intents resolve from the selected RenderProfile snapshot by default. A strict `audiocompose.pause-policy.v1` TOML override is accepted explicitly; unresolved intents fail closed. The policy identity and provenance are stored in AudioJob sources and the report. This policy conversion belongs to the book integration and is not applied by direct `compose-renderplan`, whose RenderPlan pauses remain literal durations.
+
+AudioJobs are persisted for every selected chapter before composition. Existing WAVs are reused only when the current variant, source/plan, RenderManifest identity and content hash, pause/output policy, persisted AudioJob ID/schema, AudioCompose version, and WAV hash/geometry all match the atomic report. Symlinked or unverified outputs are not reused; `--force` recomposes. Chapter failures are isolated by default, `--fail-fast` skips later selections, and ordered book/chapter progress callbacks report callback failures as `progress.callback_failed`. `compose-report.toml` is atomically published with per-chapter outcomes and report-relative stage paths.
+
+The CLI surface is `audiocompose compose-book BOOK --variant VARIANT`, with source-number selection, `--pauses`, output-policy controls, `--force`, `--fail-fast`, `--save-audiojobs`, and machine-clean `--json` output. The CLI calls `compose_book`; it does not implement another composition path.
+
 ## AudioJob
 
 An AudioJob is an ordered collection of `AudioClip` and `Silence` items. A clip references either an in-memory NumPy `AudioBufferSource` or a file-backed `AudioFileSource`, followed by ordered numeric operations allowed by its schema version. V1 contains the existing static operations; v2 adds the generic time-varying `RatePitchEnvelope`. Clip anchors and spans are generic timing metadata. Output policy contains the final sample rate, channel count, clipping behavior, and complete-output loudness policy.
@@ -92,6 +119,7 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 | Manifest correspondence and speech artifact integrity               | AudioCompose RenderPlan adapter   |
 | RenderPlan flow ordering and provenance lowering to AudioJob values | AudioCompose RenderPlan adapter   |
 | Media-root policy, media resolver contract, and option lowering     | AudioCompose integration boundary |
+| Native book orchestration and profile-derived pause policy       | AudioCompose optional book facade |
 | AudioJob format, schema, persistence, and bundle validation         | AudioCompose core                 |
 | Numeric operation model and timing maps                             | AudioCompose core                 |
 | Resampling, time-scale modification, and pitch-shift DSP            | AudioSig                          |

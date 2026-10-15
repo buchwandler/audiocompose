@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +29,7 @@ from renderplan import (
     save_profile,
     save_renderplan_set,
 )
+from renderplan import PausePolicy as RenderPausePolicy
 
 from audiocompose.book import (
     BookComposeError,
@@ -39,34 +41,62 @@ from audiocompose.book import (
 from audiocompose.wav import write_wav
 
 
-def _profile() -> RenderProfile:
+def _profile(pauses: RenderPausePolicy | None = None) -> RenderProfile:
     return RenderProfile(
         roles={"narrator": RoleProfile(language="en-US", binding={"renderer": "fixture"})},
         default_role="narrator",
+        pauses=pauses if pauses is not None else RenderPausePolicy(),
     ).with_identity()
-
 
 def _fixture_book(
     tmp_path: Path,
     source_numbers=(7, 6, 5, 8),
     *,
     emphasis_controls=(),
+    profile_pauses: RenderPausePolicy | None = None,
+    source_pause: str | None = None,
 ):
+    utterplan = pytest.importorskip("utterplan")
     workspace = tmp_path / "book"
-    profile = _profile()
+    profile = _profile(profile_pauses)
     profile_id = profile.profile_id or profile.computed_id()
     fingerprint = profile_id.removeprefix("sha256:")[:12]
     variant = f"narration--{fingerprint}"
     plan_variant = workspace / "renderplan" / variant
     voice_variant = workspace / "voicerender" / variant
+    utterplan_dir = workspace / "utterplan"
+    chapters_dir = workspace / "chapters"
     plan_variant.mkdir(parents=True)
     voice_variant.mkdir(parents=True)
-    (workspace / "chapters").mkdir()
+    utterplan_dir.mkdir()
+    chapters_dir.mkdir()
     save_profile(profile, plan_variant / "renderprofile.toml")
 
     chapters = []
+    book_chapters = []
     for source_number in source_numbers:
         chapter_id = f"chapter-{source_number:04d}"
+        chapter_source = chapters_dir / f"{chapter_id}.md"
+        chapter_source.write_text(f"chapter {source_number}\n", encoding="utf-8")
+        if source_pause is None:
+            source_plan = utterplan.FlowPlan(language="en-US", flow=())
+        else:
+            source_plan = utterplan.FlowPlan(
+                language="en-US",
+                flow=(
+                    utterplan.FlowUnit(
+                        segments=(
+                            utterplan.FlowSegment(
+                                text=f"chapter {source_number}",
+                                language="en-US",
+                                pause_before=utterplan.PauseIntent(source_pause),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        source_path = utterplan_dir / f"{chapter_id}.toml"
+        source_plan.save(source_path)
         speech = SpeechItem(
             number=1,
             text=f"chapter {source_number}",
@@ -77,10 +107,10 @@ def _fixture_book(
             source=(SourceSpan(f"{chapter_id}.txt", 0, 10),),
         ).with_identity()
         plan = RenderPlan(
-            source_plan_id=f"sha256:{source_number:064d}",
+            source_plan_id=source_plan.plan_id,
             render_profile_id=profile_id,
             flow=(
-                PauseItem(duration_ms=125, reason="leading").with_identity(),
+                PauseItem(duration_ms=125, reason=source_pause or "leading").with_identity(),
                 speech,
                 PauseItem(duration_ms=250, reason="trailing").with_identity(),
             ),
@@ -112,16 +142,35 @@ def _fixture_book(
                 source_number=source_number,
                 source=f"../../chapters/{chapter_id}.md",
                 utterplan=f"../../utterplan/{chapter_id}.toml",
-                source_plan_id=plan.source_plan_id,
+                source_plan_id=source_plan.plan_id,
                 renderplan=plan_name,
                 render_plan_id=plan.plan_id or plan.computed_id(),
             )
         )
+        book_chapters.append(
+            {
+                "id": chapter_id,
+                "source_number": source_number,
+                "title": f"Chapter {source_number}",
+                "path": f"chapters/{chapter_id}.md",
+            }
+        )
+    (workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "ssmdconvert.book",
+                "schema_version": 1,
+                "ssmd_version": "0.9",
+                "chapters": book_chapters,
+            }
+        ),
+        encoding="utf-8",
+    )
     index = RenderPlanSet(
         variant="narration",
         profile_fingerprint=fingerprint,
         producer_version="0.1.0",
-        manifest="../../book.json",
+        manifest="../../manifest.json",
         utterplan_dir="../../utterplan",
         profile_id=profile_id,
         snapshot="renderprofile.toml",
@@ -130,6 +179,182 @@ def _fixture_book(
     )
     save_renderplan_set(plan_variant / "renderplan-set.toml", index)
     return workspace, variant, plan_variant, tuple(chapters)
+
+def test_renderprofile_pause_policy_is_derived_recorded_and_persisted(tmp_path):
+    from audiocompose import Silence, compose_book
+    from audiocompose.job import load_job
+
+    workspace, variant, _, _ = _fixture_book(
+        tmp_path,
+        source_numbers=(5,),
+        profile_pauses=RenderPausePolicy(mode="manual", durations_ms={"strong": 400}),
+        source_pause="strong",
+    )
+    result = compose_book(workspace, variant=variant)
+    item = result.outcomes[0]
+    assert item.status == "written"
+    assert result.to_dict()["pause_policy_provenance"] == "renderprofile"
+    assert result.to_dict()["pause_policy_id"].startswith("sha256:")
+    assert item.audiojob == "chapter-0005.audiojob"
+
+    job = load_job(workspace / "audiocompose" / variant / item.audiojob)
+    assert job.source["audiocompose.pause_policy_id"] == result.to_dict()["pause_policy_id"]
+    assert job.source["audiocompose.pause_policy_provenance"] == "renderprofile"
+    pauses = [part for part in job.items if isinstance(part, Silence)]
+    assert pauses[0].seconds == pytest.approx(0.4)
+
+
+def test_explicit_pause_policy_overrides_profile_and_rejects_unresolved_intents(tmp_path):
+    from audiocompose import Silence, compose_book
+    from audiocompose.job import load_job
+
+    workspace, variant, _, _ = _fixture_book(
+        tmp_path / "explicit", source_numbers=(5,), source_pause="strong"
+    )
+    explicit = {
+        "schema": "audiocompose.pause-policy.v1",
+        "merge": "max",
+        "default": {"strong": "410ms"},
+    }
+    result = compose_book(workspace, variant=variant, pause_policy=explicit)
+    assert result.to_dict()["pause_policy_provenance"] == "explicit"
+    job = load_job(workspace / "audiocompose" / variant / result.outcomes[0].audiojob)
+    pauses = [part for part in job.items if isinstance(part, Silence)]
+    assert pauses[0].seconds == pytest.approx(0.41)
+
+    unresolved_workspace, unresolved_variant, _, _ = _fixture_book(
+        tmp_path / "unresolved", source_numbers=(5,), source_pause="strong"
+    )
+    unresolved = compose_book(unresolved_workspace, variant=unresolved_variant)
+    assert unresolved.outcomes[0].status == "failed"
+    assert unresolved.outcomes[0].error_code == "pause_policy.unresolved"
+    assert not (unresolved_workspace / "audiocompose" / unresolved_variant / "chapter-0005.wav").exists()
+
+def test_compose_book_cli_pause_override_and_human_report_summary(tmp_path, capsys):
+    from audiocompose.cli import main
+    from audiocompose.job import load_job
+
+    workspace, variant, _, _ = _fixture_book(
+        tmp_path, source_numbers=(5,), source_pause="strong"
+    )
+    policy_path = tmp_path / "narration.pause.toml"
+    policy_path.write_text(
+        'schema = "audiocompose.pause-policy.v1"\n'
+        'merge = "max"\n\n'
+        '[default]\n'
+        'strong = "410ms"\n',
+        encoding="utf-8",
+    )
+    command = [
+        "compose-book",
+        str(workspace),
+        "--variant",
+        variant,
+        "--pauses",
+        str(policy_path),
+        "--json",
+    ]
+    assert main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["pause_policy_provenance"] == "explicit"
+    assert result["items"][0]["pause_policy_id"].startswith("sha256:")
+    job = load_job(workspace / "audiocompose" / variant / "chapter-0005.audiojob")
+    assert job.source["audiocompose.pause_policy_provenance"] == "explicit"
+
+    assert main(command[:-1]) == 0
+    human = capsys.readouterr().out
+    assert "AudioCompose summary" in human
+    assert f"report:      {workspace / 'audiocompose' / variant / 'compose-report.toml'}" in human
+
+
+
+def test_invalid_selector_ranges_and_duplicates_are_rejected(tmp_path):
+    _, _, _, chapters = _fixture_book(tmp_path)
+    for selector in ("", "7-5", "5,5", "5-7,6", "5,,7"):
+        with pytest.raises(BookComposeError) as exc:
+            parse_chapter_selector(selector, chapters)
+        assert exc.value.code == "selection.invalid"
+
+
+def test_book_request_and_error_models_are_public_and_immutable(tmp_path):
+    from dataclasses import FrozenInstanceError
+
+    from audiocompose import BookComposeRequest
+    from audiocompose.errors import BookComposeError as PublicBookComposeError
+
+    workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+    context = resolve_book(workspace, variant)
+    request = BookComposeRequest(
+        workspace=context.workspace,
+        variant=variant,
+        renderplan_variant_dir=context.renderplan_variant_dir,
+        voicerender_variant_dir=context.voicerender_variant_dir,
+        output_variant_dir=context.output_variant_dir,
+        chapters=context.chapters,
+        chapter_selector="5",
+        profile_snapshot_path=context.profile_snapshot_path,
+    )
+    assert request.workspace == workspace.resolve()
+    assert request.chapters == chapters
+    assert request.output_policy.sample_rate > 0
+    with pytest.raises(FrozenInstanceError):
+        attribute = "variant"
+        setattr(request, attribute, "other")
+
+    error = PublicBookComposeError(
+        "handoff.invalid",
+        "source identity mismatch",
+        chapter_id="chapter-0005",
+        source_number=5,
+        variant=variant,
+        details={"upstream": "identity"},
+    )
+    assert error.code == "handoff.invalid"
+    assert error.chapter_id == "chapter-0005"
+    assert error.source_number == 5
+    assert error.variant == variant
+    assert error.details == {"upstream": "identity"}
+
+
+def test_native_workspace_and_variant_names_fail_closed(tmp_path):
+    workspace, variant, _, _ = _fixture_book(tmp_path)
+    with pytest.raises(BookComposeError) as exc:
+        resolve_book(workspace, "../escape")
+    assert exc.value.code == "variant.invalid"
+    assert exc.value.variant == "../escape"
+
+    manifest_path = workspace / "manifest.json"
+    manifest_path.write_text(json.dumps({"format": "other", "schema_version": 1}), encoding="utf-8")
+    with pytest.raises(BookComposeError) as exc:
+        resolve_book(workspace, variant)
+    assert exc.value.code == "workspace.invalid"
+
+
+def test_utterplan_symlink_escape_is_rejected(tmp_path):
+    workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+    context = resolve_book(workspace, variant)
+    chapter = chapters[0]
+    source_path = workspace / "utterplan" / f"{chapter.id}.toml"
+    outside = tmp_path / "outside.utterplan.toml"
+    outside.write_bytes(source_path.read_bytes())
+    source_path.unlink()
+    source_path.symlink_to(outside)
+
+    with pytest.raises(BookComposeError) as exc:
+        paths_for_chapter(context, chapter)
+    assert exc.value.code == "workspace.invalid"
+
+
+def test_utterplan_identity_mismatch_is_rejected_before_composition(tmp_path):
+    utterplan = pytest.importorskip("utterplan")
+    workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+    context = resolve_book(workspace, variant)
+    source_path = workspace / "utterplan" / f"{chapters[0].id}.toml"
+    utterplan.FlowPlan(language="fr-FR", flow=()).save(source_path)
+
+    with pytest.raises(BookComposeError) as exc:
+        load_chapter_plan(context, paths_for_chapter(context, chapters[0]))
+    assert exc.value.code == "handoff.invalid"
 
 
 def test_chapter_selector_preserves_renderplan_set_order(tmp_path):
@@ -144,7 +369,7 @@ def test_unknown_chapter_selector_fails_before_composition(tmp_path):
     _, _, _, chapters = _fixture_book(tmp_path)
     with pytest.raises(BookComposeError, match="unknown selected chapter") as exc:
         parse_chapter_selector("5,9", chapters)
-    assert exc.value.code == "index.invalid"
+    assert exc.value.code == "selection.invalid"
     with pytest.raises(BookComposeError, match="unknown selected chapter"):
         parse_chapter_selector("1-999999999", chapters)
 
@@ -191,7 +416,10 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
     assert first["written"] == 1 and first["reused"] == 0
     assert first["items"][0]["status"] == "written"
     assert first["items"][0]["frames"] == 9_048
-    assert first["items"][0]["source_plan_id"] == "sha256:" + f"{5:064d}"
+    from utterplan import FlowPlan
+
+    source_plan_id = FlowPlan.load(workspace / "utterplan" / "chapter-0005.toml").plan_id
+    assert first["items"][0]["source_plan_id"] == source_plan_id
     assert first["items"][0]["render_profile_id"]
     assert first["items"][0]["manifest_id"]
     assert first["items"][0]["sha256"].startswith("sha256:")
@@ -225,8 +453,21 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
     )
     assert isinstance(api_result, BookComposeResult)
     assert [item.source_number for item in api_result.outcomes] == [5, 8]
-    assert [item.completed_chapters for item in progress] == [1, 2]
+    assert [item.kind for item in progress] == [
+        "book_started",
+        "chapter_started",
+        "chapter_materialized",
+        "chapter_compose_started",
+        "chapter_compose_completed",
+        "chapter_started",
+        "chapter_materialized",
+        "chapter_compose_started",
+        "chapter_compose_completed",
+        "book_completed",
+    ]
+    assert [item.completed_chapters for item in progress if item.outcome is not None] == [1, 2]
     assert api_result.exit_code == 0
+    assert not (api_workspace / ".readio").exists()
 
     cli_command = [
         "compose-book",
@@ -238,6 +479,7 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         "--json",
     ]
     assert main(cli_command) == 0
+    assert not (cli_workspace / ".readio").exists()
     cli_result = json.loads(capsys.readouterr().out)
     api_items = api_result.to_dict()["items"]
     assert api_items == cli_result["items"]
@@ -253,6 +495,12 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
     with Path(cli_result["report"]).open("rb") as stream:
         cli_report = tomllib.load(stream)
     assert api_report["item"] == cli_report["item"]
+    assert api_report["workspace"] == "../.."
+    assert api_report["audiojobs_root"] == "."
+    for key in ("utterplan", "render_manifest"):
+        assert not Path(api_report["item"][0][key]).is_absolute()
+        assert (Path(api_result.report_path).parent / api_report["item"][0][key]).is_file()
+    assert api_report["item"][0]["job"] == "chapter-0005.audiojob"
 
     api_reused = compose_book(api_workspace, variant=api_variant, chapters="5,8")
     assert main(cli_command) == 0
@@ -407,7 +655,7 @@ def test_unknown_selected_chapter_fails_before_output_is_created(tmp_path, capsy
         == 2
     )
     error = json.loads(capsys.readouterr().err)
-    assert error["errors"][0]["code"] == "index.invalid"
+    assert error["errors"][0]["code"] == "selection.invalid"
     assert not (workspace / "audiocompose" / variant).exists()
 
 
@@ -691,6 +939,94 @@ def test_batch_continues_by_default_and_fail_fast_skips_later_chapters(tmp_path,
     assert [item["status"] for item in fast["items"]] == ["reused", "failed", "skipped"]
 
 
+def test_reuse_requires_current_policy_and_valid_audiojob_identity(tmp_path):
+    from audiocompose import compose_book
+
+    workspace, variant, _, _ = _fixture_book(
+        tmp_path, source_numbers=(5,), source_pause="strong"
+    )
+    first_policy = {
+        "schema": "audiocompose.pause-policy.v1",
+        "merge": "max",
+        "default": {"strong": "410ms"},
+    }
+    changed_policy = {
+        "schema": "audiocompose.pause-policy.v1",
+        "merge": "max",
+        "default": {"strong": "420ms"},
+    }
+
+    first = compose_book(workspace, variant=variant, pause_policy=first_policy)
+    assert first.outcomes[0].status == "written"
+    assert compose_book(workspace, variant=variant, pause_policy=first_policy).outcomes[0].status == "reused"
+
+    stale_policy = compose_book(workspace, variant=variant, pause_policy=changed_policy)
+    assert stale_policy.outcomes[0].error_code == "output.exists"
+    forced = compose_book(workspace, variant=variant, pause_policy=changed_policy, force=True)
+    assert forced.outcomes[0].status == "written"
+
+    job_json = workspace / "audiocompose" / variant / "chapter-0005.audiojob" / "audiojob.json"
+    job_json.write_text("not a valid AudioJob bundle", encoding="utf-8")
+    tampered_job = compose_book(workspace, variant=variant, pause_policy=changed_policy)
+    assert tampered_job.outcomes[0].error_code == "output.exists"
+    compose_book(workspace, variant=variant, pause_policy=changed_policy, force=True)
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+        import tomli as tomllib
+    report_path = workspace / "audiocompose" / variant / "compose-report.toml"
+    with report_path.open("rb") as stream:
+        report = tomllib.load(stream)
+    old_version = report["item"][0]["audiocompose_version"]
+    report_text = report_path.read_text(encoding="utf-8")
+    report_text = report_text.replace(
+        f'audiocompose_version = "{old_version}"',
+        'audiocompose_version = "0.0.0-stale"',
+        1,
+    )
+    report_path.write_text(report_text, encoding="utf-8")
+    stale_version = compose_book(workspace, variant=variant, pause_policy=changed_policy)
+    assert stale_version.outcomes[0].error_code == "output.exists"
+
+
+def test_progress_callback_failure_writes_report_without_final_wav(tmp_path):
+    from audiocompose import compose_book
+
+    workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5, 6))
+
+    def fail_after_materialization(progress):
+        if progress.kind == "chapter_materialized":
+            raise RuntimeError("observer unavailable")
+
+    result = compose_book(workspace, variant=variant, on_progress=fail_after_materialization)
+    assert [item.status for item in result.outcomes] == ["failed", "skipped"]
+    assert result.outcomes[0].error_code == "progress.callback_failed"
+    assert result.exit_code == 2
+    assert result.report_path.is_file()
+    assert not (result.output_variant_dir / "chapter-0005.wav").exists()
+    assert not (result.output_variant_dir / "chapter-0006.wav").exists()
+    report_text = result.report_path.read_text(encoding="utf-8")
+    assert 'error_code = "progress.callback_failed"' in report_text
+
+
+def test_composer_failure_never_publishes_a_chapter_wav(tmp_path, monkeypatch):
+    import audiocompose.composer as composer_module
+    from audiocompose import compose_book
+
+    workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
+
+    def fail_composition(self, job):
+        raise RuntimeError("simulated composer failure")
+
+    monkeypatch.setattr(composer_module.Composer, "compose", fail_composition)
+    result = compose_book(workspace, variant=variant)
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].error_code == "compose.failed"
+    assert not (result.output_variant_dir / "chapter-0005.wav").exists()
+    assert result.report_path.is_file()
+
+
 def test_atomic_write_wav_replaces_only_complete_files(tmp_path, monkeypatch):
     import audiocompose.wav as wav_module
     from audiocompose.wav import atomic_write_wav, read_wav
@@ -826,7 +1162,7 @@ def test_external_audio_and_output_policy_match_direct_compose_renderplan(tmp_pa
     assert book_output.read_bytes() == direct_output.read_bytes()
 
 
-def test_compose_book_runs_with_producer_packages_blocked(tmp_path):
+def test_compose_book_requires_optional_producer_extra_but_import_is_lazy(tmp_path):
     import subprocess
     import sys
 
@@ -841,10 +1177,12 @@ class BlockProducerImports(importlib.abc.MetaPathFinder):
         if fullname == 'utterplan' or fullname.startswith('utterplan.'):
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0, BlockProducerImports())
+from audiocompose import AudioJob, Composer
 from audiocompose.cli import main
-assert main(['compose-book', sys.argv[1], '--variant', sys.argv[2], '--json']) == 0
+assert main(['compose-book', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
 assert not any(name == 'voicerender' or name.startswith('voicerender.') for name in sys.modules)
 assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in sys.modules)
+assert AudioJob and Composer
 """
     completed = subprocess.run(
         [sys.executable, "-c", script, str(workspace), variant],
@@ -853,3 +1191,4 @@ assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in 
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+    assert "dependency.api_incompatible" in completed.stdout

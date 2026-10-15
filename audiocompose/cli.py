@@ -97,6 +97,10 @@ def _parser() -> argparse.ArgumentParser:
     compose_book.add_argument(
         "--chapters", default="all", help="source chapter numbers: all, 5, 5-7, or 5,8,10-12"
     )
+    compose_book.add_argument(
+        "--pauses",
+        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
+    )
     compose_book.add_argument("--renderplan-root", help="override the book RenderPlan root")
     compose_book.add_argument("--voicerender-root", help="override the book VoiceRender root")
     compose_book.add_argument("--output-root", help="override the AudioCompose output root")
@@ -396,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.book,
                 variant=args.variant,
                 chapters=args.chapters,
+                pause_policy=args.pauses,
                 options=BookComposeOptions(
                     sample_rate=args.sample_rate,
                     clip_policy=args.clip_policy,
@@ -421,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  renderplans: {book_result.renderplan_variant_dir}")
                 print(f"  speech:      {book_result.voicerender_variant_dir}")
                 print(f"  output:      {book_result.output_variant_dir}")
+                print(f"  report:      {book_result.report_path}")
                 print(f"  chapters:    {book_result.selector}")
                 print(f"  selected:    {book_result.requested}")
                 for item in book_result.outcomes:

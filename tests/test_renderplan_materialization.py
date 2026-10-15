@@ -896,6 +896,7 @@ class BlockProducerImports(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockProducerImports())
 import audiocompose
 import audiocompose.integrations.renderplan
+import audiocompose.integrations.voicerender
 assert not any(name == 'voicerender' or name.startswith('voicerender.') for name in sys.modules)
 assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in sys.modules)
 """
@@ -908,10 +909,21 @@ assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in 
     )
 
 
-def test_runtime_dependency_replaces_voice_render_extra():
+def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
+    import importlib
+
+    try:
+        tomllib = importlib.import_module("tomllib")
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+        tomllib = importlib.import_module("tomli")
+
     project_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    project = project_path.read_text(encoding="utf-8")
-    assert '"renderplan>=0.1.1,<0.2"' in project
-    assert "voicerender" not in project
-    assert "utterplan" not in project.lower()
-    assert not (project_path.parent / "audiocompose/integrations/voicerender.py").exists()
+    project = tomllib.loads(project_path.read_text(encoding="utf-8"))
+    base_dependencies = project["project"]["dependencies"]
+    extra_dependencies = project["project"]["optional-dependencies"]["voicerender"]
+
+    assert any(item.startswith("renderplan>=0.1.1,<0.2") for item in base_dependencies)
+    assert not any(item.lower().startswith(("voicerender", "utterplan")) for item in base_dependencies)
+    assert any(item.startswith("utterplan>=0.6.3,<0.7") for item in extra_dependencies)
+    assert any(item.startswith("voicerender>=0.1.1,<0.2") for item in extra_dependencies)
+    assert (project_path.parent / "audiocompose/integrations/voicerender.py").is_file()

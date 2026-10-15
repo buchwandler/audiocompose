@@ -19,6 +19,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
         "AudioClip",
         "AudioComposeError",
         "BookComposeError",
+        "BookComposeRequest",
         "BookComposeOptions",
         "BookComposeProgress",
         "BookComposeProgressCallback",
