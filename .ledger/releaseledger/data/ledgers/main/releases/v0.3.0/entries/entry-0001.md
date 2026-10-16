@@ -12,13 +12,13 @@ status: accepted
 audience: null
 scopes: []
 source_refs:
-- tl:task-0016
+  - tl:task-0016
 paths:
-- audiocompose/book.py
-- audiocompose/cli.py
-- README.md
-- docs/architecture.md
-- .github/workflows/tests.yml
+  - audiocompose/book.py
+  - audiocompose/cli.py
+  - README.md
+  - docs/architecture.md
+  - .github/workflows/tests.yml
 issues: []
 prs: []
 sources: []

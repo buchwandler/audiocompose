@@ -27,7 +27,7 @@ PyKokoro and PiperSynth own G2P, engine configuration, voice and model selection
 
 ## Direct RenderPlan consumption
 
-AudioCompose's `renderplan>=0.1.1,<0.2` runtime dependency supplies the shared contract types and TOML loaders. `audiocompose.integrations.renderplan` validates plan and manifest identity, requires `complete=true`, and checks exact manifest correspondence. Before constructing an `AudioJob`, it verifies each speech occurrence, segment ID, manifest WAV name, safe containment under the render directory, regular-file and symlink safety, SHA-256, and WAV sample-rate/channel/frame geometry. Speech artifacts must be mono.
+AudioCompose's `renderplan>=0.1.2,<0.2` runtime dependency supplies the shared contract types and TOML loaders. `audiocompose.integrations.renderplan` validates plan and manifest identity, requires `complete=true`, and checks exact manifest correspondence. Before constructing an `AudioJob`, it verifies each speech occurrence, segment ID, manifest WAV name, safe containment under the render directory, regular-file and symlink safety, SHA-256, and WAV sample-rate/channel/frame geometry. Speech artifacts must be mono.
 
 The adapter iterates `RenderPlan.flow` literally. Pauses become `Silence` items at the declared `duration_ms / 1000`, including zero-duration pauses; AudioCompose does not infer pause meaning or apply a symbolic pause policy. Shared source spans are retained only as opaque provenance metadata, not fabricated `AudioSpan` alignment. The resulting job uses the same persistence, `OutputPolicy`, Composer, and output paths as any other AudioJob.
 
@@ -64,6 +64,20 @@ The dependency boundary remains asymmetric: `renderplan` is the shared base cont
                               |
              atomic chapter WAV + TOML report
 ```
+
+### VoiceRender v0.2 control ownership
+
+The book bridge is a producer-specific trust boundary; the generic RenderPlan materializer stays strict. A complete VoiceRender v0.2 manifest and its `render-diagnostics.json` sidecar are required. AudioCompose verifies producer/version, RenderPlan identity, diagnostic contents, and control occurrence/count correspondence before using the evidence. The diagnostics digest and the accepted ownership decision participate in AudioJob identity and book-output reuse.
+
+```text
+RenderPlan preserves intent.
+VoiceRender realizes producer-native controls.
+VoiceRender diagnostics declare remaining composition capabilities.
+AudioCompose realizes only declared capabilities it explicitly owns.
+Generic RenderPlan composition does not infer producer ownership.
+```
+
+For v0.3, the only accepted deferred capability is `audiocompose.emphasis.gain.v1`; unknown capabilities fail closed. Do not use this diagnostics trust path to relax direct generic `materialize_renderplan_job` validation. Pause-policy `role` overrides are keyed by RenderPlan `SpeechItem.role`. Source-pause validation checks known classes and table availability without treating logical voice references as policy keys; actual durations resolve against RenderPlan role and fail closed if no role/default value exists.
 
 For book composition, symbolic source pause intents resolve from the selected RenderProfile snapshot by default. A strict `audiocompose.pause-policy.v1` TOML override is accepted explicitly; unresolved intents fail closed. The policy identity and provenance are stored in AudioJob sources and the report. This policy conversion belongs to the book integration and is not applied by direct `compose-renderplan`, whose RenderPlan pauses remain literal durations.
 
@@ -119,7 +133,7 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 | Manifest correspondence and speech artifact integrity               | AudioCompose RenderPlan adapter   |
 | RenderPlan flow ordering and provenance lowering to AudioJob values | AudioCompose RenderPlan adapter   |
 | Media-root policy, media resolver contract, and option lowering     | AudioCompose integration boundary |
-| Native book orchestration and profile-derived pause policy       | AudioCompose optional book facade |
+| Native book orchestration and profile-derived pause policy          | AudioCompose optional book facade |
 | AudioJob format, schema, persistence, and bundle validation         | AudioCompose core                 |
 | Numeric operation model and timing maps                             | AudioCompose core                 |
 | Resampling, time-scale modification, and pitch-shift DSP            | AudioSig                          |

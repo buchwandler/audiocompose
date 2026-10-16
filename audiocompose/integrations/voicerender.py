@@ -13,6 +13,7 @@ import importlib
 import json
 import math
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +22,199 @@ from typing import Any, Literal
 
 from ..errors import HandoffValidationError, IntegrationError, PausePolicyError
 from ..model import OutputPolicy, Silence
-from .renderplan import MediaResolver, materialize_renderplan_job
+from .renderplan import (
+    MediaResolver,
+    _ValidatedControlOwnership,
+    materialize_renderplan_job,
+)
+from .renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+
+EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
+_VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.render-diagnostics.v1"
+_VOICERENDER_EMPHASIS_POLICIES = frozenset({"reject", "defer-to-compose"})
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value!r}")
+
+
+def _load_render_diagnostics(path: Path) -> tuple[dict[str, Any], str]:
+    location = Path(path).expanduser()
+    try:
+        info = location.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise HandoffValidationError(
+                f"VoiceRender diagnostics must not be a symlink: {location}"
+            )
+        if not stat.S_ISREG(info.st_mode):
+            raise HandoffValidationError(
+                f"VoiceRender diagnostics must be a regular file: {location}"
+            )
+        raw = location.read_bytes()
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except HandoffValidationError:
+        raise
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise HandoffValidationError(
+            f"Cannot read VoiceRender diagnostics {location}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HandoffValidationError("VoiceRender diagnostics JSON root must be an object")
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return payload, digest
+
+
+def _validate_voicerender_producer(manifest: Any) -> None:
+    producer = getattr(manifest, "producer", None)
+    if getattr(producer, "name", None) != "voicerender":
+        raise HandoffValidationError(
+            "VoiceRender diagnostics can only be trusted with a RenderManifest produced by 'voicerender'"
+        )
+    version = getattr(producer, "version", None)
+    if version is None:
+        return
+    if not isinstance(version, str):
+        raise HandoffValidationError("RenderManifest VoiceRender producer version must be a string")
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[.+-][0-9A-Za-z.+-]+)?", version)
+    if match is None or (int(match.group(1)), int(match.group(2))) != (0, 2):
+        raise HandoffValidationError(
+            f"VoiceRender producer version {version!r} is incompatible; AudioCompose v0.3 supports 0.2.x"
+        )
+
+
+def _validate_render_diagnostics(
+    plan: Any, diagnostics: Mapping[str, Any], diagnostics_sha256: str
+) -> _ValidatedControlOwnership:
+    if diagnostics.get("schema") != _VOICERENDER_DIAGNOSTICS_SCHEMA:
+        raise HandoffValidationError(
+            f"Unsupported VoiceRender diagnostics schema {diagnostics.get('schema')!r}"
+        )
+    plan_id = plan.plan_id or plan.computed_id()
+    if diagnostics.get("render_plan_id") != plan_id:
+        raise HandoffValidationError(
+            f"VoiceRender diagnostics refer to RenderPlan {diagnostics.get('render_plan_id')!r}, "
+            f"but the selected plan is {plan_id!r}; diagnostics are stale"
+        )
+    emphasis_policy = diagnostics.get("emphasis_policy")
+    if (
+        not isinstance(emphasis_policy, str)
+        or emphasis_policy not in _VOICERENDER_EMPHASIS_POLICIES
+    ):
+        raise HandoffValidationError(
+            f"Unsupported VoiceRender emphasis_policy {emphasis_policy!r} in diagnostics"
+        )
+    pending = diagnostics.get("pending_composition")
+    if not isinstance(pending, bool):
+        raise HandoffValidationError(
+            "VoiceRender diagnostics pending_composition must be a boolean"
+        )
+    deferred = diagnostics.get("deferred_controls")
+    if not isinstance(deferred, list):
+        raise HandoffValidationError("VoiceRender diagnostics deferred_controls must be a list")
+
+    renderplan = importlib.import_module("renderplan")
+    speeches: dict[tuple[int, str], Any] = {}
+    emphasis_counts: dict[tuple[int, str], int] = {}
+    realized_controls: set[str] = set()
+    for item in plan.flow:
+        if not isinstance(item, renderplan.SpeechItem):
+            continue
+        segment_id = item.segment_id or item.computed_id()
+        occurrence = (item.number, segment_id)
+        if occurrence in speeches:
+            raise HandoffValidationError(f"RenderPlan repeats speech occurrence {occurrence!r}")
+        speeches[occurrence] = item
+        controls = item.controls
+        if not isinstance(controls, (tuple, list)):
+            raise HandoffValidationError(
+                f"speech {item.number} control range [unknown]: controls must be a sequence"
+            )
+        for control in controls:
+            name = getattr(control, "name", None)
+            if name == "emphasis":
+                emphasis_counts[occurrence] = emphasis_counts.get(occurrence, 0) + 1
+            elif isinstance(name, str) and name:
+                realized_controls.add(name)
+
+    observed_counts: dict[tuple[int, str], int] = {}
+    for entry in deferred:
+        if not isinstance(entry, dict):
+            raise HandoffValidationError("Each VoiceRender deferred control must be an object")
+        number = entry.get("segment_number")
+        segment_id = entry.get("segment_id")
+        capability = entry.get("capability")
+        count = entry.get("count")
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise HandoffValidationError(
+                "VoiceRender deferred segment_number must be a positive integer"
+            )
+        if not isinstance(segment_id, str) or not segment_id:
+            raise HandoffValidationError(
+                "VoiceRender deferred segment_id must be a non-empty string"
+            )
+        if not isinstance(capability, str) or capability != EMPHASIS_COMPOSITION_CAPABILITY:
+            raise HandoffValidationError(
+                f"VoiceRender deferred capability {capability!r} is not supported by AudioCompose v0.3.0"
+            )
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise HandoffValidationError("VoiceRender deferred count must be a positive integer")
+        occurrence = (number, segment_id)
+        if occurrence not in speeches:
+            raise HandoffValidationError(
+                f"VoiceRender deferred control refers to unknown speech occurrence {occurrence!r}"
+            )
+        if occurrence in observed_counts:
+            raise HandoffValidationError(
+                f"VoiceRender diagnostics repeat deferred speech occurrence {occurrence!r}"
+            )
+        expected_count = emphasis_counts.get(occurrence, 0)
+        if count != expected_count:
+            raise HandoffValidationError(
+                f"VoiceRender reported {count} deferred emphasis controls for speech occurrence "
+                f"{occurrence!r}, but the RenderPlan contains {expected_count}"
+            )
+        observed_counts[occurrence] = count
+
+    if pending is not bool(deferred):
+        raise HandoffValidationError(
+            "VoiceRender diagnostics pending_composition contradicts deferred_controls"
+        )
+    if deferred and emphasis_policy != "defer-to-compose":
+        raise HandoffValidationError(
+            "VoiceRender diagnostics report deferred controls without defer-to-compose policy"
+        )
+    if emphasis_counts and emphasis_policy != "defer-to-compose":
+        raise HandoffValidationError(
+            "RenderPlan emphasis controls require VoiceRender emphasis_policy='defer-to-compose'"
+        )
+    if emphasis_policy == "defer-to-compose" and observed_counts != emphasis_counts:
+        missing = sorted(set(emphasis_counts).difference(observed_counts))
+        raise HandoffValidationError(
+            f"VoiceRender diagnostics omit deferred emphasis occurrence(s) {missing!r}"
+        )
+
+    return _ValidatedControlOwnership(
+        producer="voicerender",
+        plan_id=plan_id,
+        realized_controls=frozenset(realized_controls),
+        diagnostics_sha256=diagnostics_sha256,
+        diagnostics_schema=_VOICERENDER_DIAGNOSTICS_SCHEMA,
+        emphasis_policy=emphasis_policy,
+        deferred_capabilities=tuple(sorted({entry["capability"] for entry in deferred})),
+    )
 
 
 def _flow_plan_type() -> Any:
@@ -30,8 +223,8 @@ def _flow_plan_type() -> Any:
         return importlib.import_module("utterplan").FlowPlan
     except (ImportError, AttributeError) as exc:  # pragma: no cover - optional dependency
         raise IntegrationError(
-            "The VoiceRender book integration requires the optional 'voicerender' extra; "
-            "install audiocompose[voicerender]."
+            "UtterPlan is required for VoiceRender book handoff materialization. "
+            "Install audiocompose[voicerender]."
         ) from exc
 
 
@@ -81,13 +274,13 @@ def _duration_seconds(value: Any, where: str) -> float:
 
 
 def _normalized_pause_policy(
-    default: Mapping[str, float], voices: Mapping[str, Mapping[str, float]]
+    default: Mapping[str, float], roles: Mapping[str, Mapping[str, float]]
 ) -> dict[str, Any]:
     return {
         "schema": PAUSE_POLICY_SCHEMA,
         "merge": "max",
         "default": dict(sorted(default.items())),
-        "voice": {name: dict(sorted(table.items())) for name, table in sorted(voices.items())},
+        "role": {name: dict(sorted(table.items())) for name, table in sorted(roles.items())},
     }
 
 
@@ -122,7 +315,7 @@ class PausePolicy:
     """Strict AudioCompose-owned mapping from symbolic pauses to durations."""
 
     default: Mapping[str, float]
-    voices: Mapping[str, Mapping[str, float]]
+    roles: Mapping[str, Mapping[str, float]]
     policy_id: str
     merge: str = "max"
 
@@ -130,33 +323,33 @@ class PausePolicy:
         if self.merge != "max":
             raise PausePolicyError("PausePolicy merge must be 'max'")
         default = _validate_pause_table(self.default, "default")
-        if not isinstance(self.voices, Mapping):
-            raise PausePolicyError("voice must be a table of logical-voice overrides")
-        voices: dict[str, Mapping[str, float]] = {}
-        for voice, values in self.voices.items():
-            if not isinstance(voice, str) or not voice.strip():
-                raise PausePolicyError("voice override names must be non-empty strings")
-            voices[voice] = MappingProxyType(_validate_pause_table(values, f"voice.{voice}"))
+        if not isinstance(self.roles, Mapping):
+            raise PausePolicyError("role must be a table of RenderPlan-role overrides")
+        roles: dict[str, Mapping[str, float]] = {}
+        for role, values in self.roles.items():
+            if not isinstance(role, str) or not role.strip():
+                raise PausePolicyError("role override names must be non-empty strings")
+            roles[role] = MappingProxyType(_validate_pause_table(values, f"role.{role}"))
         if not isinstance(self.policy_id, str) or _POLICY_ID.fullmatch(self.policy_id) is None:
             raise PausePolicyError("PausePolicy policy_id must be a canonical SHA-256 identity")
-        expected = _pause_policy_id(_normalized_pause_policy(default, voices))
+        expected = _pause_policy_id(_normalized_pause_policy(default, roles))
         if self.policy_id != expected:
             raise PausePolicyError("PausePolicy policy_id does not match its normalized contents")
         object.__setattr__(self, "default", MappingProxyType(default))
-        object.__setattr__(self, "voices", MappingProxyType(voices))
+        object.__setattr__(self, "roles", MappingProxyType(roles))
 
     @classmethod
     def _create(
-        cls, default: Mapping[str, float], voices: Mapping[str, Mapping[str, float]]
+        cls, default: Mapping[str, float], roles: Mapping[str, Mapping[str, float]]
     ) -> PausePolicy:
-        normalized = _normalized_pause_policy(default, voices)
-        return cls(default, voices, _pause_policy_id(normalized))
+        normalized = _normalized_pause_policy(default, roles)
+        return cls(default, roles, _pause_policy_id(normalized))
 
     @classmethod
     def from_mapping(cls, document: Mapping[str, Any]) -> PausePolicy:
         if not isinstance(document, Mapping):
             raise PausePolicyError("Pause policy must be a mapping")
-        unknown = set(document).difference({"schema", "merge", "default", "voice"})
+        unknown = set(document).difference({"schema", "merge", "default", "role"})
         if unknown:
             raise PausePolicyError(f"Pause policy has unknown root field(s): {sorted(unknown)}")
         if document.get("schema") != PAUSE_POLICY_SCHEMA:
@@ -169,20 +362,20 @@ class PausePolicy:
         default = {
             name: _duration_seconds(value, f"default.{name}") for name, value in raw_default.items()
         }
-        raw_voices = document.get("voice", {})
-        if not isinstance(raw_voices, Mapping):
-            raise PausePolicyError("voice must be a table of logical-voice overrides")
-        voices: dict[str, dict[str, float]] = {}
-        for voice, values in raw_voices.items():
-            if not isinstance(voice, str) or not voice.strip():
-                raise PausePolicyError("voice override names must be non-empty strings")
+        raw_roles = document.get("role", {})
+        if not isinstance(raw_roles, Mapping):
+            raise PausePolicyError("role must be a table of RenderPlan-role overrides")
+        roles: dict[str, dict[str, float]] = {}
+        for role, values in raw_roles.items():
+            if not isinstance(role, str) or not role.strip():
+                raise PausePolicyError("role override names must be non-empty strings")
             if not isinstance(values, Mapping):
-                raise PausePolicyError(f"voice.{voice} must be a pause-class table")
-            voices[voice] = {
-                name: _duration_seconds(value, f"voice.{voice}.{name}")
+                raise PausePolicyError(f"role.{role} must be a pause-class table")
+            roles[role] = {
+                name: _duration_seconds(value, f"role.{role}.{name}")
                 for name, value in values.items()
             }
-        return cls._create(default, voices)
+        return cls._create(default, roles)
 
     @classmethod
     def from_render_profile(cls, profile: Any) -> PausePolicy:
@@ -202,7 +395,9 @@ class PausePolicy:
             default = {}
         for name, duration in durations_ms.items():
             if isinstance(duration, bool) or not isinstance(duration, int) or duration < 0:
-                raise PausePolicyError(f"RenderProfile pauses.{name} must be an integer millisecond duration")
+                raise PausePolicyError(
+                    f"RenderProfile pauses.{name} must be an integer millisecond duration"
+                )
             default[name] = duration / 1000.0
         return cls._create(default, {})
 
@@ -225,11 +420,11 @@ class PausePolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            **_normalized_pause_policy(self.default, self.voices),
+            **_normalized_pause_policy(self.default, self.roles),
             "policy_id": self.policy_id,
         }
 
-    def resolve(self, intent: Any, *, voice: str, where: str) -> float:
+    def resolve(self, intent: Any, *, role: str, where: str) -> float:
         if intent is None:
             return 0.0
         if callable(getattr(intent, "to_dict", None)):
@@ -244,10 +439,10 @@ class PausePolicy:
             raise PausePolicyError(f"{where}: unknown symbolic pause {intent!r}")
         if intent == "none":
             return 0.0
-        duration = self.voices.get(voice, {}).get(intent, self.default.get(intent))
+        duration = self.roles.get(role, {}).get(intent, self.default.get(intent))
         if duration is None:
             raise PausePolicyError(
-                f"{where}: no duration configured for pause {intent!r} (logical voice {voice!r})"
+                f"{where}: no duration configured for pause {intent!r} (RenderPlan role {role!r})"
             )
         return float(duration)
 
@@ -262,35 +457,41 @@ def load_pause_policy(value: PausePolicy | str | Path | Mapping[str, Any]) -> Pa
     raise PausePolicyError("pause_policy must be a policy path, mapping, or PausePolicy")
 
 
-def _validate_source_pauses(source: Any, policy: PausePolicy, *, default_voice: str) -> set[str]:
+def _validate_source_pauses(source: Any, policy: PausePolicy) -> set[str]:
+    """Validate pause syntax without interpreting logical voices as RenderPlan roles.
+
+    Role-specific duration selection happens only from RenderPlan SpeechItem.role
+    in ``_apply_pause_policy``; source directives are not policy-table keys.
+    """
     resolved: set[str] = set()
     for unit_index, unit in enumerate(getattr(source, "flow", ())):
         for segment_index, segment in enumerate(getattr(unit, "segments", ())):
-            directives = getattr(segment, "directives", None)
-            voice_directive = getattr(directives, "voice", None)
-            voice = (
-                getattr(voice_directive, "reference", None)
-                or getattr(voice_directive, "name", None)
-                or default_voice
-            )
             for side in ("pause_before", "pause_after"):
                 intent = getattr(segment, side, None)
                 if intent is None:
                     continue
                 value = intent.to_dict() if callable(getattr(intent, "to_dict", None)) else intent
-                policy.resolve(
-                    value,
-                    voice=voice,
-                    where=f"flow[{unit_index}].segments[{segment_index}].{side}",
-                )
+                where = f"flow[{unit_index}].segments[{segment_index}].{side}"
                 if isinstance(value, str):
+                    if value not in PAUSE_CLASSES:
+                        raise PausePolicyError(f"{where}: unknown symbolic pause {value!r}")
+                    if (
+                        value != "none"
+                        and value not in policy.default
+                        and not any(value in table for table in policy.roles.values())
+                    ):
+                        raise PausePolicyError(
+                            f"{where}: no duration configured for pause {value!r} in the default or role tables"
+                        )
                     resolved.add(value)
-                elif isinstance(value, Mapping) and isinstance(value.get("type"), str):
-                    resolved.add(value["type"])
+                else:
+                    policy.resolve(value, role="", where=where)
+                    if isinstance(value, Mapping) and isinstance(value.get("type"), str):
+                        resolved.add(value["type"])
     return resolved
 
 
-def _render_pause_voice(flow: tuple[Any, ...], index: int, default_voice: str) -> str:
+def _render_pause_role(flow: tuple[Any, ...], index: int, default_role: str) -> str:
     renderplan = importlib.import_module("renderplan")
     for candidate in (*range(index - 1, -1, -1), *range(index + 1, len(flow))):
         item = flow[candidate]
@@ -298,7 +499,7 @@ def _render_pause_voice(flow: tuple[Any, ...], index: int, default_voice: str) -
             role = item.role
             if isinstance(role, str) and role:
                 return role
-    return default_voice
+    return default_role
 
 
 def _apply_pause_policy(
@@ -308,12 +509,14 @@ def _apply_pause_policy(
     *,
     source_intents: set[str],
     provenance: Literal["renderprofile", "explicit"],
-    default_voice: str,
+    default_role: str,
 ) -> Any:
     renderplan = importlib.import_module("renderplan")
     flow = tuple(plan.flow)
     if len(flow) != len(job.items):
-        raise HandoffValidationError("materialized AudioJob items do not match RenderPlan flow order")
+        raise HandoffValidationError(
+            "materialized AudioJob items do not match RenderPlan flow order"
+        )
     items: list[Any] = []
     for index, (plan_item, job_item) in enumerate(zip(flow, job.items, strict=True)):
         if not isinstance(plan_item, renderplan.PauseItem) or not isinstance(job_item, Silence):
@@ -323,12 +526,18 @@ def _apply_pause_policy(
         seconds = job_item.seconds
         if reason in PAUSE_CLASSES and reason != "timed":
             use_policy = provenance == "explicit" or reason in source_intents
-            use_policy = use_policy or reason in policy.default or any(
-                reason in values for values in policy.voices.values()
+            use_policy = (
+                use_policy
+                or reason in policy.default
+                or any(reason in values for values in policy.roles.values())
             )
             if use_policy:
-                voice = _render_pause_voice(flow, index, default_voice)
-                seconds = policy.resolve(reason, voice=voice, where=f"RenderPlan pause {plan_item.pause_id or index}")
+                role = _render_pause_role(flow, index, default_role)
+                seconds = policy.resolve(
+                    reason,
+                    role=role,
+                    where=f"RenderPlan pause {plan_item.pause_id or index}",
+                )
         if seconds != job_item.seconds:
             from dataclasses import replace as dataclass_replace
 
@@ -354,7 +563,7 @@ def materialize_voicerender_job(
     output_policy: OutputPolicy | None = None,
     pause_policy: PausePolicy | str | Path | Mapping[str, Any] | None = None,
     pause_policy_provenance: Literal["renderprofile", "explicit"] = "explicit",
-    default_voice: str = "",
+    default_role: str = "",
     media_resolver: MediaResolver | None = None,
     media_root: str | Path | None = None,
     emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
@@ -385,9 +594,7 @@ def materialize_voicerender_job(
     if pause_policy_provenance not in {"renderprofile", "explicit"}:
         raise PausePolicyError("pause_policy_provenance must be 'renderprofile' or 'explicit'")
     policy = load_pause_policy(pause_policy) if pause_policy is not None else None
-    source_intents = (
-        _validate_source_pauses(source, policy, default_voice=default_voice) if policy is not None else set()
-    )
+    source_intents = _validate_source_pauses(source, policy) if policy is not None else set()
 
     try:
         plan = load_plan(render_plan) if isinstance(render_plan, (str, Path)) else render_plan
@@ -414,6 +621,11 @@ def materialize_voicerender_job(
     except Exception as exc:
         raise HandoffValidationError(f"RenderManifest handoff is invalid: {exc}") from exc
 
+    _validate_voicerender_producer(manifest)
+    diagnostics, diagnostics_sha256 = _load_render_diagnostics(
+        Path(render_dir).expanduser() / RENDER_DIAGNOSTICS_FILENAME
+    )
+    control_ownership = _validate_render_diagnostics(plan, diagnostics, diagnostics_sha256)
     job = materialize_renderplan_job(
         plan,
         manifest,
@@ -422,6 +634,7 @@ def materialize_voicerender_job(
         media_resolver=media_resolver,
         media_root=media_root,
         emphasis_policy=emphasis_policy,
+        _control_ownership=control_ownership,
     )
     if policy is None:
         return job
@@ -431,7 +644,7 @@ def materialize_voicerender_job(
         policy,
         source_intents=source_intents,
         provenance=pause_policy_provenance,
-        default_voice=default_voice,
+        default_role=default_role,
     )
 
 

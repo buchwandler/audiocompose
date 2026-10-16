@@ -81,7 +81,7 @@ audiocompose compose chapter.audiojob chapter.wav
 
 ## Direct RenderPlan composition
 
-AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1.1,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
+AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1.2,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
 
 Compose a plan directly without first saving an AudioJob:
 
@@ -116,11 +116,20 @@ The manifest path is optional and uses the same default as the CLI. The result i
 
 ## Book-level composition for rendered variants
 
-After VoiceRender has produced a complete RenderManifest and verified speech WAVs for each chapter, compose a RenderPlan-set variant with:
+AudioCompose consumes completed VoiceRender artifacts; it does not synthesize speech. If the RenderPlan contains supported `emphasis`, explicitly ask VoiceRender to defer that capability at both preflight and render, then compose the completed variant:
 
 ```bash
-audiocompose compose-book . --variant narration--525856299523
+# If preflight is a separate step, also pass --emphasis-policy defer-to-compose there.
+voicerender render-book BOOK \
+  --variant narration--<fingerprint> \
+  --emphasis-policy defer-to-compose
+
+audiocompose compose-book BOOK \
+  --variant narration--<fingerprint>
 ```
+
+The book handoff requires a complete RenderManifest and VoiceRender v0.2 diagnostics. AudioCompose validates producer identity, plan correspondence, diagnostics provenance, and declared deferred controls; it owns only the declared `audiocompose.emphasis.gain.v1` capability. VoiceRender-native controls remain producer-owned, and unknown deferred capabilities fail closed. The optional `audiocompose[voicerender]` extra requires VoiceRender `>=0.2.0,<0.3`; VoiceRender 0.1.x is not supported by this integration.
+The minimal Python counterpart is in [examples/compose_rendered_book.py](examples/compose_rendered_book.py); it assumes rendered artifacts already exist and never synthesizes speech.
 
 `BOOK` may be the workspace root or its canonical `chapters/` directory. The required `--variant` is the exact `<profile-label>--<profile-fingerprint>` directory present under both `renderplan/` and `voicerender/`. AudioCompose loads `renderplan/<variant>/renderplan-set.toml` through `renderplan`; this set is authoritative for selected chapter IDs and order. A number selector, inclusive range, comma-separated selectors, or `all` may be passed with `--chapters` (default `all`):
 
@@ -129,12 +138,15 @@ audiocompose compose-book . --variant narration--525856299523 --chapters 5
 audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
 audiocompose compose-book . --variant narration--525856299523 --chapters 5,8,10-12
 ```
+
 Use the RenderProfile snapshot's pause values by default. An explicit strict AudioCompose policy can override it:
 
 ```bash
 audiocompose compose-book . --variant narration--525856299523 \\
   --pauses narration.pause.toml
 ```
+
+Pause-policy `role` overrides are keyed by the RenderPlan `SpeechItem.role`, not UtterPlan's logical voice reference. Source-pause validation checks known classes and table availability without treating logical voice references as role keys; actual durations resolve against the RenderPlan `SpeechItem.role` selected for each pause, failing closed if that role/default lacks a value.
 
 By default, one final WAV per selected chapter and an atomic report are written under `audiocompose/<variant>/`:
 
@@ -199,6 +211,7 @@ The canonical packaged AudioJob schemas are in `audiocompose/schemas/`; the repo
 
 The package root intentionally exposes common composition models, built-in operations, composition results, diagnostics, progress, errors, and schema loading. Specialized analysis, WAV, resampling, and low-level DSP helpers remain available from their modules, for example `audiocompose.analysis`, `audiocompose.wav`, `audiocompose.resampling`, and `audiocompose.operations`.
 See [the v0.2 migration guide](docs/migration-v0.2.md) for breaking import, persistence, clipping, loudness, and progress changes.
+See the [v0.3 migration guide](docs/migration-v0.3.md) for RenderPlan and optional VoiceRender compatibility, diagnostics, and deferred emphasis behavior.
 
 `AudioSpan` and `ComposedSpan` carry optional producer-defined IDs and JSON-safe metadata. AudioCompose preserves these opaque values while mapping sample coordinates through operations and resampling; it never interprets the metadata.
 

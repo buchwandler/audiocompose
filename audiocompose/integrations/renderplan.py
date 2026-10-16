@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -46,9 +47,27 @@ from .renderplan_metadata import (
     RENDERPLAN_SEGMENT_NUMBER,
     RENDERPLAN_SOURCE,
     RENDERPLAN_SOURCE_PLAN_ID,
+    VOICERENDER_DEFERRED_CAPABILITIES,
+    VOICERENDER_DIAGNOSTICS_SCHEMA,
+    VOICERENDER_DIAGNOSTICS_SHA256,
+    VOICERENDER_EMPHASIS_POLICY,
+    VOICERENDER_REALIZED_CONTROLS,
 )
 
 MANIFEST_FILENAME = "render-manifest.toml"
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedControlOwnership:
+    """Private provenance proof for controls already realized by a trusted producer."""
+
+    producer: str
+    plan_id: str
+    realized_controls: frozenset[str]
+    diagnostics_sha256: str
+    diagnostics_schema: str
+    emphasis_policy: str
+    deferred_capabilities: tuple[str, ...]
 
 
 def _validate_contract(plan: RenderPlan, manifest: RenderManifest) -> str:
@@ -191,9 +210,12 @@ _EMPHASIS_GAIN_DB = {"reduced": 0.75, "moderate": 1.5, "strong": 2.5}
 
 
 def _speech_emphasis(
-    item: SpeechItem, policy: Literal["segment_fallback", "strict"]
+    item: SpeechItem,
+    policy: Literal["segment_fallback", "strict"],
+    *,
+    control_ownership: _ValidatedControlOwnership | None = None,
 ) -> tuple[Gain | None, dict[str, Any] | None]:
-    """Validate speech emphasis and return its bounded clip-level gain/report."""
+    """Validate controls and return the bounded AudioCompose emphasis effect."""
     if policy not in ("segment_fallback", "strict"):
         raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
 
@@ -225,6 +247,8 @@ def _speech_emphasis(
             )
         name = getattr(control, "name", None)
         if name != "emphasis":
+            if control_ownership is not None and name in control_ownership.realized_controls:
+                continue
             raise HandoffValidationError(
                 f"{context}: unsupported speech control {name!r}; AudioCompose supports 'emphasis' only"
             )
@@ -251,6 +275,8 @@ def _speech_emphasis(
             }
         )
 
+    if not normalized:
+        return None, None
     partial = [
         control
         for control in normalized
@@ -285,10 +311,13 @@ def _materialize_speech(
     manifest: RenderManifest,
     verified: dict[int, tuple[Any, Path, str]],
     emphasis_policy: Literal["segment_fallback", "strict"],
+    control_ownership: _ValidatedControlOwnership | None = None,
 ) -> AudioClip:
     artifact, path, digest = verified[item.number]
     segment_id = item.segment_id or item.computed_id()
-    gain, emphasis_report = _speech_emphasis(item, emphasis_policy)
+    gain, emphasis_report = _speech_emphasis(
+        item, emphasis_policy, control_ownership=control_ownership
+    )
     metadata: dict[str, Any] = {
         "kind": "speech",
         RENDERPLAN_PLAN_ID: plan_id,
@@ -302,6 +331,14 @@ def _materialize_speech(
         MANIFEST_CHANNELS: artifact.channels,
         MANIFEST_FRAMES: artifact.frames,
     }
+    if control_ownership is not None:
+        realized = [
+            {"name": control.name, "start": control.start, "end": control.end}
+            for control in item.controls
+            if control.name in control_ownership.realized_controls
+        ]
+        if realized:
+            metadata["renderplan.upstream_realized_controls"] = realized
     operations = (gain,) if gain is not None else ()
     if emphasis_report is not None:
         metadata[RENDERPLAN_EMPHASIS] = emphasis_report
@@ -405,6 +442,7 @@ def materialize_renderplan_job(
     media_resolver: MediaResolver | None = None,
     media_root: str | Path | None = None,
     emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
+    _control_ownership: _ValidatedControlOwnership | None = None,
 ) -> AudioJob:
     """Verify a complete RenderPlan handoff and return a generic AudioJob.
 
@@ -415,6 +453,15 @@ def materialize_renderplan_job(
     if emphasis_policy not in ("segment_fallback", "strict"):
         raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
     plan_id = _validate_contract(plan, manifest)
+    if _control_ownership is not None:
+        if not isinstance(_control_ownership, _ValidatedControlOwnership):
+            raise HandoffValidationError(
+                "control ownership must be validated by a supported producer bridge"
+            )
+        if _control_ownership.producer != "voicerender" or _control_ownership.plan_id != plan_id:
+            raise HandoffValidationError(
+                "validated control ownership does not match this RenderPlan handoff"
+            )
     render_root = _safe_directory(render_dir, label="render_dir")
     verified = _verify_speech_artifacts(plan, manifest, render_root)
     if output_policy is not None and not isinstance(output_policy, OutputPolicy):
@@ -431,7 +478,11 @@ def materialize_renderplan_job(
     items: list[AudioClip | Silence] = []
     for flow_index, item in enumerate(plan.flow):
         if isinstance(item, SpeechItem):
-            items.append(_materialize_speech(item, plan_id, manifest, verified, emphasis_policy))
+            items.append(
+                _materialize_speech(
+                    item, plan_id, manifest, verified, emphasis_policy, _control_ownership
+                )
+            )
         elif isinstance(item, PauseItem):
             items.append(_materialize_pause(item, plan_id, flow_index))
         elif isinstance(item, AudioItem):
@@ -439,17 +490,28 @@ def materialize_renderplan_job(
         else:  # RenderPlan validation should make this unreachable.
             raise HandoffValidationError(f"Unsupported RenderPlan flow item: {type(item).__name__}")
 
+    source_metadata: dict[str, Any] = {
+        RENDERPLAN_PLAN_ID: plan_id,
+        RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
+        RENDERPLAN_PROFILE_ID: plan.render_profile_id,
+        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
+        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
+    }
+    if _control_ownership is not None:
+        source_metadata.update(
+            {
+                VOICERENDER_DIAGNOSTICS_SCHEMA: _control_ownership.diagnostics_schema,
+                VOICERENDER_DIAGNOSTICS_SHA256: _control_ownership.diagnostics_sha256,
+                VOICERENDER_EMPHASIS_POLICY: _control_ownership.emphasis_policy,
+                VOICERENDER_DEFERRED_CAPABILITIES: list(_control_ownership.deferred_capabilities),
+                VOICERENDER_REALIZED_CONTROLS: sorted(_control_ownership.realized_controls),
+            }
+        )
     job = AudioJob(
         items=tuple(items),
         output=output_policy if output_policy is not None else OutputPolicy(),
         producer={"name": "audiocompose.renderplan-materializer", "version": __version__},
-        source={
-            RENDERPLAN_PLAN_ID: plan_id,
-            RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
-            RENDERPLAN_PROFILE_ID: plan.render_profile_id,
-            MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
-            AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
-        },
+        source=source_metadata,
     )
     try:
         job.validate(verify_sources=True)

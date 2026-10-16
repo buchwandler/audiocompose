@@ -9,6 +9,7 @@ gitignore_allow = ["audiocompose/_version.py"]
 include = [
   "**/*.py",
   "**/*.toml",
+  "**/py.typed",
   "**/*.md",
   "**/*.json",
   "**/*.txt",

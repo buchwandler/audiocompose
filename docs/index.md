@@ -10,7 +10,7 @@ The `audiocompose compose-book BOOK --variant VARIANT` command uses the RenderPl
 audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
 ```
 
-Production composition requires each selected VoiceRender `render-manifest.toml` to be complete; incomplete QC renders are rejected. The [repository README](../README.md#book-level-composition-for-rendered-variants) documents output roots, pause policy, CLI controls, reuse, and failure behavior.
+Production composition requires each selected VoiceRender `render-manifest.toml` to be complete; incomplete QC renders are rejected. The [repository README](https://github.com/buchwandler/audiocompose#book-level-composition-for-rendered-variants) documents output roots, pause policy, CLI controls, reuse, and failure behavior.
 
 ```{toctree}
 :maxdepth: 2
@@ -18,5 +18,6 @@ Production composition requires each selected VoiceRender `render-manifest.toml`
 
 architecture
 migration-v0.2
+migration-v0.3
 changelog
 ```

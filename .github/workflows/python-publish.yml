@@ -63,6 +63,19 @@ jobs:
                   for requirement in requirements
               )
 
+          def optional_requirement(requirements, name, extra):
+              matches = [
+                  requirement
+                  for requirement in requirements
+                  if requirement.name == name
+                  and requirement.marker is not None
+                  and requirement.marker.evaluate({"extra": extra})
+              ]
+              assert len(matches) == 1, (name, extra, matches)
+              requirement = matches[0]
+              assert not requirement.marker.evaluate({"extra": ""}), requirement
+              return requirement
+
           tag_version = os.environ["RELEASE_TAG"].removeprefix("v")
           artifacts = sorted(Path("dist").iterdir())
           wheels = [path for path in artifacts if path.suffix == ".whl"]
@@ -89,9 +102,19 @@ jobs:
               assert has_minimum(requirements, "numpy", "1.23")
               assert has_minimum(requirements, "audiosig", "0.1.6")
               renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
-              assert Version("0.1.0") not in renderplan.specifier
-              assert Version("0.1.1") in renderplan.specifier
+              assert Version("0.1.1") not in renderplan.specifier
+              assert Version("0.1.2") in renderplan.specifier
               assert Version("0.2.0") not in renderplan.specifier
+
+              utterplan = optional_requirement(requirements, "utterplan", "voicerender")
+              assert Version("0.6.2") not in utterplan.specifier
+              assert Version("0.6.3") in utterplan.specifier
+              assert Version("0.7.0") not in utterplan.specifier
+
+              voicerender = optional_requirement(requirements, "voicerender", "voicerender")
+              assert Version("0.1.1") not in voicerender.specifier
+              assert Version("0.2.0") in voicerender.specifier
+              assert Version("0.3.0") not in voicerender.specifier
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY
 

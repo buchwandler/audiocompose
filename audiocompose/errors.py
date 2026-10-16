@@ -44,8 +44,10 @@ class IntegrationError(AudioComposeError):
 class HandoffValidationError(IntegrationError):
     """An upstream handoff or its source artifacts are invalid."""
 
+
 class PausePolicyError(IntegrationError, ValueError):
     """A pause policy or symbolic pause intent is invalid or unresolved."""
+
 
 class MediaResolutionError(IntegrationError):
     """An external audio source cannot be resolved safely."""

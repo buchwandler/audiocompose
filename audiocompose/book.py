@@ -33,7 +33,14 @@ from renderplan import (
 )
 
 from .errors import BookComposeError, HandoffValidationError, IntegrationError
-from .integrations.renderplan_metadata import RENDERPLAN_EMPHASIS
+from .integrations.renderplan_metadata import (
+    RENDER_DIAGNOSTICS_FILENAME,
+    RENDERPLAN_EMPHASIS,
+    VOICERENDER_DEFERRED_CAPABILITIES,
+    VOICERENDER_DIAGNOSTICS_SCHEMA,
+    VOICERENDER_DIAGNOSTICS_SHA256,
+    VOICERENDER_EMPHASIS_POLICY,
+)
 from .loudness import LoudnessPolicy
 from .model import OutputPolicy
 
@@ -42,10 +49,7 @@ MANIFEST_FILENAME = "render-manifest.toml"
 _CHAPTER_NUMBER = re.compile(r"[1-9][0-9]*\Z")
 
 
-
-
-ChapterComposeStatus = Literal["complete", "written", "reused", "failed", "skipped"]
-
+ChapterComposeStatus = Literal["written", "reused", "failed", "skipped"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +91,7 @@ class BookComposeRequest:
         if not isinstance(self.output_policy, OutputPolicy):
             raise TypeError("output_policy must be an AudioCompose OutputPolicy")
 
+
 @dataclass(frozen=True, slots=True)
 class BookComposeOptions:
     """Optional output/loudness overrides for :func:`compose_book`.
@@ -124,6 +129,10 @@ class ChapterComposeOutcome:
     render_profile_id: str | None = None
     manifest_id: str | None = None
     manifest_sha256: str | None = None
+    render_diagnostics_sha256: str | None = None
+    voicerender_diagnostics_schema: str | None = None
+    voicerender_emphasis_policy: str | None = None
+    voicerender_deferred_capabilities: tuple[str, ...] | None = None
     pause_policy_id: str | None = None
     output_policy_id: str | None = None
     emphasis_warning: str | None = None
@@ -131,6 +140,7 @@ class ChapterComposeOutcome:
 
     utterplan: Path | None = None
     render_manifest: Path | None = None
+    render_diagnostics: Path | None = None
     job_path: Path | None = None
     job_id: str | None = None
     job_schema_version: int | None = None
@@ -156,6 +166,9 @@ class ChapterComposeOutcome:
             "manifest_id",
             "sha256",
             "manifest_sha256",
+            "render_diagnostics_sha256",
+            "voicerender_diagnostics_schema",
+            "voicerender_emphasis_policy",
             "pause_policy_id",
             "sample_rate",
             "channels",
@@ -172,9 +185,13 @@ class ChapterComposeOutcome:
             value = getattr(self, name)
             if value is not None:
                 result[name] = value
+        if self.voicerender_deferred_capabilities is not None:
+            result["voicerender_deferred_capabilities"] = list(
+                self.voicerender_deferred_capabilities
+            )
         if self.output is not None:
             result["output"] = self.output.name
-        for name in ("utterplan", "render_manifest", "job_path"):
+        for name in ("utterplan", "render_manifest", "render_diagnostics", "job_path"):
             value = getattr(self, name)
             if value is not None:
                 result[name] = str(value)
@@ -213,6 +230,7 @@ class BookComposeProgress:
                     "reused": "chapter_reused",
                 }.get(self.outcome.status, self.kind)
                 object.__setattr__(self, "kind", kind)
+
 
 BookComposeProgressCallback = Callable[[BookComposeProgress], None]
 
@@ -259,8 +277,6 @@ class BookComposeResult:
         """Return the CLI-compatible status code for composition/report failures."""
         return 2 if self.failed or self.report_error is not None else 0
 
-
-
     @property
     def succeeded(self) -> int:
         """Count chapters with a complete output, whether written now or reused."""
@@ -270,11 +286,11 @@ class BookComposeResult:
     def success(self) -> bool:
         """Whether all requested chapters completed without failure."""
         return self.exit_code == 0
+
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-compatible result shape used by the CLI."""
         return {
             "format": "audiocompose-book-result",
-
             "request": {
                 "workspace": str(self.request.workspace),
                 "variant": self.request.variant,
@@ -298,6 +314,7 @@ class BookComposeResult:
                         "utterplan": str(paths.utterplan_path),
                         "renderplan": str(paths.plan_path),
                         "render_manifest": str(paths.manifest_path),
+                        "render_diagnostics": str(paths.diagnostics_path),
                         "output": str(paths.output_path),
                     }
                     for paths in self.request.chapter_paths
@@ -317,7 +334,6 @@ class BookComposeResult:
             "output_root": str(self.output_variant_dir),
             "selector": self.selector,
             "requested": self.requested,
-
             "succeeded": self.succeeded,
             "success": self.success,
             "written": self.written,
@@ -325,7 +341,6 @@ class BookComposeResult:
             "failed": self.failed,
             "skipped": self.skipped,
             "report": str(self.report_path),
-
             "report_path": str(self.report_path),
             "items": [outcome.to_dict() for outcome in self.outcomes],
             "report_error": dict(self.report_error) if self.report_error is not None else None,
@@ -373,6 +388,7 @@ class ChapterPaths:
     plan_path: Path
     render_dir: Path
     manifest_path: Path
+    diagnostics_path: Path
     output_path: Path
 
 
@@ -405,6 +421,7 @@ class VerifiedRenderHandoff:
     manifest_id: str
     render_dir: Path
     job: Any
+    diagnostics_sha256: str
 
 
 def _path_without_symlinks(path: Path, *, label: str) -> Path:
@@ -517,6 +534,7 @@ def _resolve_workspace(book: str | Path) -> Path:
     except BookComposeError as exc:
         raise BookComposeError("workspace.invalid", str(exc)) from exc
 
+
 def _validate_variant_name(variant: str) -> None:
     if (
         not isinstance(variant, str)
@@ -552,7 +570,9 @@ def parse_chapter_selector(
     for token in value.split(","):
         token = token.strip()
         if not token:
-            raise BookComposeError("selection.invalid", f"invalid empty chapter selector in {value!r}")
+            raise BookComposeError(
+                "selection.invalid", f"invalid empty chapter selector in {value!r}"
+            )
         if "-" in token:
             bounds = token.split("-")
             if len(bounds) != 2 or not all(_CHAPTER_NUMBER.fullmatch(part) for part in bounds):
@@ -754,8 +774,10 @@ def paths_for_chapter(context: BookContext, chapter: RenderPlanSetChapter) -> Ch
         plan_path=plan_path,
         render_dir=render_dir,
         manifest_path=render_dir / MANIFEST_FILENAME,
+        diagnostics_path=render_dir / RENDER_DIAGNOSTICS_FILENAME,
         output_path=output_path,
     )
+
 
 def load_chapter_plan(context: BookContext, paths: ChapterPaths) -> Any:
     """Load both source and render plans, checking their shared identities."""
@@ -811,7 +833,10 @@ def load_chapter_plan(context: BookContext, paths: ChapterPaths) -> Any:
             variant=context.variant,
             details={**details, "extra": "voicerender"},
         ) from exc
-    if source_plan.plan_id != plan.source_plan_id or source_plan.plan_id != paths.chapter.source_plan_id:
+    if (
+        source_plan.plan_id != plan.source_plan_id
+        or source_plan.plan_id != paths.chapter.source_plan_id
+    ):
         raise BookComposeError(
             "handoff.invalid",
             f"UtterPlan source identity does not match the RenderPlan handoff for {paths.chapter.id}",
@@ -868,7 +893,9 @@ def _report_relative_path(path: Path, report_path: Path, workspace: Path, *, lab
     absolute = Path(os.path.abspath(path))
     workspace_absolute = Path(os.path.abspath(workspace))
     if not absolute.is_relative_to(workspace_absolute):
-        raise BookComposeError("workspace.invalid", f"{label} escapes the .ssmdbook workspace: {absolute}")
+        raise BookComposeError(
+            "workspace.invalid", f"{label} escapes the .ssmdbook workspace: {absolute}"
+        )
     relative = Path(os.path.relpath(absolute, report_path.parent)).as_posix()
     report_relative = Path(os.path.abspath(report_path.parent / relative))
     if report_relative != absolute or not report_relative.is_relative_to(workspace_absolute):
@@ -876,15 +903,18 @@ def _report_relative_path(path: Path, report_path: Path, workspace: Path, *, lab
     return relative
 
 
-def _toml_scalar(value: str | int | float | bool) -> str:
+def _toml_scalar(value: Any) -> str:
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
         return repr(value)
+    raise TypeError(f"Unsupported TOML scalar value: {type(value).__name__}")
 
 
 def _report_toml(report: dict[str, Any]) -> str:
@@ -925,6 +955,7 @@ def _report_toml(report: dict[str, Any]) -> str:
                 lines.append(f"{key} = {_toml_scalar(value)}")
     return "\n".join(lines) + "\n"
 
+
 def _read_prior_items(
     path: Path,
     variant: str,
@@ -956,6 +987,7 @@ def _read_prior_items(
     except (BookComposeError, OSError, ValueError, TypeError):
         return {}
 
+
 def _verified_existing_output(
     path: Path,
     prior: dict[str, Any] | None,
@@ -968,6 +1000,7 @@ def _verified_existing_output(
     plan_id: str,
     manifest_id: str,
     manifest_sha256: str,
+    diagnostics_sha256: str,
     pause_policy_id: str,
     job_id: str,
     job_schema_version: int,
@@ -1004,6 +1037,7 @@ def _verified_existing_output(
         and prior.get("render_plan_id") == plan_id
         and prior.get("manifest_id") == manifest_id
         and prior.get("manifest_sha256") == manifest_sha256
+        and prior.get("render_diagnostics_sha256") == diagnostics_sha256
         and prior.get("pause_policy_id") == pause_policy_id
         and prior.get("job_id") == job_id
         and prior.get("job_schema_version") == job_schema_version
@@ -1043,7 +1077,11 @@ def _chapter_error(exc: Exception) -> tuple[str, str]:
     from .errors import HandoffValidationError, MediaResolutionError, PausePolicyError
 
     if isinstance(exc, PausePolicyError):
-        code = "pause_policy.unresolved" if "no duration configured" in str(exc) else "pause_policy.invalid"
+        code = (
+            "pause_policy.unresolved"
+            if "no duration configured" in str(exc)
+            else "pause_policy.invalid"
+        )
         return code, str(exc)
     if isinstance(exc, MediaResolutionError):
         return "media.invalid", str(exc)
@@ -1064,7 +1102,7 @@ def _compose_resolved_book(
     force: bool = False,
     pause_policy: Any = None,
     pause_policy_provenance: Literal["renderprofile", "explicit"] = "renderprofile",
-    default_voice: str = "",
+    default_role: str = "",
     fail_fast: bool = False,
     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
     on_progress: BookComposeProgressCallback | None = None,
@@ -1077,9 +1115,7 @@ def _compose_resolved_book(
     from .wav import atomic_write_wav, sha256_file
 
     policy_dict = _output_policy_dict(output_policy)
-    base_policy_id = _policy_id(
-        {"output": policy_dict, "pause_policy_id": pause_policy.policy_id}
-    )
+    base_policy_id = _policy_id({"output": policy_dict, "pause_policy_id": pause_policy.policy_id})
     if emphasis_policy not in ("segment_fallback", "strict"):
         raise BookComposeError(
             "emphasis.invalid", "emphasis_policy must be 'segment_fallback' or 'strict'"
@@ -1123,10 +1159,22 @@ def _compose_resolved_book(
             "source_plan_id": chapter.source_plan_id,
             "render_profile_id": context.renderplan_set.profile_id,
             "utterplan": _report_relative_path(
-                paths.utterplan_path, context.report_path, context.workspace, label="UtterPlan report path"
+                paths.utterplan_path,
+                context.report_path,
+                context.workspace,
+                label="UtterPlan report path",
             ),
             "render_manifest": _report_relative_path(
-                paths.manifest_path, context.report_path, context.workspace, label="RenderManifest report path"
+                paths.manifest_path,
+                context.report_path,
+                context.workspace,
+                label="RenderManifest report path",
+            ),
+            "render_diagnostics": _report_relative_path(
+                paths.diagnostics_path,
+                context.report_path,
+                context.workspace,
+                label="VoiceRender diagnostics report path",
             ),
             "output": paths.output_path.name,
             "status": "failed",
@@ -1193,6 +1241,14 @@ def _compose_resolved_book(
                 )
             except BookComposeError as exc:
                 raise BookComposeError("manifest.missing", str(exc)) from exc
+            try:
+                _regular_file(
+                    paths.diagnostics_path,
+                    label="VoiceRender diagnostics",
+                    code="diagnostics.missing",
+                )
+            except BookComposeError as exc:
+                raise BookComposeError("diagnostics.missing", str(exc)) from exc
             media_root = context.explicit_media_root
             job = materialize_voicerender_job(
                 paths.utterplan_path,
@@ -1202,7 +1258,7 @@ def _compose_resolved_book(
                 output_policy=output_policy,
                 pause_policy=pause_policy,
                 pause_policy_provenance=pause_policy_provenance,
-                default_voice=default_voice,
+                default_role=default_role,
                 media_root=media_root,
                 emphasis_policy=emphasis_policy,
             )
@@ -1212,6 +1268,7 @@ def _compose_resolved_book(
                 manifest_id=str(job.source["render_manifest.manifest_id"]),
                 render_dir=render_dir,
                 job=job,
+                diagnostics_sha256=str(job.source[VOICERENDER_DIAGNOSTICS_SHA256]),
             )
             job = handoff.job
             emphasis_reports = [
@@ -1245,6 +1302,12 @@ def _compose_resolved_book(
             entry.update(
                 manifest_id=manifest_id,
                 manifest_sha256=manifest_sha256,
+                render_diagnostics_sha256=handoff.diagnostics_sha256,
+                voicerender_diagnostics_schema=job.source[VOICERENDER_DIAGNOSTICS_SCHEMA],
+                voicerender_emphasis_policy=job.source[VOICERENDER_EMPHASIS_POLICY],
+                voicerender_deferred_capabilities=list(
+                    job.source[VOICERENDER_DEFERRED_CAPABILITIES]
+                ),
                 pause_policy_id=pause_policy.policy_id,
                 audiocompose_version=__version__,
             )
@@ -1271,9 +1334,20 @@ def _compose_resolved_book(
                         prior_job.job_id == prior.get("job_id")
                         and prior_job.schema_version == prior.get("job_schema_version")
                         and prior.get("audiojob") == job_bundle.name
-                        and prior_source.get("renderplan.plan_id") == (plan.plan_id or plan.computed_id())
+                        and prior_source.get("renderplan.plan_id")
+                        == (plan.plan_id or plan.computed_id())
                         and prior_source.get("render_manifest.manifest_id") == manifest_id
-                        and prior_source.get("audiocompose.pause_policy_id") == pause_policy.policy_id
+                        and prior_source.get(VOICERENDER_DIAGNOSTICS_SCHEMA)
+                        == job.source.get(VOICERENDER_DIAGNOSTICS_SCHEMA)
+                        and prior_source.get(VOICERENDER_DIAGNOSTICS_SHA256)
+                        == job.source.get(VOICERENDER_DIAGNOSTICS_SHA256)
+                        and prior_source.get(VOICERENDER_EMPHASIS_POLICY)
+                        == job.source.get(VOICERENDER_EMPHASIS_POLICY)
+                        and prior_source.get(VOICERENDER_DEFERRED_CAPABILITIES)
+                        == job.source.get(VOICERENDER_DEFERRED_CAPABILITIES)
+                        and prior.get("render_diagnostics_sha256") == handoff.diagnostics_sha256
+                        and prior_source.get("audiocompose.pause_policy_id")
+                        == pause_policy.policy_id
                         and prior_source.get("audiocompose.pause_policy_provenance")
                         == pause_policy_provenance
                     )
@@ -1328,6 +1402,7 @@ def _compose_resolved_book(
                     plan_id=plan.plan_id or plan.computed_id(),
                     manifest_id=manifest_id,
                     manifest_sha256=manifest_sha256,
+                    diagnostics_sha256=handoff.diagnostics_sha256,
                     pause_policy_id=pause_policy.policy_id,
                     job_id=job_id,
                     job_schema_version=job_schema_version,
@@ -1509,6 +1584,8 @@ def _chapter_outcome(entry: Mapping[str, Any], context: BookContext) -> ChapterC
     utterplan = Path(utterplan_name) if isinstance(utterplan_name, str) else None
     manifest_name = entry.get("render_manifest")
     render_manifest = Path(manifest_name) if isinstance(manifest_name, str) else None
+    diagnostics_name = entry.get("render_diagnostics")
+    render_diagnostics = Path(diagnostics_name) if isinstance(diagnostics_name, str) else None
     job_name = entry.get("job")
     job_path = Path(job_name) if isinstance(job_name, str) else None
     return ChapterComposeOutcome(
@@ -1529,17 +1606,27 @@ def _chapter_outcome(entry: Mapping[str, Any], context: BookContext) -> ChapterC
         render_profile_id=entry.get("render_profile_id"),
         manifest_id=entry.get("manifest_id"),
         manifest_sha256=entry.get("manifest_sha256"),
+        render_diagnostics_sha256=entry.get("render_diagnostics_sha256"),
+        voicerender_diagnostics_schema=entry.get("voicerender_diagnostics_schema"),
+        voicerender_emphasis_policy=entry.get("voicerender_emphasis_policy"),
+        voicerender_deferred_capabilities=(
+            tuple(entry["voicerender_deferred_capabilities"])
+            if isinstance(entry.get("voicerender_deferred_capabilities"), list)
+            else None
+        ),
         pause_policy_id=entry.get("pause_policy_id"),
         output_policy_id=entry.get("output_policy_id"),
         emphasis_warning=entry.get("emphasis_warning"),
         audiojob=entry.get("audiojob"),
         utterplan=utterplan,
         render_manifest=render_manifest,
+        render_diagnostics=render_diagnostics,
         job_path=job_path,
         job_id=entry.get("job_id"),
         job_schema_version=entry.get("job_schema_version"),
         audiocompose_version=entry.get("audiocompose_version"),
     )
+
 
 def _book_result_from_dict(
     context: BookContext, result: Mapping[str, Any], request: BookComposeRequest
@@ -1551,9 +1638,7 @@ def _book_result_from_dict(
         output_variant_dir=context.output_variant_dir,
         report_path=context.report_path,
         render_profile_id=context.renderplan_set.profile_id,
-        outcomes=tuple(
-            _chapter_outcome(entry, context) for entry in result["items"]
-        ),
+        outcomes=tuple(_chapter_outcome(entry, context) for entry in result["items"]),
         requested=result["requested"],
         written=result["written"],
         reused=result["reused"],
@@ -1630,9 +1715,7 @@ def compose_book(
             else load_pause_policy(pause_policy)
         )
     except PausePolicyError as exc:
-        raise BookComposeError(
-            "pause_policy.invalid", str(exc), variant=context.variant
-        ) from exc
+        raise BookComposeError("pause_policy.invalid", str(exc), variant=context.variant) from exc
     request = BookComposeRequest(
         workspace=context.workspace,
         variant=context.variant,
@@ -1655,7 +1738,7 @@ def compose_book(
         force=force,
         pause_policy=resolved_pause_policy,
         pause_policy_provenance=pause_policy_provenance,
-        default_voice=profile.default_role,
+        default_role=profile.default_role,
         fail_fast=fail_fast,
         emphasis_policy=emphasis_policy,
         on_progress=on_progress,
