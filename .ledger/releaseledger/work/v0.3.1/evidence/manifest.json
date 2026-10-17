@@ -1,0 +1,57 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 711,
+      "deletions": 85,
+      "patch_file": "3382fbd.patch",
+      "patch_sha256": "31b2a41998bbdf0f43081cf201661fcbbe4846ade019b79db4b7bb12c6cce950",
+      "paths": [
+        "README.md",
+        "audiocompose/__init__.py",
+        "audiocompose/cli.py",
+        "audiocompose/renderplan.py",
+        "docs/index.md",
+        "tests/test_compose_renderplan_api.py",
+        "tests/test_schema_resources.py"
+      ],
+      "sha": "3382fbd2214165cd09b77e5c02bfb01f8ede4710",
+      "short_sha": "3382fbd",
+      "source_ref": "git:3382fbd2214165cd09b77e5c02bfb01f8ede4710"
+    },
+    {
+      "additions": 1420,
+      "deletions": 94,
+      "patch_file": "b5de88b.patch",
+      "patch_sha256": "d23d19db50f8218ba2e053e339a59f2b706d182e1fd4b950f2bb5cae558435a4",
+      "paths": [
+        "README.md",
+        "audiocompose/__init__.py",
+        "audiocompose/_cli_progress.py",
+        "audiocompose/book.py",
+        "audiocompose/cli.py",
+        "audiocompose/composer.py",
+        "audiocompose/progress.py",
+        "audiocompose/renderplan.py",
+        "docs/architecture.md",
+        "docs/migration-v0.3.md",
+        "tests/test_cli.py",
+        "tests/test_compose_book.py",
+        "tests/test_compose_renderplan_api.py",
+        "tests/test_progress.py",
+        "tests/test_schema_resources.py"
+      ],
+      "sha": "b5de88be6790d4d5a3f4ab85d5529f952232d2be",
+      "short_sha": "b5de88b",
+      "source_ref": "git:b5de88be6790d4d5a3f4ab85d5529f952232d2be"
+    }
+  ],
+  "git_base_ref": "ab9f6f802c5ae86d2b546188a18ce8100daa4d8c",
+  "git_base_sha": "ab9f6f802c5ae86d2b546188a18ce8100daa4d8c",
+  "git_head_ref": "b5de88be6790d4d5a3f4ab85d5529f952232d2be",
+  "git_head_sha": "b5de88be6790d4d5a3f4ab85d5529f952232d2be",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.1",
+  "schema_version": 1
+}

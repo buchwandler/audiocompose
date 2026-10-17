@@ -1,0 +1,2034 @@
+ README.md                            |  58 +++++++-
+ audiocompose/__init__.py             |  14 +-
+ audiocompose/_cli_progress.py        | 264 +++++++++++++++++++++++++++++++++++
+ audiocompose/book.py                 |  98 ++++++++-----
+ audiocompose/cli.py                  |  93 +++++++++++-
+ audiocompose/composer.py             | 187 ++++++++++++++++++++++---
+ audiocompose/progress.py             | 171 ++++++++++++++++++++++-
+ audiocompose/renderplan.py           |  13 +-
+ docs/architecture.md                 |  15 +-
+ docs/migration-v0.3.md               |  29 ++++
+ tests/test_cli.py                    | 230 +++++++++++++++++++++++++++++-
+ tests/test_compose_book.py           |  94 +++++++++++--
+ tests/test_compose_renderplan_api.py |  47 +++++++
+ tests/test_progress.py               | 197 ++++++++++++++++++++++++++
+ tests/test_schema_resources.py       |   4 +
+ 15 files changed, 1420 insertions(+), 94 deletions(-)
+
+diff --git a/README.md b/README.md
+index ff16680..e36de6b 100644
+--- a/README.md
++++ b/README.md
+@@ -26,16 +26,35 @@ Composer().to_wav(job, "final.wav")
+
+ AudioCompose delegates band-limited resampling, static WSOLA time/pitch processing, and `RatePitchEnvelope` DSP to AudioSig. The envelope API requires `audiosig>=0.1.6,<0.2`. Contiguous static `Tempo` and `PitchShift` operations remain fused unless a `Gain` or fade separates them. Each envelope is one complete AudioSig call. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
+
+-## Composition progress
++## Composition estimates and progress
+
+-`Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
++`estimate_composition(job, sample_rate=None)` returns a deterministic `CompositionEstimate` before processing audio. It reports per-item and total output frames, duration, and an approximate frame-pass `total_work_units`; `unknown_items` contains zero-based item indexes whose source geometry is unavailable. If any item geometry is unknown, total frames, duration, and work remain unknown rather than being guessed. Work units account for source loading/integrity verification, grouped operations, resampling, item output, assembly, optional complete-output loudness, and final output preparation. They are a planning metric—not seconds or a promise of CPU time—and the model may evolve.
++
++`Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. When the estimate is known, events include monotonic `completed_work_units`, `total_work_units`, and `fraction`; otherwise the fraction and total stay `None`. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
+
+ ```python
+-events = []
+-Composer().compose(job, on_progress=events.append)
++import sys
++
++from audiocompose import (
++    Composer,
++    ProgressEstimator,
++    estimate_composition,
++)
++
++estimate = estimate_composition(job)
++print(estimate.total_output_frames, estimate.total_work_units)
++
++timing = ProgressEstimator()  # one estimator per composition
++
++def on_progress(event):
++    view = timing.update(event)
++    if view.estimated_remaining_seconds is not None:
++        print(f"ETA {view.estimated_remaining_seconds:.1f}s", file=sys.stderr)
++
++Composer().compose(job, on_progress=on_progress)
+ ```
+
+-The callback is also available through `to_wav()` and `compose_to_wav()`. Callback exceptions propagate to the caller so producer code can detect programming errors.
++`ProgressTiming` reports elapsed time, fraction/percent when known, and optional estimated total/remaining seconds. `ProgressEstimator` uses a monotonic clock and observed work throughput; without an initial rate it warms up before showing an ETA. Callers may seed `initial_work_rate` in work units per second when they have a relevant prior measurement. Unknown totals stay indeterminate. Its status is `indeterminate`, `warming_up`, `estimated`, or `complete`. Timing is process-local and is never saved in AudioJob identity, provenance, schemas, results, or reports. Callback exceptions propagate to the caller. The callback is also available through `to_wav()` and `compose_to_wav()`.
+
+ ## Mixed producers
+
+@@ -79,6 +98,17 @@ audiocompose inspect chapter.audiojob
+ audiocompose compose chapter.audiojob chapter.wav
+ ```
+
++`compose`, `compose-renderplan`, and `compose-book` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
++
++```bash
++audiocompose compose chapter.audiojob chapter.wav --progress always
++audiocompose compose-renderplan chapter.renderplan.toml --render-dir render/chapter \
++  --output chapter.wav --progress always
++audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
++```
++
++The display includes elapsed time and a live ETA after enough work-rate samples exist. Numeric progress is omitted for unknown work geometry; named stages such as handoff preparation, composition, WAV writing/verification, and book chapter slots remain visible. A full composition may reach 100% before its output file is finished, so the renderer explicitly transitions to writing/verification and only reports command completion after success.
++
+ ## Direct RenderPlan composition
+
+ AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1.2,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
+@@ -107,6 +137,7 @@ The package-root `compose_renderplan` function verifies the handoff, materialize
+ ```python
+ import audiocompose
+
++events = []
+ result = audiocompose.compose_renderplan(
+     "chapter.renderplan.toml",
+     render_dir="render/chapter",
+@@ -115,12 +146,15 @@ result = audiocompose.compose_renderplan(
+         sample_rate=24000,
+         clip_policy="warn",
+     ),
++    on_progress=events.append,
+ )
+ print(result.output, result.plan_id, result.duration_seconds)
+ ```
+
+ If `manifest` is omitted, the API looks for `render-manifest.toml` inside `render_dir`. If `media_root` is omitted, relative external `AudioItem` WAV paths resolve beneath the plan file's parent directory. `output_policy` accepts the existing `OutputPolicy` (including sample rate, clip policy, target LUFS, true-peak ceiling, and peak policy); output remains mono-only. The default emphasis policy is `segment_fallback`; choose `strict` to reject partial-span emphasis. `result.timeline` and `result.diagnostics` provide typed provenance and warnings. Set `save_audiojob="chapter.audiojob"` to persist the materialized intermediate job; otherwise no AudioJob artifact is created.
+
++The optional synchronous `on_progress` callback receives the same producer-neutral `CompositionProgress` events as `Composer`; its work/fraction fields and timing remain runtime-only.
++
+ Low-level materialization is also available for callers that need an AudioJob without producing a final WAV:
+
+ ```python
+@@ -192,20 +226,30 @@ Python orchestrators can compose the same exact variant without constructing an
+ ```python
+ from audiocompose import BookComposeOptions, compose_book
+
++events = []
+ result = compose_book(
+     "BOOK",
+     variant="narration--525856299523",
+     chapters="5-7",  # source chapter numbers, not positional indexes
+     options=BookComposeOptions(sample_rate=24000, target_lufs=-16.0),
+-    on_progress=lambda event: print(event.kind, event.completed_chapters, event.chapter_id),
++    on_progress=events.append,
+ )
++for event in events:
++    if event.composition is not None:
++        print(
++            event.kind,
++            event.chapter_id,
++            event.fraction,
++            event.composition.kind,
++            event.composition.fraction,
++        )
+
+ assert result.exit_code == 0
+ for outcome in result.outcomes:
+     print(outcome.id, outcome.status, outcome.output, outcome.sha256)
+ ```
+
+-`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`); a callback failure is recorded as `progress.callback_failed`.
++`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`). Each event exposes a uniform chapter-slot `fraction` (the current chapter's core fraction fills its slot, not a duration-weighted forecast) and nested `composition` events while composing; nested work/timing stay runtime-only. A callback failure is recorded as `progress.callback_failed`.
+
+ Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
+
+diff --git a/audiocompose/__init__.py b/audiocompose/__init__.py
+index 4afa88d..fb81ce4 100644
+--- a/audiocompose/__init__.py
++++ b/audiocompose/__init__.py
+@@ -13,7 +13,7 @@ from .book import (
+     default_book_output_policy,
+     resolve_book,
+ )
+-from .composer import Composer
++from .composer import Composer, estimate_composition
+ from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
+ from .errors import AudioComposeError, AudioValidationError, CompositionError
+ from .job import load_job, save_job
+@@ -29,7 +29,13 @@ from .operations import (
+     RatePitchEnvelope,
+     Tempo,
+ )
+-from .progress import CompositionProgress, CompositionProgressCallback
++from .progress import (
++    CompositionEstimate,
++    CompositionProgress,
++    CompositionProgressCallback,
++    ProgressEstimator,
++    ProgressTiming,
++)
+ from .renderplan import (
+     RenderPlanComposeRequest,
+     RenderPlanComposeResult,
+@@ -61,13 +67,17 @@ __all__ = [
+     "CompositionError",
+     "CompositionProgress",
+     "CompositionProgressCallback",
++    "ProgressEstimator",
++    "ProgressTiming",
+     "CompositionResult",
+     "ComposedItem",
+     "ComposedMarker",
+     "ComposedSpan",
+     "Composer",
++    "CompositionEstimate",
+     "compose_book",
+     "compose_renderplan",
++    "estimate_composition",
+     "default_book_output_policy",
+     "resolve_book",
+     "DiagnosticSeverity",
+diff --git a/audiocompose/_cli_progress.py b/audiocompose/_cli_progress.py
+new file mode 100644
+index 0000000..e05ea14
+--- /dev/null
++++ b/audiocompose/_cli_progress.py
+@@ -0,0 +1,264 @@
++from __future__ import annotations
++
++import math
++import shutil
++import sys
++import time
++from collections.abc import Callable
++from typing import TYPE_CHECKING, Literal, TextIO
++
++from .progress import CompositionProgress, ProgressEstimator, ProgressTiming
++
++if TYPE_CHECKING:
++    from .book import BookComposeProgress
++
++
++ProgressMode = Literal["auto", "always", "never"]
++
++
++class CliProgressRenderer:
++    """Private stderr-only progress display for AudioCompose rendering commands."""
++
++    _MIN_REFRESH_SECONDS = 0.25
++
++    def __init__(
++        self,
++        *,
++        mode: ProgressMode = "auto",
++        json_mode: bool = False,
++        command: str = "compose",
++        stream: TextIO | None = None,
++        clock: Callable[[], float] = time.monotonic,
++    ) -> None:
++        if mode not in ("auto", "always", "never"):
++            raise ValueError("progress mode must be 'auto', 'always', or 'never'")
++        self._stream = stream if stream is not None else sys.stderr
++        try:
++            is_tty = bool(self._stream.isatty())
++        except (AttributeError, OSError):
++            is_tty = False
++        self.enabled = mode == "always" or (mode == "auto" and is_tty and not json_mode)
++        self._tty = self.enabled and is_tty
++        self._clock = clock
++        now = self._now()
++        self._started_at = now
++        self._last_draw_at: float | None = None
++        self._line_open = False
++        self._command = command
++        self._phase: str | None = None
++        self._composition: CompositionProgress | None = None
++        self._composition_timing: ProgressTiming | None = None
++        self._estimator = ProgressEstimator(clock=clock)
++        self._book_event: BookComposeProgress | None = None
++        self._book_timing: ProgressTiming | None = None
++        self._book_estimator: ProgressEstimator | None = None
++        self._book_chapter_id: str | None = None
++        self._book_failed = False
++        self._finished = False
++
++    def set_phase(self, phase: str) -> None:
++        if not self.enabled:
++            return
++        changed = phase != self._phase
++        self._phase = phase
++        if changed:
++            self._render(force=True)
++
++    def on_composition_progress(self, event: CompositionProgress) -> None:
++        if not self.enabled:
++            return
++        changed = False
++        if event.kind == "compose_started":
++            phase = "composing RenderPlan" if self._command == "renderplan" else "composing"
++            changed = phase != self._phase
++            self._phase = phase
++        self._composition = event
++        self._composition_timing = self._estimator.update(event)
++        if event.kind == "compose_completed":
++            changed = self._phase != "writing output"
++            self._phase = "writing output"
++        self._render(force=changed or event.kind in {"compose_started", "compose_completed"})
++
++    def on_book_progress(self, event: BookComposeProgress) -> None:
++        if not self.enabled:
++            return
++        previous_chapter = self._book_chapter_id
++        if event.chapter_id is not None:
++            self._book_chapter_id = event.chapter_id
++        changed = previous_chapter != self._book_chapter_id
++        self._book_event = event
++        self._composition = event.composition
++
++        if event.composition is not None:
++            if self._book_estimator is None or previous_chapter != event.chapter_id:
++                self._book_estimator = ProgressEstimator(clock=self._clock)
++            self._book_timing = self._book_estimator.update(event.composition)
++            phase = (
++                "writing output" if event.composition.kind == "compose_completed" else "composing"
++            )
++            changed = changed or phase != self._phase
++            self._phase = phase
++        else:
++            self._book_timing = None
++            if event.kind == "book_started":
++                phase = "preparing book"
++            elif event.kind == "chapter_started":
++                phase = "preparing handoff"
++            elif event.kind == "chapter_materialized":
++                phase = "AudioJob persisted"
++            elif event.kind == "chapter_compose_started":
++                phase = "starting composition"
++            elif event.kind == "chapter_output_verification_started":
++                phase = "verifying output"
++            elif event.outcome is not None:
++                phase = {
++                    "written": "chapter written",
++                    "reused": "reused verified output",
++                    "failed": "chapter failed",
++                    "skipped": "chapter skipped",
++                }[event.outcome.status]
++                if event.outcome.status in ("failed", "skipped"):
++                    self._book_failed = True
++            elif event.kind == "book_completed":
++                failed = event.details.get("failed", 0)
++                skipped = event.details.get("skipped", 0)
++                self._book_failed = self._book_failed or bool(failed or skipped)
++                phase = "finalizing report"
++            else:
++                phase = event.kind.replace("_", " ")
++            changed = changed or phase != self._phase
++            self._phase = phase
++
++        self._render(
++            force=changed
++            or event.outcome is not None
++            or event.kind in {"book_started", "book_completed", "chapter_compose_started"}
++            or (event.composition is not None and event.composition.kind == "compose_completed")
++        )
++
++    def finish(self, *, success: bool) -> None:
++        if not self.enabled or self._finished:
++            return
++        self._finished = True
++        if success:
++            self._phase = "complete"
++        else:
++            self._phase = "failed"
++            self._book_failed = True
++        self._render(force=True)
++        if self._tty and self._line_open:
++            self._stream.write("\n")
++            self._stream.flush()
++            self._line_open = False
++
++    def _now(self) -> float:
++        try:
++            value = float(self._clock())
++        except (OverflowError, TypeError, ValueError):
++            return 0.0
++        return value if math.isfinite(value) else 0.0
++
++    def _render(self, *, force: bool = False) -> None:
++        if not self.enabled:
++            return
++        now = self._now()
++        if (
++            not force
++            and self._last_draw_at is not None
++            and now - self._last_draw_at < self._MIN_REFRESH_SECONDS
++        ):
++            return
++        line = self._format_line(now)
++        if self._tty:
++            width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns - 1)
++            line = line[:width].ljust(width)
++            self._stream.write("\r" + line)
++            self._line_open = True
++        else:
++            self._stream.write(line + "\n")
++        self._stream.flush()
++        self._last_draw_at = now
++
++    def _format_line(self, now: float) -> str:
++        elapsed = max(0.0, now - self._started_at)
++        if self._command == "book" and self._book_event is not None:
++            return self._format_book_line(elapsed)
++
++        composition = self._composition
++        fraction = composition.fraction if composition is not None else None
++        phase = self._phase or "preparing"
++        if phase == "writing output" and fraction is not None:
++            phase = "composition · writing output"
++        if self._phase == "complete":
++            phase = "complete"
++        if self._phase == "failed":
++            fraction = None
++        pieces: list[str] = []
++        if fraction is not None:
++            pieces.append(f"[{fraction * 100.0:5.1f}%]")
++        pieces.append(phase)
++        if composition is not None and composition.total_items:
++            pieces.append(f"{composition.completed_items}/{composition.total_items} items")
++            if composition.item_id:
++                pieces.append(composition.item_id)
++        pieces.append(f"elapsed {self._format_duration(elapsed)}")
++        timing = self._composition_timing
++        if (
++            timing is not None
++            and timing.status == "estimated"
++            and timing.estimated_remaining_seconds is not None
++            and self._phase not in {"writing output", "complete", "failed"}
++        ):
++            pieces.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
++        return " · ".join(pieces)
++
++    def _format_book_line(self, elapsed: float) -> str:
++        event = self._book_event
++        assert event is not None
++        fraction = event.fraction
++        phase = self._phase or "preparing book"
++        outcome = event.outcome
++        terminal_failure = outcome is not None and outcome.status in ("failed", "skipped")
++        if self._phase == "complete" and not self._book_failed:
++            fraction = 1.0 if event.requested_chapters > 0 else None
++        elif event.kind == "book_completed":
++            fraction = None
++            phase = "completed with failures" if self._book_failed else "finalizing report"
++        elif event.composition is not None and event.composition.kind == "compose_completed":
++            fraction = None
++        elif outcome is not None and event.completed_chapters >= event.requested_chapters:
++            fraction = None
++        elif self._phase == "failed" or terminal_failure:
++            fraction = None
++        pieces: list[str] = []
++        if fraction is not None:
++            pieces.append(f"[{fraction * 100.0:5.1f}%]")
++        if event.chapter_id is not None and event.requested_chapters:
++            chapter_number = event.completed_chapters + (0 if outcome is not None else 1)
++            chapter_number = min(max(chapter_number, 1), event.requested_chapters)
++            pieces.append(f"chapter {chapter_number}/{event.requested_chapters}")
++        pieces.append(phase)
++        composition = event.composition
++        if composition is not None and composition.fraction is not None:
++            pieces.append(f"chapter {composition.fraction * 100.0:.1f}%")
++        pieces.append(f"elapsed {self._format_duration(elapsed)}")
++        timing = self._book_timing
++        if (
++            timing is not None
++            and timing.status == "estimated"
++            and timing.estimated_remaining_seconds is not None
++            and phase == "composing"
++        ):
++            pieces.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
++        return " · ".join(pieces)
++
++    @staticmethod
++    def _format_duration(seconds: float) -> str:
++        if not math.isfinite(seconds) or seconds < 0:
++            return "--:--"
++        whole_seconds = int(round(seconds))
++        hours, remainder = divmod(whole_seconds, 3600)
++        minutes, remaining = divmod(remainder, 60)
++        if hours:
++            return f"{hours:02d}:{minutes:02d}:{remaining:02d}"
++        return f"{minutes:02d}:{remaining:02d}"
+diff --git a/audiocompose/book.py b/audiocompose/book.py
+index 70b0ac4..7ff0da9 100644
+--- a/audiocompose/book.py
++++ b/audiocompose/book.py
+@@ -43,6 +43,7 @@ from .integrations.renderplan_metadata import (
+ )
+ from .loudness import LoudnessPolicy
+ from .model import OutputPolicy
++from .progress import CompositionProgress
+
+ SET_FILENAME = "renderplan-set.toml"
+ MANIFEST_FILENAME = "render-manifest.toml"
+@@ -214,6 +215,8 @@ class BookComposeProgress:
+     variant: str | None = None
+     details: Mapping[str, Any] = field(default_factory=dict)
+     outcome: ChapterComposeOutcome | None = None
++    composition: CompositionProgress | None = None
++    fraction: float | None = None
+
+     def __post_init__(self) -> None:
+         details = MappingProxyType(dict(self.details))
+@@ -240,6 +243,21 @@ def _notify_progress(
+ ) -> None:
+     if callback is None:
+         return
++    if progress.fraction is None:
++        requested = progress.requested_chapters
++        completed = progress.completed_chapters
++        if requested <= 0:
++            fraction = 1.0 if progress.kind == "book_completed" else 0.0
++        elif progress.outcome is not None or progress.kind == "book_completed":
++            fraction = completed / requested
++        else:
++            chapter_fraction = (
++                progress.composition.fraction
++                if progress.composition is not None and progress.composition.fraction is not None
++                else 0.0
++            )
++            fraction = (completed + chapter_fraction) / requested
++        progress = replace(progress, fraction=min(1.0, max(0.0, fraction)))
+     try:
+         callback(progress)
+     except Exception as exc:
+@@ -1148,6 +1166,46 @@ def _compose_resolved_book(
+         progress_error = exc
+     stop = progress_error is not None
+
++    def compose_and_write_chapter(job, chapter, output_path):
++        _notify_progress(
++            on_progress,
++            BookComposeProgress(
++                completed_chapters=len(results),
++                requested_chapters=len(context.chapters),
++                kind="chapter_compose_started",
++                chapter_id=chapter.id,
++                source_number=chapter.source_number,
++                variant=context.variant,
++            ),
++        )
++        _ensure_output_directory(context.output_variant_dir)
++
++        def forward_composition(event: CompositionProgress) -> None:
++            _notify_progress(
++                on_progress,
++                BookComposeProgress(
++                    completed_chapters=len(results),
++                    requested_chapters=len(context.chapters),
++                    kind="chapter_compose_progress",
++                    chapter_id=chapter.id,
++                    source_number=chapter.source_number,
++                    variant=context.variant,
++                    composition=event,
++                ),
++            )
++
++        if on_progress is None:
++            composition = Composer().compose(job)
++        else:
++            composition = Composer().compose(job, on_progress=forward_composition)
++        atomic_write_wav(
++            output_path,
++            composition.audio,
++            composition.sample_rate,
++            clip_policy=job.output.clip_policy,
++        )
++        return composition
++
+     for index, chapter in enumerate(context.chapters, start=1):
+         paths = context.resolved_chapter_paths[index - 1]
+         entry: dict[str, Any] = {
+@@ -1423,48 +1481,12 @@ def _compose_resolved_book(
+                         f"existing chapter output has no matching verified provenance: {paths.output_path}; use --force",
+                     )
+                 else:
+-                    _notify_progress(
+-                        on_progress,
+-                        BookComposeProgress(
+-                            completed_chapters=len(results),
+-                            requested_chapters=len(context.chapters),
+-                            kind="chapter_compose_started",
+-                            chapter_id=chapter.id,
+-                            source_number=chapter.source_number,
+-                            variant=context.variant,
+-                        ),
+-                    )
+-                    _ensure_output_directory(context.output_variant_dir)
+-                    composition = Composer().compose(job)
+-                    atomic_write_wav(
+-                        paths.output_path,
+-                        composition.audio,
+-                        composition.sample_rate,
+-                        clip_policy=job.output.clip_policy,
+-                    )
++                    compose_and_write_chapter(job, chapter, paths.output_path)
+                     entry.update(_wav_result(paths.output_path))
+                     entry["status"] = "written"
+                     written += 1
+             else:
+-                _notify_progress(
+-                    on_progress,
+-                    BookComposeProgress(
+-                        completed_chapters=len(results),
+-                        requested_chapters=len(context.chapters),
+-                        kind="chapter_compose_started",
+-                        chapter_id=chapter.id,
+-                        source_number=chapter.source_number,
+-                        variant=context.variant,
+-                    ),
+-                )
+-                _ensure_output_directory(context.output_variant_dir)
+-                composition = Composer().compose(job)
+-                atomic_write_wav(
+-                    paths.output_path,
+-                    composition.audio,
+-                    composition.sample_rate,
+-                    clip_policy=job.output.clip_policy,
+-                )
++                compose_and_write_chapter(job, chapter, paths.output_path)
+                 entry.update(_wav_result(paths.output_path))
+                 entry["status"] = "written"
+                 written += 1
+diff --git a/audiocompose/cli.py b/audiocompose/cli.py
+index 5f4b93f..91be76b 100644
+--- a/audiocompose/cli.py
++++ b/audiocompose/cli.py
+@@ -7,19 +7,29 @@ import sys
+ from pathlib import Path
+ from typing import Any
+
++from ._cli_progress import CliProgressRenderer
+ from ._version import __version__
+ from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_gap_near
+ from .composer import Composer
+ from .errors import AudioComposeError
+ from .job import validate_clip_geometry
+ from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
+-from .wav import read_wav
++from .wav import read_wav, wav_info, write_wav
+
+
+ def _add_json(parser: argparse.ArgumentParser) -> None:
+     parser.add_argument("--json", action="store_true", help="write machine-readable JSON")
+
+
++def _add_progress(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument(
++        "--progress",
++        choices=("auto", "always", "never"),
++        default="auto",
++        help="render progress to stderr (default: auto)",
++    )
++
++
+ def _add_analysis_options(parser: argparse.ArgumentParser) -> None:
+     parser.add_argument("--frame-ms", type=float, default=20.0)
+     parser.add_argument("--hop-ms", type=float, default=5.0)
+@@ -49,6 +59,8 @@ def _parser() -> argparse.ArgumentParser:
+     compose = subparsers.add_parser("compose")
+     compose.add_argument("manifest")
+     compose.add_argument("output")
++    _add_json(compose)
++    _add_progress(compose)
+
+     timeline = subparsers.add_parser("timeline")
+     timeline.add_argument("manifest")
+@@ -87,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
+     )
+     _add_json(compose_renderplan)
+
++    _add_progress(compose_renderplan)
+     compose_book = subparsers.add_parser(
+         "compose-book", help="compose selected chapters from a rendered book variant"
+     )
+@@ -128,6 +141,7 @@ def _parser() -> argparse.ArgumentParser:
+         "--fail-fast", action="store_true", help="skip later chapters after the first failure"
+     )
+     _add_json(compose_book)
++    _add_progress(compose_book)
+     analyze = subparsers.add_parser("analyze")
+     analyze.add_argument("input")
+     _add_analysis_options(analyze)
+@@ -345,10 +359,27 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
+
+ def main(argv: list[str] | None = None) -> int:
+     args = _parser().parse_args(argv)
++    progress_renderer: CliProgressRenderer | None = None
++    if args.command in {"compose", "compose-renderplan", "compose-book"}:
++        command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
++            args.command, "compose"
++        )
++        progress_renderer = CliProgressRenderer(
++            mode=args.progress,
++            json_mode=getattr(args, "json", False),
++            command=command,
++        )
+     try:
+         if args.command == "compose-book":
+             from .book import BookComposeOptions, compose_book
+
++            if progress_renderer is not None:
++                progress_renderer.set_phase("preparing book")
++            book_progress_callback = (
++                progress_renderer.on_book_progress
++                if progress_renderer is not None and progress_renderer.enabled
++                else None
++            )
+             book_result = compose_book(
+                 args.book,
+                 variant=args.variant,
+@@ -369,7 +400,10 @@ def main(argv: list[str] | None = None) -> int:
+                 force=args.force,
+                 fail_fast=args.fail_fast,
+                 emphasis_policy=args.emphasis_policy,
++                on_progress=book_progress_callback,
+             )
++            if progress_renderer is not None:
++                progress_renderer.finish(success=book_result.exit_code == 0)
+             if args.json:
+                 print(json.dumps(book_result.to_dict(), indent=2, sort_keys=True))
+             else:
+@@ -402,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
+         elif args.command == "compose-renderplan":
+             import audiocompose
+
++            if progress_renderer is not None:
++                progress_renderer.set_phase("preparing handoff")
+             api_result = audiocompose.compose_renderplan(
+                 args.plan,
+                 render_dir=args.render_dir,
+@@ -411,7 +447,21 @@ def main(argv: list[str] | None = None) -> int:
+                 output_policy=_output_policy_from_args(args),
+                 save_audiojob=args.save_audiojob,
+                 emphasis_policy=args.emphasis_policy,
++                on_progress=(
++                    progress_renderer.on_composition_progress
++                    if progress_renderer is not None and progress_renderer.enabled
++                    else None
++                ),
+             )
++            if progress_renderer is not None and progress_renderer.enabled:
++                progress_renderer.set_phase("verifying output")
++                output_info = wav_info(api_result.output)
++                if (
++                    output_info.sample_rate != api_result.sample_rate
++                    or output_info.frames != api_result.frames
++                ):
++                    raise AudioComposeError("written output failed geometry verification")
++                progress_renderer.finish(success=True)
+             timeline = [dict(item) for item in api_result.timeline]
+             diagnostics = [
+                 _renderplan_diagnostic_dict(diagnostic) for diagnostic in api_result.diagnostics
+@@ -456,8 +506,43 @@ def main(argv: list[str] | None = None) -> int:
+             result = _inspect(AudioJob.load(args.manifest, verify_sources=False))
+             print(json.dumps(result, indent=2, sort_keys=True))
+         elif args.command == "compose":
+-            Composer().to_wav(AudioJob.load(args.manifest, verify_sources=False), args.output)
+-            print(f"wrote {args.output}")
++            if progress_renderer is not None:
++                progress_renderer.set_phase("preparing composition")
++            job = AudioJob.load(args.manifest, verify_sources=False)
++            compose_progress_callback = (
++                progress_renderer.on_composition_progress
++                if progress_renderer is not None and progress_renderer.enabled
++                else None
++            )
++            composition = Composer().compose(job, on_progress=compose_progress_callback)
++            if progress_renderer is not None:
++                progress_renderer.set_phase("writing output")
++            output_path = write_wav(
++                args.output,
++                composition.audio,
++                composition.sample_rate,
++                clip_policy=job.output.clip_policy,
++            )
++            frames = len(composition.audio)
++            sample_rate = composition.sample_rate
++            if progress_renderer is not None and progress_renderer.enabled:
++                progress_renderer.set_phase("verifying output")
++                output_info = wav_info(output_path)
++                if output_info.sample_rate != sample_rate or output_info.frames != frames:
++                    raise AudioComposeError("written output failed geometry verification")
++                frames = output_info.frames
++                progress_renderer.finish(success=True)
++            result = {
++                "composed": True,
++                "output": str(output_path),
++                "sample_rate": sample_rate,
++                "frames": frames,
++                "duration_seconds": frames / sample_rate,
++            }
++            if args.json:
++                print(json.dumps(result, indent=2, sort_keys=True))
++            else:
++                print(f"wrote {output_path}")
+         elif args.command == "timeline":
+             result = _timeline(AudioJob.load(args.manifest, verify_sources=False))
+             print(json.dumps(result, indent=2, sort_keys=True))
+@@ -505,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
+                 print(f"wrote {args.output}")
+         return 0
+     except (AudioComposeError, ValueError, OSError) as exc:
++        if progress_renderer is not None:
++            progress_renderer.finish(success=False)
+         if getattr(args, "json", False):
+             print(
+                 json.dumps(
+diff --git a/audiocompose/composer.py b/audiocompose/composer.py
+index 36f7588..bbc6961 100644
+--- a/audiocompose/composer.py
++++ b/audiocompose/composer.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+
+ import math
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from pathlib import Path
+
+ import numpy as np
+@@ -13,9 +13,14 @@ from .job import validate_clip_geometry
+ from .loudness import LoudnessResult, apply_complete_output_loudness
+ from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, Silence
+ from .operations import PitchShift, Tempo, apply_operation, apply_temporal_group
+-from .progress import CompositionProgress, CompositionProgressCallback, ProgressItemKind
++from .progress import (
++    CompositionEstimate,
++    CompositionProgress,
++    CompositionProgressCallback,
++    ProgressItemKind,
++)
+ from .resampling import resample_audio
+-from .sources import AudioBufferSource
++from .sources import AudioBufferSource, AudioFileSource
+ from .wav import prepare_output, write_wav
+
+
+@@ -23,20 +28,27 @@ def _seconds_samples(seconds: float, rate: int) -> int:
+     return round(seconds * rate)
+
+
+-def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int | None:
++def _item_output_frames_and_work(
++    item: AudioClip | Silence, output_rate: int
++) -> tuple[int | None, float | None]:
+     if isinstance(item, Silence):
+-        return _seconds_samples(item.seconds, output_rate)
++        frames = _seconds_samples(item.seconds, output_rate)
++        return frames, float(frames)
++
+     source = item.source
+-    frames: int | None
+-    source_rate: int | None
+     if isinstance(source, AudioBufferSource):
+-        frames = len(source.audio)
+-        source_rate = source.sample_rate
++        source_frames: int | None = len(source.audio)
++        source_rate: int | None = source.sample_rate
++        source_load_passes = 1
+     else:
+-        frames = source.frames
++        source_frames = source.frames
+         source_rate = source.sample_rate
+-    if frames is None or source_rate is None:
+-        return None
++        source_load_passes = 2 if source.expected_sha256 is not None else 1
++    if source_frames is None or source_rate is None:
++        return None, None
++    frames = source_frames
++
++    work_units = float(frames * source_load_passes)
+     operation_index = 0
+     while operation_index < len(item.operations):
+         group_start = operation_index
+@@ -48,6 +60,7 @@ def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int
+             ):
+                 group_end += 1
+         group = item.operations[group_start:group_end]
++        work_units += frames
+         if len(group) > 1:
+             rate = math.prod(
+                 group_operation.factor
+@@ -58,9 +71,144 @@ def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int
+         else:
+             frames = operation.output_length(frames, source_rate)
+         operation_index = group_end
++
+     if source_rate != output_rate:
++        work_units += frames
+         frames = round(frames * output_rate / source_rate)
+-    return frames
++
++    # Item availability is a small pass in addition to the source/DSP work.
++    work_units += frames
++    return frames, work_units
++
++
++def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int | None:
++    return _item_output_frames_and_work(item, output_rate)[0]
++
++
++def _loudness_is_noop(job: AudioJob) -> bool:
++    policy = job.output.loudness
++    return (
++        not policy.collect_metrics
++        and policy.target_lufs is None
++        and policy.true_peak_ceiling_dbtp is None
++    )
++
++
++def estimate_composition(
++    job: AudioJob,
++    *,
++    sample_rate: int | None = None,
++) -> CompositionEstimate:
++    """Estimate deterministic output geometry and execution work without processing audio.
++
++    ``total_work_units`` is an approximate frame-pass metric, not a prediction
++    of wall-clock duration. If any source geometry is unknown, output totals and
++    the total work estimate remain unknown.
++    """
++    rate = job.output.sample_rate if sample_rate is None else sample_rate
++    if isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0:
++        raise AudioValidationError("sample_rate must be a positive integer or None")
++
++    geometry = tuple(_item_output_frames_and_work(item, rate) for item in job.items)
++    item_output_frames = tuple(frames for frames, _ in geometry)
++    unknown_items = tuple(
++        index for index, frames in enumerate(item_output_frames) if frames is None
++    )
++    total_output_frames = (
++        sum(frames for frames in item_output_frames if frames is not None)
++        if not unknown_items
++        else None
++    )
++    total_audio_seconds = total_output_frames / rate if total_output_frames is not None else None
++    total_work_units: float | None = None
++    if not unknown_items and total_output_frames is not None:
++        total_work_units = sum(work or 0.0 for _, work in geometry)
++        # Concatenation, optional complete-output loudness, and final clipping
++        # preparation are distinct execution passes.
++        total_work_units += total_output_frames
++        if not _loudness_is_noop(job):
++            total_work_units += total_output_frames
++        total_work_units += total_output_frames
++
++    return CompositionEstimate(
++        sample_rate=rate,
++        item_output_frames=item_output_frames,
++        total_output_frames=total_output_frames,
++        total_audio_seconds=total_audio_seconds,
++        total_work_units=total_work_units,
++        unknown_items=unknown_items,
++    )
++
++
++class _WorkProgressCallback:
++    def __init__(
++        self,
++        callback: CompositionProgressCallback,
++        job: AudioJob,
++        total_work_units: float | None,
++    ) -> None:
++        self._callback = callback
++        self._job = job
++        self._total_work_units = total_work_units
++        self._completed_work_units = 0.0
++        self._fraction = 0.0
++
++    def __call__(self, event: CompositionProgress) -> None:
++        completed = 0.0
++        if event.kind == "source_load_completed" and event.input_frames is not None:
++            item = self._job.items[event.item_index] if event.item_index is not None else None
++            passes = (
++                2
++                if isinstance(item, AudioClip)
++                and isinstance(item.source, AudioFileSource)
++                and item.source.expected_sha256 is not None
++                else 1
++            )
++            completed = event.input_frames * passes
++        elif event.kind == "operation_completed" and event.input_frames is not None:
++            group_size = event.details.get("processing_group_size")
++            group_start = event.details.get("processing_group_start")
++            is_last_group_event = (
++                isinstance(group_size, int)
++                and isinstance(group_start, int)
++                and event.operation_index == group_start + group_size - 1
++            )
++            if not isinstance(group_size, int) or is_last_group_event:
++                completed = event.input_frames
++        elif event.kind == "resample_completed" and event.input_frames is not None:
++            completed = event.input_frames
++        elif event.kind == "item_completed" and event.output_frames is not None:
++            completed = event.output_frames
++        elif event.kind == "assembly_completed" and event.output_frames is not None:
++            completed = event.output_frames
++        elif (
++            event.kind == "loudness_completed"
++            and event.input_frames is not None
++            and not _loudness_is_noop(self._job)
++        ):
++            completed = event.input_frames
++        elif event.kind == "compose_completed" and event.output_frames is not None:
++            completed = event.output_frames
++
++        self._completed_work_units += float(completed)
++        fraction: float | None = None
++        if self._total_work_units is not None:
++            if event.kind == "compose_completed":
++                fraction = 1.0
++            elif self._total_work_units == 0:
++                fraction = 0.0
++            else:
++                fraction = min(1.0, self._completed_work_units / self._total_work_units)
++                fraction = max(self._fraction, fraction)
++            self._fraction = fraction
++        self._callback(
++            replace(
++                event,
++                completed_work_units=self._completed_work_units,
++                total_work_units=self._total_work_units,
++                fraction=fraction,
++            )
++        )
+
+
+ def _emit(callback: CompositionProgressCallback | None, event: CompositionProgress) -> None:
+@@ -114,15 +262,10 @@ class Composer:
+         job.validate(verify_sources=False)
+         rate = self.sample_rate if self.sample_rate is not None else job.output.sample_rate
+         total_items = len(job.items)
+-        item_output_frames = [_predicted_output_frames(item, rate) for item in job.items]
+-        total_output_frames = (
+-            sum(frames for frames in item_output_frames if frames is not None)
+-            if all(frames is not None for frames in item_output_frames)
+-            else None
+-        )
+-        total_audio_seconds = (
+-            total_output_frames / rate if total_output_frames is not None else None
+-        )
++        estimate = estimate_composition(job, sample_rate=rate)
++        total_audio_seconds = estimate.total_audio_seconds
++        if on_progress is not None:
++            on_progress = _WorkProgressCallback(on_progress, job, estimate.total_work_units)
+         completed_audio_seconds = 0.0
+         metadata_kind_counts: dict[str, int] = {}
+         for item in job.items:
+diff --git a/audiocompose/progress.py b/audiocompose/progress.py
+index 1679e57..c035277 100644
+--- a/audiocompose/progress.py
++++ b/audiocompose/progress.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+
++import math
++import time
+ from collections.abc import Callable, Mapping
+ from dataclasses import dataclass, field
+ from typing import Any, Literal
+@@ -23,9 +25,29 @@ ProgressEventKind = Literal[
+ ProgressItemKind = Literal["clip", "silence"]
+
+
++@dataclass(frozen=True, slots=True)
++class CompositionEstimate:
++    """Deterministic output-geometry and execution-work estimate for a job.
++
++    Work units are an internal planning metric, not a wall-clock prediction or
++    part of AudioJob identity. The model may evolve between minor releases.
++    """
++
++    sample_rate: int
++    item_output_frames: tuple[int | None, ...]
++    total_output_frames: int | None
++    total_audio_seconds: float | None
++    total_work_units: float | None
++    unknown_items: tuple[int, ...]
++
++
+ @dataclass(frozen=True, slots=True)
+ class CompositionProgress:
+-    """A producer-neutral observation of composition progress."""
++    """A producer-neutral runtime observation of composition progress.
++
++    Work fields describe an approximate frame-pass model, not audio semantics or
++    wall-clock time. ``fraction`` is absent when total work is unknown; work
++    units are never serialized into AudioJob identity or provenance."""
+
+     kind: ProgressEventKind
+     completed_items: int
+@@ -45,6 +67,150 @@ class CompositionProgress:
+     total_audio_seconds: float | None = None
+     details: Mapping[str, Any] = field(default_factory=dict)
+
++    completed_work_units: float | None = None
++    total_work_units: float | None = None
++    fraction: float | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class ProgressTiming:
++    """Live elapsed-time and ETA view derived from composition work progress."""
++
++    fraction: float | None
++    percent: float | None
++    elapsed_seconds: float
++    estimated_remaining_seconds: float | None
++    estimated_total_seconds: float | None
++    status: Literal["indeterminate", "warming_up", "estimated", "complete"]
++
++
++class ProgressEstimator:
++    """Estimate wall-clock duration from observed frame-work throughput.
++
++    The estimator is process-local and never persists machine performance. A
++    caller may supply its own ``initial_work_rate`` as work units per second.
++    """
++
++    _EWMA_ALPHA = 0.3
++    _MAX_ETA_SECONDS = 365 * 24 * 60 * 60
++
++    def __init__(
++        self,
++        *,
++        clock: Callable[[], float] = time.monotonic,
++        initial_work_rate: float | None = None,
++    ) -> None:
++        if initial_work_rate is not None and (
++            isinstance(initial_work_rate, bool)
++            or not isinstance(initial_work_rate, (int, float))
++            or not math.isfinite(initial_work_rate)
++            or initial_work_rate <= 0
++        ):
++            raise ValueError("initial_work_rate must be a positive finite number or None")
++        self._clock = clock
++        now = float(clock())
++        self._started_at = now if math.isfinite(now) else 0.0
++        self._last_now = self._started_at
++        self._last_sample_time: float | None = None
++        self._last_sample_work: float | None = None
++        self._work_rate = float(initial_work_rate) if initial_work_rate is not None else None
++        self._fraction: float | None = None
++        self._completed_work_units: float | None = None
++
++    def update(self, event: CompositionProgress) -> ProgressTiming:
++        now = float(self._clock())
++        if not math.isfinite(now) or now < self._last_now:
++            now = self._last_now
++        self._last_now = now
++        elapsed = max(0.0, now - self._started_at)
++
++        fraction = event.fraction
++        if fraction is None and event.total_work_units is not None and event.total_work_units > 0:
++            if event.completed_work_units is not None:
++                fraction = event.completed_work_units / event.total_work_units
++        if fraction is not None and math.isfinite(fraction):
++            fraction = min(1.0, max(0.0, fraction))
++            if self._fraction is not None:
++                fraction = max(self._fraction, fraction)
++            self._fraction = fraction
++        else:
++            fraction = None
++        percent = fraction * 100.0 if fraction is not None else None
++
++        total_work = event.total_work_units
++        completed_work = event.completed_work_units
++        if completed_work is not None and math.isfinite(completed_work):
++            if self._completed_work_units is not None:
++                completed_work = max(self._completed_work_units, completed_work)
++            self._completed_work_units = completed_work
++        elif self._completed_work_units is not None:
++            completed_work = self._completed_work_units
++        if (
++            total_work is not None
++            and math.isfinite(total_work)
++            and total_work > 0
++            and completed_work is not None
++            and math.isfinite(completed_work)
++        ):
++            if self._last_sample_time is None:
++                self._last_sample_time = now
++                self._last_sample_work = completed_work
++            else:
++                delta_time = now - self._last_sample_time
++                delta_work = completed_work - (self._last_sample_work or 0.0)
++                if delta_time > 0:
++                    if delta_work > 0:
++                        instant_rate = delta_work / delta_time
++                        if math.isfinite(instant_rate) and instant_rate > 0:
++                            if self._work_rate is None:
++                                self._work_rate = instant_rate
++                            else:
++                                self._work_rate = (
++                                    self._EWMA_ALPHA * instant_rate
++                                    + (1.0 - self._EWMA_ALPHA) * self._work_rate
++                                )
++                    self._last_sample_time = now
++                    self._last_sample_work = completed_work
++
++        complete = event.kind == "compose_completed" or fraction == 1.0
++        remaining: float | None = None
++        estimated_total: float | None = None
++        if complete:
++            remaining = 0.0
++            estimated_total = elapsed
++            status: Literal["indeterminate", "warming_up", "estimated", "complete"] = "complete"
++        elif total_work is None or not math.isfinite(total_work):
++            status = "indeterminate"
++        else:
++            rate = self._work_rate
++            if rate is None or not math.isfinite(rate) or rate <= 0:
++                status = "warming_up"
++            else:
++                completed = completed_work if completed_work is not None else 0.0
++                remaining_work = max(0.0, total_work - completed)
++                candidate = remaining_work / rate
++                candidate_total = elapsed + candidate
++                if (
++                    math.isfinite(candidate)
++                    and math.isfinite(candidate_total)
++                    and candidate <= self._MAX_ETA_SECONDS
++                    and candidate_total <= self._MAX_ETA_SECONDS
++                ):
++                    remaining = candidate
++                    estimated_total = candidate_total
++                    status = "estimated"
++                else:
++                    status = "warming_up"
++
++        return ProgressTiming(
++            fraction=fraction,
++            percent=percent,
++            elapsed_seconds=elapsed,
++            estimated_remaining_seconds=remaining,
++            estimated_total_seconds=estimated_total,
++            status=status,
++        )
++
+
+ CompositionProgressCallback = Callable[[CompositionProgress], None]
+
+@@ -52,5 +218,8 @@ __all__ = [
+     "CompositionProgress",
+     "CompositionProgressCallback",
+     "ProgressEventKind",
++    "CompositionEstimate",
++    "ProgressEstimator",
++    "ProgressTiming",
+     "ProgressItemKind",
+ ]
+diff --git a/audiocompose/renderplan.py b/audiocompose/renderplan.py
+index 7aff693..a2bb58e 100644
+--- a/audiocompose/renderplan.py
++++ b/audiocompose/renderplan.py
+@@ -11,6 +11,7 @@ from .composer import Composer
+ from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
+ from .integrations.renderplan import load_and_materialize_renderplan_job
+ from .model import AudioJob, CompositionResult, OutputPolicy
++from .progress import CompositionProgressCallback
+ from .wav import atomic_write_wav
+
+ EmphasisPolicy = Literal["segment_fallback", "strict"]
+@@ -114,7 +115,11 @@ def _emphasis_diagnostics(job: AudioJob) -> tuple[CompositionDiagnostic, ...]:
+
+
+ @overload
+-def compose_renderplan(plan: RenderPlanComposeRequest) -> RenderPlanComposeResult: ...
++def compose_renderplan(
++    plan: RenderPlanComposeRequest,
++    *,
++    on_progress: CompositionProgressCallback | None = None,
++) -> RenderPlanComposeResult: ...
+
+
+ @overload
+@@ -128,6 +133,7 @@ def compose_renderplan(
+     output_policy: OutputPolicy | None = None,
+     save_audiojob: str | Path | None = None,
+     emphasis_policy: EmphasisPolicy = "segment_fallback",
++    on_progress: CompositionProgressCallback | None = None,
+ ) -> RenderPlanComposeResult: ...
+
+
+@@ -141,12 +147,15 @@ def compose_renderplan(
+     output_policy: OutputPolicy | None = None,
+     save_audiojob: str | Path | None = None,
+     emphasis_policy: EmphasisPolicy | None = None,
++    on_progress: CompositionProgressCallback | None = None,
+ ) -> RenderPlanComposeResult:
+     """Verify and compose a RenderPlan handoff into one atomically written WAV.
+
+     When ``plan`` is a path and ``media_root`` is omitted, relative external
+     AudioItems are resolved from the plan file's parent directory. The manifest
+     defaults to ``render-manifest.toml`` inside ``render_dir``.
++    ``on_progress`` forwards core composition events; callback exceptions propagate and
++    prevent publication of the final WAV.
+     """
+     if isinstance(plan, RenderPlanComposeRequest):
+         if any(
+@@ -192,7 +201,7 @@ def compose_renderplan(
+         emphasis_policy=request.emphasis_policy,
+     )
+     audiojob_path = job.save(request.save_audiojob) if request.save_audiojob is not None else None
+-    composition = Composer().compose(job)
++    composition = Composer().compose(job, on_progress=on_progress)
+     output_path = atomic_write_wav(
+         request.output,
+         composition.audio,
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 8b68bd4..95e87e5 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -102,11 +102,20 @@ New serialized bundles use schema version 2 and contain `audiojob.json` plus rel
+
+ The complete-output ordering is normative: load clips, apply clip operations, map anchors and spans through those operations, resample clips, concatenate clips and explicit silence, then measure and apply loudness once. Loudness is amplitude-only and never changes item ranges, marker offsets, or composed span coordinates.
+
+-## Composition progress
++## Composition estimates and progress
+
+-`Composer` exposes optional synchronous `CompositionProgress` events as a runtime observation boundary. The events identify generic items, operations, source and target sample rates, frame counts, assembly, complete-output loudness, and completion. Item metadata is forwarded opaquely so a producer can map events to its own identifiers without adding producer-specific concepts to audiocompose.
++`estimate_composition(job, sample_rate=None)` is a deterministic preflight over the generic AudioJob shape. It predicts per-item/output frame geometry and approximate frame-pass work, including source loading/integrity verification, operation groups, resampling, assembly, optional complete-output loudness, and final output preparation. Missing source geometry remains unknown: output totals and total work are `None`, and events have no numeric fraction. Work units are neither wall-clock estimates nor persisted values; their model may evolve.
++
++`Composer` exposes optional synchronous `CompositionProgress` events as a runtime observation boundary. Events identify generic items, operations, source and target sample rates, frame counts, assembly, loudness, completion, and (when known) monotonic work/fraction. Item metadata is forwarded opaquely so a producer can map events to its own identifiers without adding producer-specific concepts to AudioCompose. `ProgressEstimator` is an opt-in caller-side view using monotonic time and observed work throughput; it can report elapsed time and bounded ETA after it has enough evidence, or accept a caller-supplied initial work rate. It has no hardware-specific constants and retains no measurements after the process.
++
++Progress delivery and timing are not part of AudioJob serialization, job identity, `CompositionResult`, provenance, reports, or audio semantics. With no callback, the composition path and DSP results remain unchanged. Core callbacks do not print; their exceptions propagate to the caller. Terminal stream handling belongs to the consuming UI layer.
++
++### CLI progress boundary
++
++The three rendering commands (`compose`, `compose-renderplan`, and `compose-book`) share the private standard-library CLI renderer and accept `--progress auto|always|never`. `auto` is the default and renders only to a TTY stderr when `--json` is absent; `always` forces stderr updates, including with JSON, and `never` disables them. TTY refreshes are throttled and non-TTY forced output is newline-delimited. JSON stdout remains machine-clean, and no terminal dependency is introduced into Composer or the API layers. Unknown work totals show elapsed time and named lifecycle phases without invented percentages or ETAs; command completion is shown only after successful output handling.
++
++The package-root `compose_renderplan` API forwards its optional `on_progress` callback to Composer. The book facade forwards those core events inside `BookComposeProgress.composition`; its `fraction` is a uniform chapter-slot measure, not a duration-weighted forecast. Book callback failures retain the existing `progress.callback_failed` behavior. Progress, fractions, and timing remain runtime-only across both integrations.
+
+-Progress delivery is not part of AudioJob serialization, job identity, result provenance, or audio semantics. With no callback, the composition path remains unchanged. Callback exceptions propagate to the caller, while terminal stream failures are a responsibility of the consuming UI layer.
+ `AudioSpan` and `ComposedSpan` support optional IDs and JSON-safe metadata. The fields are producer-neutral and are preserved through AudioJob serialization and composition. `CompositionResult.loudness` provides typed before and after metrics, requested and applied gain, policy, target, ceiling, and warnings. `CompositionResult.diagnostics` contains generic diagnostic codes and numeric context.
+ Timing transformations use generic operation hooks. Static `Tempo` maps offsets proportionally; `RatePitchEnvelope` maps source coordinates by inverting the integrated output-time rate curve, with the final rate held after its last point. Pitch-only envelopes preserve duration and coordinates. Operation mappings happen before the single source-to-output resampling map. Final loudness and true-peak/clipping policy are applied once to the complete waveform.
+
+diff --git a/docs/migration-v0.3.md b/docs/migration-v0.3.md
+index 3699731..f1c9f55 100644
+--- a/docs/migration-v0.3.md
++++ b/docs/migration-v0.3.md
+@@ -38,6 +38,35 @@ Direct generic `materialize_renderplan_job` and `compose-renderplan` do not infe
+
+ Book pause-policy overrides use the root `role` table, keyed by the resulting RenderPlan `SpeechItem.role`. They are not keyed directly by UtterPlan logical voice references. Source-pause validation checks known classes and table availability without treating logical voice references as role keys; actual durations resolve against the RenderPlan role selected for each pause and fail closed if that role/default lacks a value. Pre-release policy files using a `voice` root must be changed to `role` before using the v0.3 book integration.
+
++## Deterministic estimates and live progress
++
++AudioCompose v0.3 adds a producer-neutral runtime progress API. `estimate_composition(job, sample_rate=None)` returns per-item/output frame geometry and deterministic approximate frame-pass work through `CompositionEstimate`. It includes source loading/integrity verification, grouped operations, resampling, assembly, optional complete-output loudness, and final output preparation. If source geometry is unknown, total frames, duration, and work remain unknown; consumers must not turn that into a guessed percentage. Work units describe planned processing passes, not seconds, and the model may evolve.
++
++`CompositionProgress` gains optional `completed_work_units`, `total_work_units`, and `fraction`. Known fractions/work are monotonic; unknown totals remain indeterminate. `ProgressTiming` and `ProgressEstimator` provide elapsed time and an evidence-based live ETA from monotonic-clock work-rate observations, with optional caller-supplied initial work rate. Without an initial rate, the estimator warms up before deriving an ETA; caller-supplied initial rates and observed rates still produce finite, bounded predictions. Its status is `indeterminate`, `warming_up`, `estimated`, or `complete`. These values are process-local: they are not added to AudioJob identity/provenance, `CompositionResult`, JSON/TOML schemas, or the book report.
++
++```python
++from audiocompose import Composer, ProgressEstimator, estimate_composition
++
++estimate = estimate_composition(job)
++timing = ProgressEstimator()
++
++def on_progress(event):
++    view = timing.update(event)
++    if view.estimated_remaining_seconds is not None:
++        print(f"ETA {view.estimated_remaining_seconds:.1f}s")
++
++Composer().compose(job, on_progress=on_progress)
++```
++
++`compose_renderplan(..., on_progress=...)` forwards the generic composition events. Book callbacks carry nested core events in `BookComposeProgress.composition` and a uniform chapter-slot fraction; this is not a duration-weighted prediction. Core callbacks remain synchronous and do not print. Existing book callback failure reporting remains `progress.callback_failed`.
++
++The `compose`, `compose-renderplan`, and `compose-book` CLIs accept `--progress auto|always|never`. `auto` is the default: it displays only on a TTY stderr and is suppressed when `--json` is selected. `always` forces stderr output without contaminating JSON stdout; `never` disables it. TTY progress uses a throttled live line, while forced non-TTY output is newline-delimited. Unknown work totals use elapsed time and named lifecycle stages without fabricated percentages or ETA. Progress reaches command completion only after successful output handling.
++
++```bash
++audiocompose compose chapter.audiojob chapter.wav --progress always
++audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
++```
++
+ ## No AudioJob schema migration
+
+ The book bridge stores diagnostics provenance in the existing generic source and metadata mappings. AudioCompose v0.3.0 does not require an AudioJob schema-version change. Existing generic jobs can continue through `validate`, `inspect`, and `compose` unchanged.
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index c7b3df8..ed4b2b9 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -1,11 +1,22 @@
+ from __future__ import annotations
+
++import io
+ import json
+ from pathlib import Path
++from types import SimpleNamespace
+
+ import numpy as np
+
+-from audiocompose import AudioAnchor, AudioBufferSource, AudioClip, AudioJob, Composer
++from audiocompose import (
++    AudioAnchor,
++    AudioBufferSource,
++    AudioClip,
++    AudioJob,
++    BookComposeProgress,
++    Composer,
++    CompositionProgress,
++)
++from audiocompose._cli_progress import CliProgressRenderer
+ from audiocompose.cli import main
+ from audiocompose.wav import write_wav
+
+@@ -78,3 +89,220 @@ def test_cli_analyze_near_marker_reuses_composition(tmp_path, capsys, monkeypatc
+     result = json.loads(capsys.readouterr().out)
+     assert result["near_marker"] == "mark"
+     assert compose_count == 1
++
++
++class FakeClock:
++    def __init__(self) -> None:
++        self.now = 0.0
++
++    def __call__(self) -> float:
++        return self.now
++
++    def advance(self, seconds: float) -> None:
++        self.now += seconds
++
++
++class TTYStream(io.StringIO):
++    def isatty(self) -> bool:
++        return True
++
++
++def _composition_event(
++    kind: str,
++    completed_work: float,
++    *,
++    completed_items: int = 0,
++) -> CompositionProgress:
++    return CompositionProgress(
++        kind=kind,
++        completed_items=completed_items,
++        total_items=1,
++        item_id="clip-1",
++        completed_work_units=completed_work,
++        total_work_units=100.0,
++        fraction=completed_work / 100.0,
++    )
++
++
++def test_progress_renderer_tty_detection_eta_and_monotonic_output() -> None:
++    clock = FakeClock()
++    stream = TTYStream()
++    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=clock)
++    assert renderer.enabled
++
++    renderer.on_composition_progress(_composition_event("compose_started", 0.0))
++    clock.advance(2.0)
++    renderer.on_composition_progress(_composition_event("item_completed", 20.0, completed_items=1))
++    draw_count = stream.getvalue().count("\r")
++    renderer.on_composition_progress(_composition_event("item_completed", 25.0, completed_items=1))
++    assert stream.getvalue().count("\r") == draw_count
++    renderer.on_composition_progress(
++        _composition_event("compose_completed", 100.0, completed_items=1)
++    )
++    renderer.finish(success=True)
++
++    output = stream.getvalue()
++    assert "ETA 00:08" in output
++    assert "100.0%" in output
++    assert "\r" in output
++    assert output.endswith("\n")
++
++    json_tty = CliProgressRenderer(mode="auto", json_mode=True, stream=TTYStream())
++    assert not json_tty.enabled
++    assert not CliProgressRenderer(mode="auto", stream=io.StringIO()).enabled
++
++
++def test_generic_compose_progress_modes_and_json_stdout(tmp_path: Path, capsys) -> None:
++    job = AudioJob((AudioClip("clip", AudioBufferSource(np.zeros(100, dtype=np.float32), 100)),))
++    manifest = Path(job.save(tmp_path / "job.audiojob"))
++
++    output = tmp_path / "forced.wav"
++    assert main(["compose", str(manifest), str(output), "--json", "--progress", "always"]) == 0
++    captured = capsys.readouterr()
++    result = json.loads(captured.out)
++    assert result["composed"] is True
++    assert result["output"] == str(output)
++    forced_stderr = captured.err
++    assert "composing" in forced_stderr
++    assert "writing output" in forced_stderr
++    assert "verifying output" in forced_stderr
++    assert "elapsed" in forced_stderr
++    assert "\r" not in forced_stderr
++
++    auto_output = tmp_path / "auto.wav"
++    assert main(["compose", str(manifest), str(auto_output), "--json"]) == 0
++    captured = capsys.readouterr()
++    json.loads(captured.out)
++    assert captured.err == ""
++
++    never_output = tmp_path / "never.wav"
++    assert main(["compose", str(manifest), str(never_output), "--progress", "never"]) == 0
++    captured = capsys.readouterr()
++    assert captured.err == ""
++
++
++def test_renderplan_cli_progress_stays_on_stderr_with_json(
++    monkeypatch, tmp_path: Path, capsys
++) -> None:
++    import audiocompose
++
++    output = tmp_path / "renderplan.wav"
++
++    def fake_compose(plan, **kwargs):
++        callback = kwargs["on_progress"]
++        callback(_composition_event("compose_started", 0.0))
++        callback(_composition_event("compose_completed", 100.0, completed_items=1))
++        write_wav(output, np.zeros(4, dtype=np.float32), 8)
++        return SimpleNamespace(
++            output=output,
++            plan_id="plan-id",
++            manifest_id="manifest-id",
++            sample_rate=8,
++            frames=4,
++            duration_seconds=0.5,
++            timeline=(),
++            diagnostics=(),
++            audiojob=None,
++        )
++
++    monkeypatch.setattr(audiocompose, "compose_renderplan", fake_compose)
++    assert (
++        main(
++            [
++                "compose-renderplan",
++                "plan.toml",
++                "--render-dir",
++                str(tmp_path),
++                "--output",
++                str(output),
++                "--json",
++                "--progress",
++                "always",
++            ]
++        )
++        == 0
++    )
++    captured = capsys.readouterr()
++    result = json.loads(captured.out)
++    assert result["output"] == str(output)
++    progress = captured.err
++    assert "preparing handoff" in progress
++    assert "composing RenderPlan" in progress
++    assert "writing output" in progress
++    assert "verifying output" in progress
++
++
++def test_book_cli_renders_nested_progress_to_stderr(monkeypatch, tmp_path: Path, capsys) -> None:
++    import audiocompose.book as book_module
++
++    def fake_compose(book, *, on_progress, **kwargs):
++        on_progress(BookComposeProgress(0, 1, kind="book_started", fraction=0.0))
++        on_progress(
++            BookComposeProgress(
++                0, 1, kind="chapter_started", chapter_id="chapter-0001", fraction=0.0
++            )
++        )
++        on_progress(
++            BookComposeProgress(
++                0, 1, kind="chapter_compose_started", chapter_id="chapter-0001", fraction=0.0
++            )
++        )
++        on_progress(
++            BookComposeProgress(
++                0,
++                1,
++                kind="chapter_compose_progress",
++                chapter_id="chapter-0001",
++                composition=_composition_event("compose_started", 0.0),
++                fraction=0.0,
++            )
++        )
++        on_progress(
++            BookComposeProgress(
++                0,
++                1,
++                kind="chapter_compose_progress",
++                chapter_id="chapter-0001",
++                composition=_composition_event("compose_completed", 100.0, completed_items=1),
++                fraction=1.0,
++            )
++        )
++        on_progress(BookComposeProgress(1, 1, kind="book_completed", fraction=1.0))
++        return SimpleNamespace(exit_code=0, to_dict=lambda: {"composed": True})
++
++    monkeypatch.setattr(book_module, "compose_book", fake_compose)
++    assert (
++        main(
++            [
++                "compose-book",
++                str(tmp_path),
++                "--variant",
++                "fixture",
++                "--json",
++                "--progress",
++                "always",
++            ]
++        )
++        == 0
++    )
++    captured = capsys.readouterr()
++    assert json.loads(captured.out) == {"composed": True}
++    progress = captured.err
++    assert "chapter 1/1" in progress
++    assert "preparing handoff" in progress or "starting composition" in progress
++    assert "chapter 100.0%" in progress
++    assert "finalizing report" in progress
++    assert "complete" in progress
++
++
++def test_compose_output_failure_does_not_finish_progress_successfully(
++    tmp_path: Path, capsys
++) -> None:
++    job = AudioJob((AudioClip("clip", AudioBufferSource(np.zeros(100, dtype=np.float32), 100)),))
++    manifest = Path(job.save(tmp_path / "job.audiojob"))
++
++    assert main(["compose", str(manifest), str(tmp_path), "--progress", "always"]) == 2
++    captured = capsys.readouterr()
++    assert captured.out == ""
++    assert "failed" in captured.err
++    assert not any("100.0%" in line and "complete" in line for line in captured.err.splitlines())
+diff --git a/tests/test_compose_book.py b/tests/test_compose_book.py
+index 1c65d77..af69ae2 100644
+--- a/tests/test_compose_book.py
++++ b/tests/test_compose_book.py
+@@ -559,19 +559,41 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+     )
+     assert isinstance(api_result, BookComposeResult)
+     assert [item.source_number for item in api_result.outcomes] == [5, 8]
+-    assert [item.kind for item in progress] == [
+-        "book_started",
+-        "chapter_started",
+-        "chapter_materialized",
+-        "chapter_compose_started",
+-        "chapter_compose_completed",
+-        "chapter_started",
+-        "chapter_materialized",
+-        "chapter_compose_started",
+-        "chapter_compose_completed",
+-        "book_completed",
+-    ]
++    kinds = [event.kind for event in progress]
++    assert kinds[0] == "book_started"
++    assert kinds[-1] == "book_completed"
+     assert [item.completed_chapters for item in progress if item.outcome is not None] == [1, 2]
++    fractions = [event.fraction for event in progress]
++    assert all(fraction is not None for fraction in fractions)
++    assert fractions == sorted(fractions)
++    for chapter_id in ("chapter-0005", "chapter-0008"):
++        start_index = next(
++            index
++            for index, event in enumerate(progress)
++            if event.kind == "chapter_started" and event.chapter_id == chapter_id
++        )
++        compose_start_index = next(
++            index
++            for index, event in enumerate(progress)
++            if event.kind == "chapter_compose_started" and event.chapter_id == chapter_id
++        )
++        nested = [
++            event
++            for event in progress
++            if event.kind == "chapter_compose_progress" and event.chapter_id == chapter_id
++        ]
++        outcome_index = next(
++            index
++            for index, event in enumerate(progress)
++            if event.outcome is not None and event.outcome.id == chapter_id
++        )
++        assert nested
++        assert start_index < compose_start_index < progress.index(nested[0])
++        assert progress.index(nested[-1]) < outcome_index
++        assert nested[0].composition is not None
++        assert nested[0].composition.kind == "compose_started"
++        assert nested[-1].composition is not None
++        assert nested[-1].composition.kind == "compose_completed"
+     assert api_result.exit_code == 0
+     assert not (api_workspace / ".readio").exists()
+
+@@ -608,10 +630,18 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+         assert (Path(api_result.report_path).parent / api_report["item"][0][key]).is_file()
+     assert api_report["item"][0]["job"] == "chapter-0005.audiojob"
+
+-    api_reused = compose_book(api_workspace, variant=api_variant, chapters="5,8")
++    reuse_progress = []
++    api_reused = compose_book(
++        api_workspace, variant=api_variant, chapters="5,8", on_progress=reuse_progress.append
++    )
+     assert main(cli_command) == 0
+     cli_reused = json.loads(capsys.readouterr().out)
+     assert [item.status for item in api_reused.outcomes] == ["reused", "reused"]
++    reuse_fractions = [event.fraction for event in reuse_progress]
++    assert all(fraction is not None for fraction in reuse_fractions)
++    assert reuse_fractions == sorted(reuse_fractions)
++    assert reuse_progress[-1].fraction == 1.0
++    assert not any(event.kind == "chapter_compose_progress" for event in reuse_progress)
+     assert api_reused.to_dict()["items"] == cli_reused["items"]
+
+
+@@ -1124,8 +1154,11 @@ def test_progress_callback_failure_writes_report_without_final_wav(tmp_path):
+
+     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5, 6))
+
+-    def fail_after_materialization(progress):
+-        if progress.kind == "chapter_materialized":
++    progress = []
++
++    def fail_after_materialization(event):
++        progress.append(event)
++        if event.kind == "chapter_materialized":
+             raise RuntimeError("observer unavailable")
+
+     result = compose_book(workspace, variant=variant, on_progress=fail_after_materialization)
+@@ -1137,6 +1170,37 @@ def test_progress_callback_failure_writes_report_without_final_wav(tmp_path):
+     assert not (result.output_variant_dir / "chapter-0006.wav").exists()
+     report_text = result.report_path.read_text(encoding="utf-8")
+     assert 'error_code = "progress.callback_failed"' in report_text
++    fractions = [event.fraction for event in progress]
++    assert all(fraction is not None for fraction in fractions)
++    assert fractions == sorted(fractions)
++    assert progress[-1].kind == "book_completed"
++    assert progress[-1].fraction == 1.0
++
++
++def test_nested_composition_callback_failure_writes_report_without_wav(tmp_path):
++    from audiocompose import compose_book
++
++    workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
++    progress = []
++
++    def fail_during_composition(event):
++        progress.append(event)
++        if (
++            event.kind == "chapter_compose_progress"
++            and event.composition is not None
++            and event.composition.kind == "compose_started"
++        ):
++            raise RuntimeError("observer unavailable")
++
++    result = compose_book(workspace, variant=variant, on_progress=fail_during_composition)
++
++    assert result.outcomes[0].status == "failed"
++    assert result.outcomes[0].error_code == "progress.callback_failed"
++    assert result.report_path.is_file()
++    assert not (result.output_variant_dir / "chapter-0005.wav").exists()
++    assert any(event.kind == "chapter_compose_progress" for event in progress)
++    assert progress[-1].kind == "book_completed"
++    assert progress[-1].fraction == 1.0
+
+
+ def test_composer_failure_never_publishes_a_chapter_wav(tmp_path, monkeypatch):
+diff --git a/tests/test_compose_renderplan_api.py b/tests/test_compose_renderplan_api.py
+index 2660a4c..3c690ae 100644
+--- a/tests/test_compose_renderplan_api.py
++++ b/tests/test_compose_renderplan_api.py
+@@ -413,3 +413,50 @@ def test_cli_handler_calls_public_compose_function(monkeypatch, tmp_path, capsys
+             "message": "fallback applied",
+         }
+     ]
++
++
++def test_public_api_forwards_core_progress_and_preserves_output(tmp_path) -> None:
++    render_dir = tmp_path / "renders"
++    speech = _speech()
++    artifact = _rendered(render_dir, speech)
++    plan = _plan(speech)
++    plan_path, _ = _save_handoff(tmp_path, plan, _manifest(plan, [artifact]), render_dir=render_dir)
++    observed_output = tmp_path / "observed.wav"
++    plain_output = tmp_path / "plain.wav"
++    events = []
++
++    audiocompose.compose_renderplan(
++        plan_path,
++        render_dir=render_dir,
++        output=observed_output,
++        output_policy=OutputPolicy(sample_rate=16_000),
++        on_progress=events.append,
++    )
++    audiocompose.compose_renderplan(
++        plan_path,
++        render_dir=render_dir,
++        output=plain_output,
++        output_policy=OutputPolicy(sample_rate=16_000),
++    )
++
++    assert events[0].kind == "compose_started"
++    assert events[-1].kind == "compose_completed"
++    observed_audio, observed_rate = read_wav(observed_output)
++    plain_audio, plain_rate = read_wav(plain_output)
++    assert observed_rate == plain_rate
++    assert np.array_equal(observed_audio, plain_audio)
++
++    request_output = tmp_path / "request-failed.wav"
++    request = audiocompose.RenderPlanComposeRequest(
++        plan=plan_path,
++        render_dir=render_dir,
++        output=request_output,
++        output_policy=OutputPolicy(sample_rate=16_000),
++    )
++
++    def fail(event):
++        raise RuntimeError(event.kind)
++
++    with pytest.raises(RuntimeError, match="compose_started"):
++        audiocompose.compose_renderplan(request, on_progress=fail)
++    assert not request_output.exists()
+diff --git a/tests/test_progress.py b/tests/test_progress.py
+index fcb6005..05188f8 100644
+--- a/tests/test_progress.py
++++ b/tests/test_progress.py
+@@ -10,16 +10,22 @@ from audiocompose import (
+     AudioJob,
+     AutomationPoint,
+     Composer,
++    CompositionEstimate,
++    CompositionProgress,
+     FadeIn,
+     FadeOut,
+     Gain,
+     LoudnessPolicy,
+     OutputPolicy,
+     PitchShift,
++    ProgressEstimator,
++    ProgressTiming,
+     RatePitchEnvelope,
+     Silence,
+     Tempo,
++    estimate_composition,
+ )
++from audiocompose.progress import ProgressEventKind
+ from audiocompose.wav import write_wav
+
+
+@@ -366,3 +372,194 @@ def test_rate_pitch_envelope_delegates_once_and_reports_operation_frames(monkeyp
+     assert started[0].operation_count == completed[0].operation_count == 2
+     assert started[0].input_frames == completed[0].input_frames == 48
+     assert completed[0].output_frames == 96
++
++
++def test_estimate_composition_reports_known_geometry_and_frame_pass_work() -> None:
++    job = make_job(
++        AudioClip("clip", AudioBufferSource(np.ones(10, dtype=np.float32), 10)),
++        sample_rate=10,
++    )
++
++    estimate = estimate_composition(job)
++
++    assert isinstance(estimate, CompositionEstimate)
++    assert estimate.sample_rate == 10
++    assert estimate.item_output_frames == (10,)
++    assert estimate.total_output_frames == 10
++    assert estimate.total_audio_seconds == pytest.approx(1.0)
++    # source load + item availability + assembly + final output preparation
++    assert estimate.total_work_units == 50.0
++    assert estimate.unknown_items == ()
++
++
++def test_work_fraction_is_monotonic_and_completes_at_one() -> None:
++    job = make_job(
++        AudioClip("clip", AudioBufferSource(np.ones(10, dtype=np.float32), 10)),
++        sample_rate=10,
++    )
++    events = []
++    Composer().compose(job, on_progress=events.append)
++
++    fractions = [event.fraction for event in events]
++    assert fractions[0] == 0.0
++    assert all(value is not None and 0.0 <= value <= 1.0 for value in fractions)
++    assert fractions == sorted(fractions)
++    assert fractions[-1] == 1.0
++    assert all(event.total_work_units == 50.0 for event in events)
++
++
++def test_unknown_geometry_keeps_work_total_and_fraction_unknown(tmp_path) -> None:
++    path = tmp_path / "unknown.wav"
++    write_wav(path, np.full(10, 0.2, dtype=np.float32), 10)
++    job = make_job(AudioClip("clip", AudioFileSource(path)), sample_rate=10)
++    estimate = estimate_composition(job)
++    events = []
++
++    Composer().compose(job, on_progress=events.append)
++
++    assert estimate.item_output_frames == (None,)
++    assert estimate.total_output_frames is None
++    assert estimate.total_work_units is None
++    assert estimate.unknown_items == (0,)
++    assert all(event.total_work_units is None and event.fraction is None for event in events)
++
++
++def test_fused_temporal_operations_count_one_processing_group() -> None:
++    job = make_job(
++        AudioClip(
++            "clip",
++            AudioBufferSource(np.ones(100, dtype=np.float32), 100),
++            (Tempo(0.5), PitchShift(0.0)),
++        ),
++        sample_rate=100,
++    )
++
++    estimate = estimate_composition(job)
++
++    output_frames = round(100 / 0.5)
++    # source + one fused DSP call, item availability, assembly, loudness, finalization
++    assert estimate.total_work_units == 100 + 100 + 4 * output_frames
++
++
++def test_last_item_does_not_complete_fraction_before_loudness_tail() -> None:
++    job = AudioJob(
++        (AudioClip("clip", AudioBufferSource(np.ones(100, dtype=np.float32), 100)),),
++        output=OutputPolicy(
++            sample_rate=100,
++            loudness=LoudnessPolicy(
++                target_lufs=None,
++                true_peak_ceiling_dbtp=None,
++                collect_metrics=True,
++            ),
++        ),
++    )
++    events = []
++
++    Composer().compose(job, on_progress=events.append)
++
++    item_completed = next(event for event in events if event.kind == "item_completed")
++    assert item_completed.fraction is not None and item_completed.fraction < 1.0
++    assert events[-1].fraction == 1.0
++
++
++class FakeClock:
++    def __init__(self) -> None:
++        self.now = 0.0
++
++    def __call__(self) -> float:
++        return self.now
++
++    def advance(self, seconds: float) -> None:
++        self.now += seconds
++
++
++def timing_event(
++    completed_work: float | None,
++    total_work: float | None,
++    *,
++    kind: ProgressEventKind = "compose_started",
++) -> CompositionProgress:
++    fraction = (
++        completed_work / total_work
++        if completed_work is not None and total_work is not None and total_work > 0
++        else None
++    )
++    return CompositionProgress(
++        kind=kind,
++        completed_items=0,
++        total_items=1,
++        completed_work_units=completed_work,
++        total_work_units=total_work,
++        fraction=fraction,
++    )
++
++
++def test_progress_estimator_reports_unknown_warming_estimated_and_complete() -> None:
++    clock = FakeClock()
++    estimator = ProgressEstimator(clock=clock)
++
++    unknown = estimator.update(timing_event(None, None))
++    assert isinstance(unknown, ProgressTiming)
++    assert unknown.status == "indeterminate"
++    assert unknown.percent is None
++    assert unknown.estimated_remaining_seconds is None
++
++    clock.advance(1.0)
++    warming = estimator.update(timing_event(0.0, 100.0))
++    assert warming.status == "warming_up"
++    assert warming.estimated_remaining_seconds is None
++
++    clock.advance(2.0)
++    first_estimate = estimator.update(timing_event(20.0, 100.0))
++    assert first_estimate.status == "estimated"
++    assert first_estimate.estimated_remaining_seconds == pytest.approx(8.0)
++    assert first_estimate.estimated_total_seconds == pytest.approx(11.0)
++
++    clock.advance(2.0)
++    later_estimate = estimator.update(timing_event(40.0, 100.0))
++    assert later_estimate.estimated_remaining_seconds is not None
++    assert first_estimate.estimated_remaining_seconds is not None
++    assert later_estimate.estimated_remaining_seconds < first_estimate.estimated_remaining_seconds
++    assert later_estimate.percent == 40.0
++
++    complete = estimator.update(timing_event(100.0, 100.0, kind="compose_completed"))
++    assert complete.status == "complete"
++    assert complete.estimated_remaining_seconds == 0.0
++    assert complete.estimated_total_seconds == complete.elapsed_seconds
++
++
++def test_progress_estimator_supports_initial_rate_and_monotonic_percent() -> None:
++    clock = FakeClock()
++    estimator = ProgressEstimator(clock=clock, initial_work_rate=10.0)
++
++    initial = estimator.update(timing_event(20.0, 100.0))
++    assert initial.status == "estimated"
++    assert initial.estimated_remaining_seconds == pytest.approx(8.0)
++
++    backwards = estimator.update(timing_event(10.0, 100.0))
++    assert backwards.percent == initial.percent
++    assert backwards.estimated_remaining_seconds == pytest.approx(8.0)
++
++
++def test_progress_estimator_handles_zero_time_and_nonfinite_eta() -> None:
++    clock = FakeClock()
++    estimator = ProgressEstimator(clock=clock)
++
++    assert estimator.update(timing_event(0.0, 100.0)).status == "warming_up"
++    assert estimator.update(timing_event(50.0, 100.0)).estimated_remaining_seconds is None
++    clock.advance(1.0)
++    measured = estimator.update(timing_event(50.0, 100.0))
++    assert measured.status == "estimated"
++    assert measured.estimated_remaining_seconds == pytest.approx(1.0)
++
++    huge = ProgressEstimator(clock=clock, initial_work_rate=1e-9)
++    timing = huge.update(timing_event(0.0, 1e12))
++    assert timing.status == "warming_up"
++    assert timing.estimated_remaining_seconds is None
++    assert timing.estimated_total_seconds is None
++
++
++def test_progress_estimator_rejects_invalid_initial_rates() -> None:
++    for value in (0.0, -1.0, float("nan"), float("inf")):
++        with pytest.raises(ValueError, match="positive finite"):
++            ProgressEstimator(initial_work_rate=value)
+diff --git a/tests/test_schema_resources.py b/tests/test_schema_resources.py
+index 1e16a8a..97231bb 100644
+--- a/tests/test_schema_resources.py
++++ b/tests/test_schema_resources.py
+@@ -31,6 +31,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "AutomationPoint",
+         "CompositionDiagnostic",
+         "CompositionError",
++        "CompositionEstimate",
+         "CompositionProgress",
+         "CompositionProgressCallback",
+         "CompositionResult",
+@@ -43,6 +44,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "compose_book",
+         "compose_renderplan",
+         "default_book_output_policy",
++        "estimate_composition",
+         "DiagnosticSeverity",
+         "FadeIn",
+         "FadeOut",
+@@ -52,6 +54,8 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "Operation",
+         "OutputPolicy",
+         "PitchShift",
++        "ProgressEstimator",
++        "ProgressTiming",
+         "RatePitchEnvelope",
+         "RenderPlanComposeRequest",
+         "RenderPlanComposeResult",

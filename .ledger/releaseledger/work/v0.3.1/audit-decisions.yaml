@@ -1,0 +1,43 @@
+rows:
+  - sha: 3382fbd2214165cd09b77e5c02bfb01f8ede4710
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/cli.py
+      - audiocompose/renderplan.py
+      - docs/index.md
+      - tests/test_compose_renderplan_api.py
+      - tests/test_schema_resources.py
+    observed_behavior: "Added the public compose_renderplan API, typed request/result models, and CLI delegation for validating RenderPlan handoffs, composing one document, and writing its WAV output with timeline and diagnostics."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: b5de88be6790d4d5a3f4ab85d5529f952232d2be
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/_cli_progress.py
+      - audiocompose/book.py
+      - audiocompose/cli.py
+      - audiocompose/composer.py
+      - audiocompose/progress.py
+      - audiocompose/renderplan.py
+      - docs/architecture.md
+      - docs/migration-v0.3.md
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_compose_renderplan_api.py
+      - tests/test_progress.py
+      - tests/test_schema_resources.py
+    observed_behavior: "Added deterministic composition estimates, runtime progress timing, and stderr-only progress rendering for generic, RenderPlan, and book composition without changing serialized job or audio semantics."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

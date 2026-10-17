@@ -1,0 +1,57 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.3.1
+git_base_ref: ab9f6f802c5ae86d2b546188a18ce8100daa4d8c
+git_base_sha: ab9f6f802c5ae86d2b546188a18ce8100daa4d8c
+git_head_ref: b5de88be6790d4d5a3f4ab85d5529f952232d2be
+git_head_sha: b5de88be6790d4d5a3f4ab85d5529f952232d2be
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added public RenderPlan composition API with typed results, timeline, diagnostics, and atomic WAV output"
+    status: accepted
+    source_refs:
+      - git:3382fbd2214165cd09b77e5c02bfb01f8ede4710
+    paths:
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/cli.py
+      - audiocompose/renderplan.py
+      - docs/index.md
+      - tests/test_compose_renderplan_api.py
+      - tests/test_schema_resources.py
+    sources:
+      - git:3382fbd2214165cd09b77e5c02bfb01f8ede4710
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added deterministic composition estimates and stderr progress for generic, RenderPlan, and book composition"
+    status: accepted
+    source_refs:
+      - git:b5de88be6790d4d5a3f4ab85d5529f952232d2be
+    paths:
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/_cli_progress.py
+      - audiocompose/book.py
+      - audiocompose/cli.py
+      - audiocompose/composer.py
+      - audiocompose/progress.py
+      - audiocompose/renderplan.py
+      - docs/architecture.md
+      - docs/migration-v0.3.md
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_compose_renderplan_api.py
+      - tests/test_progress.py
+      - tests/test_schema_resources.py
+    sources:
+      - git:b5de88be6790d4d5a3f4ab85d5529f952232d2be
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
