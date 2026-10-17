@@ -13,7 +13,7 @@ from .book import (
     default_book_output_policy,
     resolve_book,
 )
-from .composer import Composer
+from .composer import Composer, estimate_composition
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import AudioComposeError, AudioValidationError, CompositionError
 from .job import load_job, save_job
@@ -29,7 +29,13 @@ from .operations import (
     RatePitchEnvelope,
     Tempo,
 )
-from .progress import CompositionProgress, CompositionProgressCallback
+from .progress import (
+    CompositionEstimate,
+    CompositionProgress,
+    CompositionProgressCallback,
+    ProgressEstimator,
+    ProgressTiming,
+)
 from .renderplan import (
     RenderPlanComposeRequest,
     RenderPlanComposeResult,
@@ -61,13 +67,17 @@ __all__ = [
     "CompositionError",
     "CompositionProgress",
     "CompositionProgressCallback",
+    "ProgressEstimator",
+    "ProgressTiming",
     "CompositionResult",
     "ComposedItem",
     "ComposedMarker",
     "ComposedSpan",
     "Composer",
+    "CompositionEstimate",
     "compose_book",
     "compose_renderplan",
+    "estimate_composition",
     "default_book_output_policy",
     "resolve_book",
     "DiagnosticSeverity",

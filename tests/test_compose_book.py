@@ -559,19 +559,41 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
     )
     assert isinstance(api_result, BookComposeResult)
     assert [item.source_number for item in api_result.outcomes] == [5, 8]
-    assert [item.kind for item in progress] == [
-        "book_started",
-        "chapter_started",
-        "chapter_materialized",
-        "chapter_compose_started",
-        "chapter_compose_completed",
-        "chapter_started",
-        "chapter_materialized",
-        "chapter_compose_started",
-        "chapter_compose_completed",
-        "book_completed",
-    ]
+    kinds = [event.kind for event in progress]
+    assert kinds[0] == "book_started"
+    assert kinds[-1] == "book_completed"
     assert [item.completed_chapters for item in progress if item.outcome is not None] == [1, 2]
+    fractions = [event.fraction for event in progress]
+    assert all(fraction is not None for fraction in fractions)
+    assert fractions == sorted(fractions)
+    for chapter_id in ("chapter-0005", "chapter-0008"):
+        start_index = next(
+            index
+            for index, event in enumerate(progress)
+            if event.kind == "chapter_started" and event.chapter_id == chapter_id
+        )
+        compose_start_index = next(
+            index
+            for index, event in enumerate(progress)
+            if event.kind == "chapter_compose_started" and event.chapter_id == chapter_id
+        )
+        nested = [
+            event
+            for event in progress
+            if event.kind == "chapter_compose_progress" and event.chapter_id == chapter_id
+        ]
+        outcome_index = next(
+            index
+            for index, event in enumerate(progress)
+            if event.outcome is not None and event.outcome.id == chapter_id
+        )
+        assert nested
+        assert start_index < compose_start_index < progress.index(nested[0])
+        assert progress.index(nested[-1]) < outcome_index
+        assert nested[0].composition is not None
+        assert nested[0].composition.kind == "compose_started"
+        assert nested[-1].composition is not None
+        assert nested[-1].composition.kind == "compose_completed"
     assert api_result.exit_code == 0
     assert not (api_workspace / ".readio").exists()
 
@@ -608,10 +630,18 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         assert (Path(api_result.report_path).parent / api_report["item"][0][key]).is_file()
     assert api_report["item"][0]["job"] == "chapter-0005.audiojob"
 
-    api_reused = compose_book(api_workspace, variant=api_variant, chapters="5,8")
+    reuse_progress = []
+    api_reused = compose_book(
+        api_workspace, variant=api_variant, chapters="5,8", on_progress=reuse_progress.append
+    )
     assert main(cli_command) == 0
     cli_reused = json.loads(capsys.readouterr().out)
     assert [item.status for item in api_reused.outcomes] == ["reused", "reused"]
+    reuse_fractions = [event.fraction for event in reuse_progress]
+    assert all(fraction is not None for fraction in reuse_fractions)
+    assert reuse_fractions == sorted(reuse_fractions)
+    assert reuse_progress[-1].fraction == 1.0
+    assert not any(event.kind == "chapter_compose_progress" for event in reuse_progress)
     assert api_reused.to_dict()["items"] == cli_reused["items"]
 
 
@@ -1124,8 +1154,11 @@ def test_progress_callback_failure_writes_report_without_final_wav(tmp_path):
 
     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5, 6))
 
-    def fail_after_materialization(progress):
-        if progress.kind == "chapter_materialized":
+    progress = []
+
+    def fail_after_materialization(event):
+        progress.append(event)
+        if event.kind == "chapter_materialized":
             raise RuntimeError("observer unavailable")
 
     result = compose_book(workspace, variant=variant, on_progress=fail_after_materialization)
@@ -1137,6 +1170,37 @@ def test_progress_callback_failure_writes_report_without_final_wav(tmp_path):
     assert not (result.output_variant_dir / "chapter-0006.wav").exists()
     report_text = result.report_path.read_text(encoding="utf-8")
     assert 'error_code = "progress.callback_failed"' in report_text
+    fractions = [event.fraction for event in progress]
+    assert all(fraction is not None for fraction in fractions)
+    assert fractions == sorted(fractions)
+    assert progress[-1].kind == "book_completed"
+    assert progress[-1].fraction == 1.0
+
+
+def test_nested_composition_callback_failure_writes_report_without_wav(tmp_path):
+    from audiocompose import compose_book
+
+    workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
+    progress = []
+
+    def fail_during_composition(event):
+        progress.append(event)
+        if (
+            event.kind == "chapter_compose_progress"
+            and event.composition is not None
+            and event.composition.kind == "compose_started"
+        ):
+            raise RuntimeError("observer unavailable")
+
+    result = compose_book(workspace, variant=variant, on_progress=fail_during_composition)
+
+    assert result.outcomes[0].status == "failed"
+    assert result.outcomes[0].error_code == "progress.callback_failed"
+    assert result.report_path.is_file()
+    assert not (result.output_variant_dir / "chapter-0005.wav").exists()
+    assert any(event.kind == "chapter_compose_progress" for event in progress)
+    assert progress[-1].kind == "book_completed"
+    assert progress[-1].fraction == 1.0
 
 
 def test_composer_failure_never_publishes_a_chapter_wav(tmp_path, monkeypatch):

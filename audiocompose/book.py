@@ -43,6 +43,7 @@ from .integrations.renderplan_metadata import (
 )
 from .loudness import LoudnessPolicy
 from .model import OutputPolicy
+from .progress import CompositionProgress
 
 SET_FILENAME = "renderplan-set.toml"
 MANIFEST_FILENAME = "render-manifest.toml"
@@ -214,6 +215,8 @@ class BookComposeProgress:
     variant: str | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
     outcome: ChapterComposeOutcome | None = None
+    composition: CompositionProgress | None = None
+    fraction: float | None = None
 
     def __post_init__(self) -> None:
         details = MappingProxyType(dict(self.details))
@@ -240,6 +243,21 @@ def _notify_progress(
 ) -> None:
     if callback is None:
         return
+    if progress.fraction is None:
+        requested = progress.requested_chapters
+        completed = progress.completed_chapters
+        if requested <= 0:
+            fraction = 1.0 if progress.kind == "book_completed" else 0.0
+        elif progress.outcome is not None or progress.kind == "book_completed":
+            fraction = completed / requested
+        else:
+            chapter_fraction = (
+                progress.composition.fraction
+                if progress.composition is not None and progress.composition.fraction is not None
+                else 0.0
+            )
+            fraction = (completed + chapter_fraction) / requested
+        progress = replace(progress, fraction=min(1.0, max(0.0, fraction)))
     try:
         callback(progress)
     except Exception as exc:
@@ -1148,6 +1166,46 @@ def _compose_resolved_book(
         progress_error = exc
     stop = progress_error is not None
 
+    def compose_and_write_chapter(job, chapter, output_path):
+        _notify_progress(
+            on_progress,
+            BookComposeProgress(
+                completed_chapters=len(results),
+                requested_chapters=len(context.chapters),
+                kind="chapter_compose_started",
+                chapter_id=chapter.id,
+                source_number=chapter.source_number,
+                variant=context.variant,
+            ),
+        )
+        _ensure_output_directory(context.output_variant_dir)
+
+        def forward_composition(event: CompositionProgress) -> None:
+            _notify_progress(
+                on_progress,
+                BookComposeProgress(
+                    completed_chapters=len(results),
+                    requested_chapters=len(context.chapters),
+                    kind="chapter_compose_progress",
+                    chapter_id=chapter.id,
+                    source_number=chapter.source_number,
+                    variant=context.variant,
+                    composition=event,
+                ),
+            )
+
+        if on_progress is None:
+            composition = Composer().compose(job)
+        else:
+            composition = Composer().compose(job, on_progress=forward_composition)
+        atomic_write_wav(
+            output_path,
+            composition.audio,
+            composition.sample_rate,
+            clip_policy=job.output.clip_policy,
+        )
+        return composition
+
     for index, chapter in enumerate(context.chapters, start=1):
         paths = context.resolved_chapter_paths[index - 1]
         entry: dict[str, Any] = {
@@ -1423,48 +1481,12 @@ def _compose_resolved_book(
                         f"existing chapter output has no matching verified provenance: {paths.output_path}; use --force",
                     )
                 else:
-                    _notify_progress(
-                        on_progress,
-                        BookComposeProgress(
-                            completed_chapters=len(results),
-                            requested_chapters=len(context.chapters),
-                            kind="chapter_compose_started",
-                            chapter_id=chapter.id,
-                            source_number=chapter.source_number,
-                            variant=context.variant,
-                        ),
-                    )
-                    _ensure_output_directory(context.output_variant_dir)
-                    composition = Composer().compose(job)
-                    atomic_write_wav(
-                        paths.output_path,
-                        composition.audio,
-                        composition.sample_rate,
-                        clip_policy=job.output.clip_policy,
-                    )
+                    compose_and_write_chapter(job, chapter, paths.output_path)
                     entry.update(_wav_result(paths.output_path))
                     entry["status"] = "written"
                     written += 1
             else:
-                _notify_progress(
-                    on_progress,
-                    BookComposeProgress(
-                        completed_chapters=len(results),
-                        requested_chapters=len(context.chapters),
-                        kind="chapter_compose_started",
-                        chapter_id=chapter.id,
-                        source_number=chapter.source_number,
-                        variant=context.variant,
-                    ),
-                )
-                _ensure_output_directory(context.output_variant_dir)
-                composition = Composer().compose(job)
-                atomic_write_wav(
-                    paths.output_path,
-                    composition.audio,
-                    composition.sample_rate,
-                    clip_policy=job.output.clip_policy,
-                )
+                compose_and_write_chapter(job, chapter, paths.output_path)
                 entry.update(_wav_result(paths.output_path))
                 entry["status"] = "written"
                 written += 1

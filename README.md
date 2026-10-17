@@ -26,16 +26,35 @@ Composer().to_wav(job, "final.wav")
 
 AudioCompose delegates band-limited resampling, static WSOLA time/pitch processing, and `RatePitchEnvelope` DSP to AudioSig. The envelope API requires `audiosig>=0.1.6,<0.2`. Contiguous static `Tempo` and `PitchShift` operations remain fused unless a `Gain` or fade separates them. Each envelope is one complete AudioSig call. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
 
-## Composition progress
+## Composition estimates and progress
 
-`Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
+`estimate_composition(job, sample_rate=None)` returns a deterministic `CompositionEstimate` before processing audio. It reports per-item and total output frames, duration, and an approximate frame-pass `total_work_units`; `unknown_items` contains zero-based item indexes whose source geometry is unavailable. If any item geometry is unknown, total frames, duration, and work remain unknown rather than being guessed. Work units account for source loading/integrity verification, grouped operations, resampling, item output, assembly, optional complete-output loudness, and final output preparation. They are a planning metric—not seconds or a promise of CPU time—and the model may evolve.
+
+`Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. When the estimate is known, events include monotonic `completed_work_units`, `total_work_units`, and `fraction`; otherwise the fraction and total stay `None`. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
 
 ```python
-events = []
-Composer().compose(job, on_progress=events.append)
+import sys
+
+from audiocompose import (
+    Composer,
+    ProgressEstimator,
+    estimate_composition,
+)
+
+estimate = estimate_composition(job)
+print(estimate.total_output_frames, estimate.total_work_units)
+
+timing = ProgressEstimator()  # one estimator per composition
+
+def on_progress(event):
+    view = timing.update(event)
+    if view.estimated_remaining_seconds is not None:
+        print(f"ETA {view.estimated_remaining_seconds:.1f}s", file=sys.stderr)
+
+Composer().compose(job, on_progress=on_progress)
 ```
 
-The callback is also available through `to_wav()` and `compose_to_wav()`. Callback exceptions propagate to the caller so producer code can detect programming errors.
+`ProgressTiming` reports elapsed time, fraction/percent when known, and optional estimated total/remaining seconds. `ProgressEstimator` uses a monotonic clock and observed work throughput; without an initial rate it warms up before showing an ETA. Callers may seed `initial_work_rate` in work units per second when they have a relevant prior measurement. Unknown totals stay indeterminate. Its status is `indeterminate`, `warming_up`, `estimated`, or `complete`. Timing is process-local and is never saved in AudioJob identity, provenance, schemas, results, or reports. Callback exceptions propagate to the caller. The callback is also available through `to_wav()` and `compose_to_wav()`.
 
 ## Mixed producers
 
@@ -79,6 +98,17 @@ audiocompose inspect chapter.audiojob
 audiocompose compose chapter.audiojob chapter.wav
 ```
 
+`compose`, `compose-renderplan`, and `compose-book` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
+
+```bash
+audiocompose compose chapter.audiojob chapter.wav --progress always
+audiocompose compose-renderplan chapter.renderplan.toml --render-dir render/chapter \
+  --output chapter.wav --progress always
+audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
+```
+
+The display includes elapsed time and a live ETA after enough work-rate samples exist. Numeric progress is omitted for unknown work geometry; named stages such as handoff preparation, composition, WAV writing/verification, and book chapter slots remain visible. A full composition may reach 100% before its output file is finished, so the renderer explicitly transitions to writing/verification and only reports command completion after success.
+
 ## Direct RenderPlan composition
 
 AudioCompose consumes the shared `renderplan` contract directly; it does not create plans, run preflight, synthesize speech, or interpret producer-specific intent. The `renderplan>=0.1.2,<0.2` package is a runtime dependency. The adapter validates the plan and complete manifest correspondence, then verifies every speech WAV's occurrence, segment ID, safe path, SHA-256, and WAV geometry before creating a generic `AudioJob`. Speech WAVs must be mono. Unsafe paths, symlinks, incomplete manifests, and mismatched or invalid artifacts fail closed.
@@ -107,6 +137,7 @@ The package-root `compose_renderplan` function verifies the handoff, materialize
 ```python
 import audiocompose
 
+events = []
 result = audiocompose.compose_renderplan(
     "chapter.renderplan.toml",
     render_dir="render/chapter",
@@ -115,11 +146,14 @@ result = audiocompose.compose_renderplan(
         sample_rate=24000,
         clip_policy="warn",
     ),
+    on_progress=events.append,
 )
 print(result.output, result.plan_id, result.duration_seconds)
 ```
 
 If `manifest` is omitted, the API looks for `render-manifest.toml` inside `render_dir`. If `media_root` is omitted, relative external `AudioItem` WAV paths resolve beneath the plan file's parent directory. `output_policy` accepts the existing `OutputPolicy` (including sample rate, clip policy, target LUFS, true-peak ceiling, and peak policy); output remains mono-only. The default emphasis policy is `segment_fallback`; choose `strict` to reject partial-span emphasis. `result.timeline` and `result.diagnostics` provide typed provenance and warnings. Set `save_audiojob="chapter.audiojob"` to persist the materialized intermediate job; otherwise no AudioJob artifact is created.
+
+The optional synchronous `on_progress` callback receives the same producer-neutral `CompositionProgress` events as `Composer`; its work/fraction fields and timing remain runtime-only.
 
 Low-level materialization is also available for callers that need an AudioJob without producing a final WAV:
 
@@ -192,20 +226,30 @@ Python orchestrators can compose the same exact variant without constructing an 
 ```python
 from audiocompose import BookComposeOptions, compose_book
 
+events = []
 result = compose_book(
     "BOOK",
     variant="narration--525856299523",
     chapters="5-7",  # source chapter numbers, not positional indexes
     options=BookComposeOptions(sample_rate=24000, target_lufs=-16.0),
-    on_progress=lambda event: print(event.kind, event.completed_chapters, event.chapter_id),
+    on_progress=events.append,
 )
+for event in events:
+    if event.composition is not None:
+        print(
+            event.kind,
+            event.chapter_id,
+            event.fraction,
+            event.composition.kind,
+            event.composition.fraction,
+        )
 
 assert result.exit_code == 0
 for outcome in result.outcomes:
     print(outcome.id, outcome.status, outcome.output, outcome.sha256)
 ```
 
-`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`); a callback failure is recorded as `progress.callback_failed`.
+`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`). Each event exposes a uniform chapter-slot `fraction` (the current chapter's core fraction fills its slot, not a duration-weighted forecast) and nested `composition` events while composing; nested work/timing stay runtime-only. A callback failure is recorded as `progress.callback_failed`.
 
 Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
 

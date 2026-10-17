@@ -11,6 +11,7 @@ from .composer import Composer
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .integrations.renderplan import load_and_materialize_renderplan_job
 from .model import AudioJob, CompositionResult, OutputPolicy
+from .progress import CompositionProgressCallback
 from .wav import atomic_write_wav
 
 EmphasisPolicy = Literal["segment_fallback", "strict"]
@@ -114,7 +115,11 @@ def _emphasis_diagnostics(job: AudioJob) -> tuple[CompositionDiagnostic, ...]:
 
 
 @overload
-def compose_renderplan(plan: RenderPlanComposeRequest) -> RenderPlanComposeResult: ...
+def compose_renderplan(
+    plan: RenderPlanComposeRequest,
+    *,
+    on_progress: CompositionProgressCallback | None = None,
+) -> RenderPlanComposeResult: ...
 
 
 @overload
@@ -128,6 +133,7 @@ def compose_renderplan(
     output_policy: OutputPolicy | None = None,
     save_audiojob: str | Path | None = None,
     emphasis_policy: EmphasisPolicy = "segment_fallback",
+    on_progress: CompositionProgressCallback | None = None,
 ) -> RenderPlanComposeResult: ...
 
 
@@ -141,12 +147,15 @@ def compose_renderplan(
     output_policy: OutputPolicy | None = None,
     save_audiojob: str | Path | None = None,
     emphasis_policy: EmphasisPolicy | None = None,
+    on_progress: CompositionProgressCallback | None = None,
 ) -> RenderPlanComposeResult:
     """Verify and compose a RenderPlan handoff into one atomically written WAV.
 
     When ``plan`` is a path and ``media_root`` is omitted, relative external
     AudioItems are resolved from the plan file's parent directory. The manifest
     defaults to ``render-manifest.toml`` inside ``render_dir``.
+    ``on_progress`` forwards core composition events; callback exceptions propagate and
+    prevent publication of the final WAV.
     """
     if isinstance(plan, RenderPlanComposeRequest):
         if any(
@@ -192,7 +201,7 @@ def compose_renderplan(
         emphasis_policy=request.emphasis_policy,
     )
     audiojob_path = job.save(request.save_audiojob) if request.save_audiojob is not None else None
-    composition = Composer().compose(job)
+    composition = Composer().compose(job, on_progress=on_progress)
     output_path = atomic_write_wav(
         request.output,
         composition.audio,

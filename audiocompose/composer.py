@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -13,9 +13,14 @@ from .job import validate_clip_geometry
 from .loudness import LoudnessResult, apply_complete_output_loudness
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, Silence
 from .operations import PitchShift, Tempo, apply_operation, apply_temporal_group
-from .progress import CompositionProgress, CompositionProgressCallback, ProgressItemKind
+from .progress import (
+    CompositionEstimate,
+    CompositionProgress,
+    CompositionProgressCallback,
+    ProgressItemKind,
+)
 from .resampling import resample_audio
-from .sources import AudioBufferSource
+from .sources import AudioBufferSource, AudioFileSource
 from .wav import prepare_output, write_wav
 
 
@@ -23,20 +28,27 @@ def _seconds_samples(seconds: float, rate: int) -> int:
     return round(seconds * rate)
 
 
-def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int | None:
+def _item_output_frames_and_work(
+    item: AudioClip | Silence, output_rate: int
+) -> tuple[int | None, float | None]:
     if isinstance(item, Silence):
-        return _seconds_samples(item.seconds, output_rate)
+        frames = _seconds_samples(item.seconds, output_rate)
+        return frames, float(frames)
+
     source = item.source
-    frames: int | None
-    source_rate: int | None
     if isinstance(source, AudioBufferSource):
-        frames = len(source.audio)
-        source_rate = source.sample_rate
+        source_frames: int | None = len(source.audio)
+        source_rate: int | None = source.sample_rate
+        source_load_passes = 1
     else:
-        frames = source.frames
+        source_frames = source.frames
         source_rate = source.sample_rate
-    if frames is None or source_rate is None:
-        return None
+        source_load_passes = 2 if source.expected_sha256 is not None else 1
+    if source_frames is None or source_rate is None:
+        return None, None
+    frames = source_frames
+
+    work_units = float(frames * source_load_passes)
     operation_index = 0
     while operation_index < len(item.operations):
         group_start = operation_index
@@ -48,6 +60,7 @@ def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int
             ):
                 group_end += 1
         group = item.operations[group_start:group_end]
+        work_units += frames
         if len(group) > 1:
             rate = math.prod(
                 group_operation.factor
@@ -58,9 +71,144 @@ def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int
         else:
             frames = operation.output_length(frames, source_rate)
         operation_index = group_end
+
     if source_rate != output_rate:
+        work_units += frames
         frames = round(frames * output_rate / source_rate)
-    return frames
+
+    # Item availability is a small pass in addition to the source/DSP work.
+    work_units += frames
+    return frames, work_units
+
+
+def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int | None:
+    return _item_output_frames_and_work(item, output_rate)[0]
+
+
+def _loudness_is_noop(job: AudioJob) -> bool:
+    policy = job.output.loudness
+    return (
+        not policy.collect_metrics
+        and policy.target_lufs is None
+        and policy.true_peak_ceiling_dbtp is None
+    )
+
+
+def estimate_composition(
+    job: AudioJob,
+    *,
+    sample_rate: int | None = None,
+) -> CompositionEstimate:
+    """Estimate deterministic output geometry and execution work without processing audio.
+
+    ``total_work_units`` is an approximate frame-pass metric, not a prediction
+    of wall-clock duration. If any source geometry is unknown, output totals and
+    the total work estimate remain unknown.
+    """
+    rate = job.output.sample_rate if sample_rate is None else sample_rate
+    if isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0:
+        raise AudioValidationError("sample_rate must be a positive integer or None")
+
+    geometry = tuple(_item_output_frames_and_work(item, rate) for item in job.items)
+    item_output_frames = tuple(frames for frames, _ in geometry)
+    unknown_items = tuple(
+        index for index, frames in enumerate(item_output_frames) if frames is None
+    )
+    total_output_frames = (
+        sum(frames for frames in item_output_frames if frames is not None)
+        if not unknown_items
+        else None
+    )
+    total_audio_seconds = total_output_frames / rate if total_output_frames is not None else None
+    total_work_units: float | None = None
+    if not unknown_items and total_output_frames is not None:
+        total_work_units = sum(work or 0.0 for _, work in geometry)
+        # Concatenation, optional complete-output loudness, and final clipping
+        # preparation are distinct execution passes.
+        total_work_units += total_output_frames
+        if not _loudness_is_noop(job):
+            total_work_units += total_output_frames
+        total_work_units += total_output_frames
+
+    return CompositionEstimate(
+        sample_rate=rate,
+        item_output_frames=item_output_frames,
+        total_output_frames=total_output_frames,
+        total_audio_seconds=total_audio_seconds,
+        total_work_units=total_work_units,
+        unknown_items=unknown_items,
+    )
+
+
+class _WorkProgressCallback:
+    def __init__(
+        self,
+        callback: CompositionProgressCallback,
+        job: AudioJob,
+        total_work_units: float | None,
+    ) -> None:
+        self._callback = callback
+        self._job = job
+        self._total_work_units = total_work_units
+        self._completed_work_units = 0.0
+        self._fraction = 0.0
+
+    def __call__(self, event: CompositionProgress) -> None:
+        completed = 0.0
+        if event.kind == "source_load_completed" and event.input_frames is not None:
+            item = self._job.items[event.item_index] if event.item_index is not None else None
+            passes = (
+                2
+                if isinstance(item, AudioClip)
+                and isinstance(item.source, AudioFileSource)
+                and item.source.expected_sha256 is not None
+                else 1
+            )
+            completed = event.input_frames * passes
+        elif event.kind == "operation_completed" and event.input_frames is not None:
+            group_size = event.details.get("processing_group_size")
+            group_start = event.details.get("processing_group_start")
+            is_last_group_event = (
+                isinstance(group_size, int)
+                and isinstance(group_start, int)
+                and event.operation_index == group_start + group_size - 1
+            )
+            if not isinstance(group_size, int) or is_last_group_event:
+                completed = event.input_frames
+        elif event.kind == "resample_completed" and event.input_frames is not None:
+            completed = event.input_frames
+        elif event.kind == "item_completed" and event.output_frames is not None:
+            completed = event.output_frames
+        elif event.kind == "assembly_completed" and event.output_frames is not None:
+            completed = event.output_frames
+        elif (
+            event.kind == "loudness_completed"
+            and event.input_frames is not None
+            and not _loudness_is_noop(self._job)
+        ):
+            completed = event.input_frames
+        elif event.kind == "compose_completed" and event.output_frames is not None:
+            completed = event.output_frames
+
+        self._completed_work_units += float(completed)
+        fraction: float | None = None
+        if self._total_work_units is not None:
+            if event.kind == "compose_completed":
+                fraction = 1.0
+            elif self._total_work_units == 0:
+                fraction = 0.0
+            else:
+                fraction = min(1.0, self._completed_work_units / self._total_work_units)
+                fraction = max(self._fraction, fraction)
+            self._fraction = fraction
+        self._callback(
+            replace(
+                event,
+                completed_work_units=self._completed_work_units,
+                total_work_units=self._total_work_units,
+                fraction=fraction,
+            )
+        )
 
 
 def _emit(callback: CompositionProgressCallback | None, event: CompositionProgress) -> None:
@@ -114,15 +262,10 @@ class Composer:
         job.validate(verify_sources=False)
         rate = self.sample_rate if self.sample_rate is not None else job.output.sample_rate
         total_items = len(job.items)
-        item_output_frames = [_predicted_output_frames(item, rate) for item in job.items]
-        total_output_frames = (
-            sum(frames for frames in item_output_frames if frames is not None)
-            if all(frames is not None for frames in item_output_frames)
-            else None
-        )
-        total_audio_seconds = (
-            total_output_frames / rate if total_output_frames is not None else None
-        )
+        estimate = estimate_composition(job, sample_rate=rate)
+        total_audio_seconds = estimate.total_audio_seconds
+        if on_progress is not None:
+            on_progress = _WorkProgressCallback(on_progress, job, estimate.total_work_units)
         completed_audio_seconds = 0.0
         metadata_kind_counts: dict[str, int] = {}
         for item in job.items:

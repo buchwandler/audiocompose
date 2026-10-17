@@ -38,6 +38,35 @@ Direct generic `materialize_renderplan_job` and `compose-renderplan` do not infe
 
 Book pause-policy overrides use the root `role` table, keyed by the resulting RenderPlan `SpeechItem.role`. They are not keyed directly by UtterPlan logical voice references. Source-pause validation checks known classes and table availability without treating logical voice references as role keys; actual durations resolve against the RenderPlan role selected for each pause and fail closed if that role/default lacks a value. Pre-release policy files using a `voice` root must be changed to `role` before using the v0.3 book integration.
 
+## Deterministic estimates and live progress
+
+AudioCompose v0.3 adds a producer-neutral runtime progress API. `estimate_composition(job, sample_rate=None)` returns per-item/output frame geometry and deterministic approximate frame-pass work through `CompositionEstimate`. It includes source loading/integrity verification, grouped operations, resampling, assembly, optional complete-output loudness, and final output preparation. If source geometry is unknown, total frames, duration, and work remain unknown; consumers must not turn that into a guessed percentage. Work units describe planned processing passes, not seconds, and the model may evolve.
+
+`CompositionProgress` gains optional `completed_work_units`, `total_work_units`, and `fraction`. Known fractions/work are monotonic; unknown totals remain indeterminate. `ProgressTiming` and `ProgressEstimator` provide elapsed time and an evidence-based live ETA from monotonic-clock work-rate observations, with optional caller-supplied initial work rate. Without an initial rate, the estimator warms up before deriving an ETA; caller-supplied initial rates and observed rates still produce finite, bounded predictions. Its status is `indeterminate`, `warming_up`, `estimated`, or `complete`. These values are process-local: they are not added to AudioJob identity/provenance, `CompositionResult`, JSON/TOML schemas, or the book report.
+
+```python
+from audiocompose import Composer, ProgressEstimator, estimate_composition
+
+estimate = estimate_composition(job)
+timing = ProgressEstimator()
+
+def on_progress(event):
+    view = timing.update(event)
+    if view.estimated_remaining_seconds is not None:
+        print(f"ETA {view.estimated_remaining_seconds:.1f}s")
+
+Composer().compose(job, on_progress=on_progress)
+```
+
+`compose_renderplan(..., on_progress=...)` forwards the generic composition events. Book callbacks carry nested core events in `BookComposeProgress.composition` and a uniform chapter-slot fraction; this is not a duration-weighted prediction. Core callbacks remain synchronous and do not print. Existing book callback failure reporting remains `progress.callback_failed`.
+
+The `compose`, `compose-renderplan`, and `compose-book` CLIs accept `--progress auto|always|never`. `auto` is the default: it displays only on a TTY stderr and is suppressed when `--json` is selected. `always` forces stderr output without contaminating JSON stdout; `never` disables it. TTY progress uses a throttled live line, while forced non-TTY output is newline-delimited. Unknown work totals use elapsed time and named lifecycle stages without fabricated percentages or ETA. Progress reaches command completion only after successful output handling.
+
+```bash
+audiocompose compose chapter.audiojob chapter.wav --progress always
+audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
+```
+
 ## No AudioJob schema migration
 
 The book bridge stores diagnostics provenance in the existing generic source and metadata mappings. AudioCompose v0.3.0 does not require an AudioJob schema-version change. Existing generic jobs can continue through `validate`, `inspect`, and `compose` unchanged.

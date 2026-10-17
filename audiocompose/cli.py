@@ -7,17 +7,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ._cli_progress import CliProgressRenderer
 from ._version import __version__
 from .analysis import ActivityConfig, ActivityReport, analyze_activity, measure_gap_near
 from .composer import Composer
 from .errors import AudioComposeError
 from .job import validate_clip_geometry
 from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
-from .wav import read_wav
+from .wav import read_wav, wav_info, write_wav
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="write machine-readable JSON")
+
+
+def _add_progress(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="render progress to stderr (default: auto)",
+    )
 
 
 def _add_analysis_options(parser: argparse.ArgumentParser) -> None:
@@ -49,6 +59,8 @@ def _parser() -> argparse.ArgumentParser:
     compose = subparsers.add_parser("compose")
     compose.add_argument("manifest")
     compose.add_argument("output")
+    _add_json(compose)
+    _add_progress(compose)
 
     timeline = subparsers.add_parser("timeline")
     timeline.add_argument("manifest")
@@ -87,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_json(compose_renderplan)
 
+    _add_progress(compose_renderplan)
     compose_book = subparsers.add_parser(
         "compose-book", help="compose selected chapters from a rendered book variant"
     )
@@ -128,6 +141,7 @@ def _parser() -> argparse.ArgumentParser:
         "--fail-fast", action="store_true", help="skip later chapters after the first failure"
     )
     _add_json(compose_book)
+    _add_progress(compose_book)
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -345,10 +359,27 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    progress_renderer: CliProgressRenderer | None = None
+    if args.command in {"compose", "compose-renderplan", "compose-book"}:
+        command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
+            args.command, "compose"
+        )
+        progress_renderer = CliProgressRenderer(
+            mode=args.progress,
+            json_mode=getattr(args, "json", False),
+            command=command,
+        )
     try:
         if args.command == "compose-book":
             from .book import BookComposeOptions, compose_book
 
+            if progress_renderer is not None:
+                progress_renderer.set_phase("preparing book")
+            book_progress_callback = (
+                progress_renderer.on_book_progress
+                if progress_renderer is not None and progress_renderer.enabled
+                else None
+            )
             book_result = compose_book(
                 args.book,
                 variant=args.variant,
@@ -369,7 +400,10 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 fail_fast=args.fail_fast,
                 emphasis_policy=args.emphasis_policy,
+                on_progress=book_progress_callback,
             )
+            if progress_renderer is not None:
+                progress_renderer.finish(success=book_result.exit_code == 0)
             if args.json:
                 print(json.dumps(book_result.to_dict(), indent=2, sort_keys=True))
             else:
@@ -402,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "compose-renderplan":
             import audiocompose
 
+            if progress_renderer is not None:
+                progress_renderer.set_phase("preparing handoff")
             api_result = audiocompose.compose_renderplan(
                 args.plan,
                 render_dir=args.render_dir,
@@ -411,7 +447,21 @@ def main(argv: list[str] | None = None) -> int:
                 output_policy=_output_policy_from_args(args),
                 save_audiojob=args.save_audiojob,
                 emphasis_policy=args.emphasis_policy,
+                on_progress=(
+                    progress_renderer.on_composition_progress
+                    if progress_renderer is not None and progress_renderer.enabled
+                    else None
+                ),
             )
+            if progress_renderer is not None and progress_renderer.enabled:
+                progress_renderer.set_phase("verifying output")
+                output_info = wav_info(api_result.output)
+                if (
+                    output_info.sample_rate != api_result.sample_rate
+                    or output_info.frames != api_result.frames
+                ):
+                    raise AudioComposeError("written output failed geometry verification")
+                progress_renderer.finish(success=True)
             timeline = [dict(item) for item in api_result.timeline]
             diagnostics = [
                 _renderplan_diagnostic_dict(diagnostic) for diagnostic in api_result.diagnostics
@@ -456,8 +506,43 @@ def main(argv: list[str] | None = None) -> int:
             result = _inspect(AudioJob.load(args.manifest, verify_sources=False))
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "compose":
-            Composer().to_wav(AudioJob.load(args.manifest, verify_sources=False), args.output)
-            print(f"wrote {args.output}")
+            if progress_renderer is not None:
+                progress_renderer.set_phase("preparing composition")
+            job = AudioJob.load(args.manifest, verify_sources=False)
+            compose_progress_callback = (
+                progress_renderer.on_composition_progress
+                if progress_renderer is not None and progress_renderer.enabled
+                else None
+            )
+            composition = Composer().compose(job, on_progress=compose_progress_callback)
+            if progress_renderer is not None:
+                progress_renderer.set_phase("writing output")
+            output_path = write_wav(
+                args.output,
+                composition.audio,
+                composition.sample_rate,
+                clip_policy=job.output.clip_policy,
+            )
+            frames = len(composition.audio)
+            sample_rate = composition.sample_rate
+            if progress_renderer is not None and progress_renderer.enabled:
+                progress_renderer.set_phase("verifying output")
+                output_info = wav_info(output_path)
+                if output_info.sample_rate != sample_rate or output_info.frames != frames:
+                    raise AudioComposeError("written output failed geometry verification")
+                frames = output_info.frames
+                progress_renderer.finish(success=True)
+            result = {
+                "composed": True,
+                "output": str(output_path),
+                "sample_rate": sample_rate,
+                "frames": frames,
+                "duration_seconds": frames / sample_rate,
+            }
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"wrote {output_path}")
         elif args.command == "timeline":
             result = _timeline(AudioJob.load(args.manifest, verify_sources=False))
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -505,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"wrote {args.output}")
         return 0
     except (AudioComposeError, ValueError, OSError) as exc:
+        if progress_renderer is not None:
+            progress_renderer.finish(success=False)
         if getattr(args, "json", False):
             print(
                 json.dumps(

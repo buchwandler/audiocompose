@@ -413,3 +413,50 @@ def test_cli_handler_calls_public_compose_function(monkeypatch, tmp_path, capsys
             "message": "fallback applied",
         }
     ]
+
+
+def test_public_api_forwards_core_progress_and_preserves_output(tmp_path) -> None:
+    render_dir = tmp_path / "renders"
+    speech = _speech()
+    artifact = _rendered(render_dir, speech)
+    plan = _plan(speech)
+    plan_path, _ = _save_handoff(tmp_path, plan, _manifest(plan, [artifact]), render_dir=render_dir)
+    observed_output = tmp_path / "observed.wav"
+    plain_output = tmp_path / "plain.wav"
+    events = []
+
+    audiocompose.compose_renderplan(
+        plan_path,
+        render_dir=render_dir,
+        output=observed_output,
+        output_policy=OutputPolicy(sample_rate=16_000),
+        on_progress=events.append,
+    )
+    audiocompose.compose_renderplan(
+        plan_path,
+        render_dir=render_dir,
+        output=plain_output,
+        output_policy=OutputPolicy(sample_rate=16_000),
+    )
+
+    assert events[0].kind == "compose_started"
+    assert events[-1].kind == "compose_completed"
+    observed_audio, observed_rate = read_wav(observed_output)
+    plain_audio, plain_rate = read_wav(plain_output)
+    assert observed_rate == plain_rate
+    assert np.array_equal(observed_audio, plain_audio)
+
+    request_output = tmp_path / "request-failed.wav"
+    request = audiocompose.RenderPlanComposeRequest(
+        plan=plan_path,
+        render_dir=render_dir,
+        output=request_output,
+        output_policy=OutputPolicy(sample_rate=16_000),
+    )
+
+    def fail(event):
+        raise RuntimeError(event.kind)
+
+    with pytest.raises(RuntimeError, match="compose_started"):
+        audiocompose.compose_renderplan(request, on_progress=fail)
+    assert not request_output.exists()

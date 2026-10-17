@@ -10,16 +10,22 @@ from audiocompose import (
     AudioJob,
     AutomationPoint,
     Composer,
+    CompositionEstimate,
+    CompositionProgress,
     FadeIn,
     FadeOut,
     Gain,
     LoudnessPolicy,
     OutputPolicy,
     PitchShift,
+    ProgressEstimator,
+    ProgressTiming,
     RatePitchEnvelope,
     Silence,
     Tempo,
+    estimate_composition,
 )
+from audiocompose.progress import ProgressEventKind
 from audiocompose.wav import write_wav
 
 
@@ -366,3 +372,194 @@ def test_rate_pitch_envelope_delegates_once_and_reports_operation_frames(monkeyp
     assert started[0].operation_count == completed[0].operation_count == 2
     assert started[0].input_frames == completed[0].input_frames == 48
     assert completed[0].output_frames == 96
+
+
+def test_estimate_composition_reports_known_geometry_and_frame_pass_work() -> None:
+    job = make_job(
+        AudioClip("clip", AudioBufferSource(np.ones(10, dtype=np.float32), 10)),
+        sample_rate=10,
+    )
+
+    estimate = estimate_composition(job)
+
+    assert isinstance(estimate, CompositionEstimate)
+    assert estimate.sample_rate == 10
+    assert estimate.item_output_frames == (10,)
+    assert estimate.total_output_frames == 10
+    assert estimate.total_audio_seconds == pytest.approx(1.0)
+    # source load + item availability + assembly + final output preparation
+    assert estimate.total_work_units == 50.0
+    assert estimate.unknown_items == ()
+
+
+def test_work_fraction_is_monotonic_and_completes_at_one() -> None:
+    job = make_job(
+        AudioClip("clip", AudioBufferSource(np.ones(10, dtype=np.float32), 10)),
+        sample_rate=10,
+    )
+    events = []
+    Composer().compose(job, on_progress=events.append)
+
+    fractions = [event.fraction for event in events]
+    assert fractions[0] == 0.0
+    assert all(value is not None and 0.0 <= value <= 1.0 for value in fractions)
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1.0
+    assert all(event.total_work_units == 50.0 for event in events)
+
+
+def test_unknown_geometry_keeps_work_total_and_fraction_unknown(tmp_path) -> None:
+    path = tmp_path / "unknown.wav"
+    write_wav(path, np.full(10, 0.2, dtype=np.float32), 10)
+    job = make_job(AudioClip("clip", AudioFileSource(path)), sample_rate=10)
+    estimate = estimate_composition(job)
+    events = []
+
+    Composer().compose(job, on_progress=events.append)
+
+    assert estimate.item_output_frames == (None,)
+    assert estimate.total_output_frames is None
+    assert estimate.total_work_units is None
+    assert estimate.unknown_items == (0,)
+    assert all(event.total_work_units is None and event.fraction is None for event in events)
+
+
+def test_fused_temporal_operations_count_one_processing_group() -> None:
+    job = make_job(
+        AudioClip(
+            "clip",
+            AudioBufferSource(np.ones(100, dtype=np.float32), 100),
+            (Tempo(0.5), PitchShift(0.0)),
+        ),
+        sample_rate=100,
+    )
+
+    estimate = estimate_composition(job)
+
+    output_frames = round(100 / 0.5)
+    # source + one fused DSP call, item availability, assembly, loudness, finalization
+    assert estimate.total_work_units == 100 + 100 + 4 * output_frames
+
+
+def test_last_item_does_not_complete_fraction_before_loudness_tail() -> None:
+    job = AudioJob(
+        (AudioClip("clip", AudioBufferSource(np.ones(100, dtype=np.float32), 100)),),
+        output=OutputPolicy(
+            sample_rate=100,
+            loudness=LoudnessPolicy(
+                target_lufs=None,
+                true_peak_ceiling_dbtp=None,
+                collect_metrics=True,
+            ),
+        ),
+    )
+    events = []
+
+    Composer().compose(job, on_progress=events.append)
+
+    item_completed = next(event for event in events if event.kind == "item_completed")
+    assert item_completed.fraction is not None and item_completed.fraction < 1.0
+    assert events[-1].fraction == 1.0
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def timing_event(
+    completed_work: float | None,
+    total_work: float | None,
+    *,
+    kind: ProgressEventKind = "compose_started",
+) -> CompositionProgress:
+    fraction = (
+        completed_work / total_work
+        if completed_work is not None and total_work is not None and total_work > 0
+        else None
+    )
+    return CompositionProgress(
+        kind=kind,
+        completed_items=0,
+        total_items=1,
+        completed_work_units=completed_work,
+        total_work_units=total_work,
+        fraction=fraction,
+    )
+
+
+def test_progress_estimator_reports_unknown_warming_estimated_and_complete() -> None:
+    clock = FakeClock()
+    estimator = ProgressEstimator(clock=clock)
+
+    unknown = estimator.update(timing_event(None, None))
+    assert isinstance(unknown, ProgressTiming)
+    assert unknown.status == "indeterminate"
+    assert unknown.percent is None
+    assert unknown.estimated_remaining_seconds is None
+
+    clock.advance(1.0)
+    warming = estimator.update(timing_event(0.0, 100.0))
+    assert warming.status == "warming_up"
+    assert warming.estimated_remaining_seconds is None
+
+    clock.advance(2.0)
+    first_estimate = estimator.update(timing_event(20.0, 100.0))
+    assert first_estimate.status == "estimated"
+    assert first_estimate.estimated_remaining_seconds == pytest.approx(8.0)
+    assert first_estimate.estimated_total_seconds == pytest.approx(11.0)
+
+    clock.advance(2.0)
+    later_estimate = estimator.update(timing_event(40.0, 100.0))
+    assert later_estimate.estimated_remaining_seconds is not None
+    assert first_estimate.estimated_remaining_seconds is not None
+    assert later_estimate.estimated_remaining_seconds < first_estimate.estimated_remaining_seconds
+    assert later_estimate.percent == 40.0
+
+    complete = estimator.update(timing_event(100.0, 100.0, kind="compose_completed"))
+    assert complete.status == "complete"
+    assert complete.estimated_remaining_seconds == 0.0
+    assert complete.estimated_total_seconds == complete.elapsed_seconds
+
+
+def test_progress_estimator_supports_initial_rate_and_monotonic_percent() -> None:
+    clock = FakeClock()
+    estimator = ProgressEstimator(clock=clock, initial_work_rate=10.0)
+
+    initial = estimator.update(timing_event(20.0, 100.0))
+    assert initial.status == "estimated"
+    assert initial.estimated_remaining_seconds == pytest.approx(8.0)
+
+    backwards = estimator.update(timing_event(10.0, 100.0))
+    assert backwards.percent == initial.percent
+    assert backwards.estimated_remaining_seconds == pytest.approx(8.0)
+
+
+def test_progress_estimator_handles_zero_time_and_nonfinite_eta() -> None:
+    clock = FakeClock()
+    estimator = ProgressEstimator(clock=clock)
+
+    assert estimator.update(timing_event(0.0, 100.0)).status == "warming_up"
+    assert estimator.update(timing_event(50.0, 100.0)).estimated_remaining_seconds is None
+    clock.advance(1.0)
+    measured = estimator.update(timing_event(50.0, 100.0))
+    assert measured.status == "estimated"
+    assert measured.estimated_remaining_seconds == pytest.approx(1.0)
+
+    huge = ProgressEstimator(clock=clock, initial_work_rate=1e-9)
+    timing = huge.update(timing_event(0.0, 1e12))
+    assert timing.status == "warming_up"
+    assert timing.estimated_remaining_seconds is None
+    assert timing.estimated_total_seconds is None
+
+
+def test_progress_estimator_rejects_invalid_initial_rates() -> None:
+    for value in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive finite"):
+            ProgressEstimator(initial_work_rate=value)
