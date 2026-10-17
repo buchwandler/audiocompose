@@ -13,7 +13,7 @@ from .composer import Composer
 from .errors import AudioComposeError
 from .job import validate_clip_geometry
 from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
-from .wav import read_wav, write_wav
+from .wav import read_wav
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
@@ -268,60 +268,13 @@ def _output_policy_from_args(args: argparse.Namespace) -> OutputPolicy:
     )
 
 
-def _renderplan_timeline(job: AudioJob, composition: CompositionResult) -> list[dict[str, Any]]:
-    timeline: list[dict[str, Any]] = []
-    for item, composed in zip(job.items, composition.items, strict=True):
-        metadata = dict(item.metadata)
-        kind = str(metadata.get("kind", composed.kind))
-        entry: dict[str, Any] = {
-            "id": item.id,
-            "kind": kind,
-            "start_sample": composed.start_sample,
-            "end_sample": composed.end_sample,
-            "duration_seconds": composed.duration_samples / composition.sample_rate,
-        }
-        for key in (
-            "renderplan.segment_number",
-            "renderplan.segment_id",
-            "renderplan.source",
-            "renderplan.pause_id",
-            "renderplan.pause_reason",
-            "renderplan.pause_source",
-            "renderplan.audio_id",
-            "renderplan.audio.src",
-            "renderplan.audio.options",
-            "render_manifest.wav",
-            "render_manifest.wav_sha256",
-            "renderplan.emphasis",
-        ):
-            if key in metadata:
-                entry[key] = metadata[key]
-        timeline.append(entry)
-    return timeline
-
-
-def _renderplan_emphasis_diagnostics(job: AudioJob) -> list[dict[str, Any]]:
-    diagnostics: list[dict[str, Any]] = []
-    for item in job.items:
-        report = item.metadata.get("renderplan.emphasis")
-        if not isinstance(report, dict) or report.get("scope") != "segment_fallback":
-            continue
-        segment_number = item.metadata.get("renderplan.segment_number")
-        ranges = report.get("partial_ranges", [])
-        diagnostics.append(
-            {
-                "code": "emphasis.segment_fallback",
-                "severity": "warning",
-                "segment_number": segment_number,
-                "character_ranges": ranges,
-                "gain_db": report.get("gain_db"),
-                "message": (
-                    f"speech {segment_number}: applied +{report.get('gain_db')} dB to the entire "
-                    f"segment for character range(s) {ranges}; no trusted word-level sample alignment is available"
-                ),
-            }
-        )
-    return diagnostics
+def _renderplan_diagnostic_dict(diagnostic: Any) -> dict[str, Any]:
+    return {
+        "code": diagnostic.code,
+        "severity": diagnostic.severity.value,
+        **dict(diagnostic.context),
+        "message": diagnostic.message,
+    }
 
 
 def _print_renderplan_explanation(
@@ -447,50 +400,40 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  skipped:   {book_result.skipped}")
             return book_result.exit_code
         elif args.command == "compose-renderplan":
-            from .integrations.renderplan import load_and_materialize_renderplan_job
+            import audiocompose
 
-            plan_path = Path(args.plan).expanduser()
-            media_root = (
-                Path(args.media_root).expanduser()
-                if args.media_root is not None
-                else plan_path.absolute().parent
-            )
-            job = load_and_materialize_renderplan_job(
+            api_result = audiocompose.compose_renderplan(
                 args.plan,
-                args.manifest,
                 render_dir=args.render_dir,
+                output=args.output,
+                manifest=args.manifest,
+                media_root=args.media_root,
                 output_policy=_output_policy_from_args(args),
-                media_root=media_root,
+                save_audiojob=args.save_audiojob,
                 emphasis_policy=args.emphasis_policy,
             )
-            audiojob_path = job.save(args.save_audiojob) if args.save_audiojob else None
-            composition = Composer().compose(job)
-            output_path = write_wav(
-                args.output,
-                composition.audio,
-                composition.sample_rate,
-                clip_policy=job.output.clip_policy,
-            )
-            timeline = _renderplan_timeline(job, composition)
-            diagnostics = _renderplan_emphasis_diagnostics(job)
+            timeline = [dict(item) for item in api_result.timeline]
+            diagnostics = [
+                _renderplan_diagnostic_dict(diagnostic) for diagnostic in api_result.diagnostics
+            ]
             result = {
                 "composed": True,
-                "output": str(output_path),
-                "plan_id": job.source["renderplan.plan_id"],
-                "manifest_id": job.source["render_manifest.manifest_id"],
-                "sample_rate": composition.sample_rate,
-                "frames": len(composition.audio),
-                "duration_seconds": composition.duration_seconds,
+                "output": str(api_result.output),
+                "plan_id": api_result.plan_id,
+                "manifest_id": api_result.manifest_id,
+                "sample_rate": api_result.sample_rate,
+                "frames": api_result.frames,
+                "duration_seconds": api_result.duration_seconds,
                 "timeline": timeline,
                 "emphasis_policy": args.emphasis_policy,
                 "diagnostics": diagnostics,
             }
-            if audiojob_path is not None:
-                result["audiojob"] = str(audiojob_path)
+            if api_result.audiojob is not None:
+                result["audiojob"] = str(api_result.audiojob)
             if args.json:
                 print(json.dumps(result, indent=2, sort_keys=True))
             else:
-                print(f"wrote {output_path} ({composition.duration_seconds:.3f}s)")
+                print(f"wrote {api_result.output} ({api_result.duration_seconds:.3f}s)")
                 for diagnostic in diagnostics:
                     print(f"warning: {diagnostic['message']}")
                 if args.explain:

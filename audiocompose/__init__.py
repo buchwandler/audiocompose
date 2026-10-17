@@ -30,6 +30,11 @@ from .operations import (
     Tempo,
 )
 from .progress import CompositionProgress, CompositionProgressCallback
+from .renderplan import (
+    RenderPlanComposeRequest,
+    RenderPlanComposeResult,
+    compose_renderplan,
+)
 from .schema import audiojob_schema
 from .sources import AudioBufferSource, AudioFileSource
 
@@ -62,6 +67,7 @@ __all__ = [
     "ComposedSpan",
     "Composer",
     "compose_book",
+    "compose_renderplan",
     "default_book_output_policy",
     "resolve_book",
     "DiagnosticSeverity",
@@ -74,6 +80,8 @@ __all__ = [
     "OutputPolicy",
     "PitchShift",
     "RatePitchEnvelope",
+    "RenderPlanComposeRequest",
+    "RenderPlanComposeResult",
     "Silence",
     "Tempo",
     "audiojob_schema",

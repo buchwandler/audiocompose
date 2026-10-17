@@ -100,7 +100,28 @@ audiocompose compose-renderplan chapter.renderplan.toml \
 RenderPlan `emphasis` controls are realized after synthesis as bounded relative gain: default/`moderate` +1.5 dB, `reduced` +0.75 dB, and `strong` +2.5 dB. Both integrated commands, `compose-renderplan` and `compose-book`, default to `--emphasis-policy segment_fallback`; this boosts the entire speech segment for partial character ranges and reports that word-level alignment was unavailable. Use `--emphasis-policy strict` to reject partial emphasis when exact alignment is required (the error recommends upstream splitting/alignment). Full-span controls are applied at clip scope. Overlapping controls choose the strongest level, never sum. These are relative pre-normalization gains; final loudness/peak processing may reduce the audible difference, and emphasis does not promise native prosody. The library materializer defaults to strict; generic AudioJob composition does not interpret speech controls.
 The adapter follows `RenderPlan.flow` in order. It materializes each pause using its declared millisecond duration, including zero-duration pauses; there is no symbolic pause policy or inferred timing. Source spans are retained as opaque provenance metadata, not fabricated sample-aligned `AudioSpan` values. The Composer's normal seconds-to-samples behavior and output policy still apply.
 
-Python callers can load and materialize the handoff directly:
+### Public single-document Python API
+
+The package-root `compose_renderplan` function verifies the handoff, materializes and composes one document, atomically writes its WAV, and returns a typed `RenderPlanComposeResult`. Readio and other callers can use this supported API without importing `audiocompose.integrations`:
+
+```python
+import audiocompose
+
+result = audiocompose.compose_renderplan(
+    "chapter.renderplan.toml",
+    render_dir="render/chapter",
+    output="chapter.wav",
+    output_policy=audiocompose.OutputPolicy(
+        sample_rate=24000,
+        clip_policy="warn",
+    ),
+)
+print(result.output, result.plan_id, result.duration_seconds)
+```
+
+If `manifest` is omitted, the API looks for `render-manifest.toml` inside `render_dir`. If `media_root` is omitted, relative external `AudioItem` WAV paths resolve beneath the plan file's parent directory. `output_policy` accepts the existing `OutputPolicy` (including sample rate, clip policy, target LUFS, true-peak ceiling, and peak policy); output remains mono-only. The default emphasis policy is `segment_fallback`; choose `strict` to reject partial-span emphasis. `result.timeline` and `result.diagnostics` provide typed provenance and warnings. Set `save_audiojob="chapter.audiojob"` to persist the materialized intermediate job; otherwise no AudioJob artifact is created.
+
+Low-level materialization is also available for callers that need an AudioJob without producing a final WAV:
 
 ```python
 from audiocompose.integrations.renderplan import load_and_materialize_renderplan_job
