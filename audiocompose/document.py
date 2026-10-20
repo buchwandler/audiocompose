@@ -21,6 +21,7 @@ from .document_contract import (
 )
 from .errors import DocumentComposeError, HandoffValidationError, IntegrationError
 from .integrations.renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+from .progress import CompositionProgressCallback
 
 
 def _error(
@@ -660,6 +661,7 @@ def compose_document(
     save_audiojob: str | Path | None = None,
     force: bool = False,
     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
+    on_progress: CompositionProgressCallback | None = None,
 ) -> DocumentComposeResult:
     """Verify and compose one rendered SSMDDoc using its selected workspace variant."""
     from .composer import Composer
@@ -813,7 +815,7 @@ def compose_document(
             context.output_variant_dir.mkdir(parents=True, exist_ok=True)
             if context.output_variant_dir.is_symlink():
                 raise OSError(f"refusing symlink output directory: {context.output_variant_dir}")
-            composition = Composer().compose(job)
+            composition = Composer().compose(job, on_progress=on_progress)
             atomic_write_wav(
                 context.output_path,
                 composition.audio,

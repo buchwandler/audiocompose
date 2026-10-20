@@ -98,7 +98,7 @@ audiocompose inspect chapter.audiojob
 audiocompose compose chapter.audiojob chapter.wav
 ```
 
-`compose`, `compose-renderplan`, and `compose-book` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
+`compose`, `compose-renderplan`, `compose-book`, and `compose-document` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
 
 ```bash
 audiocompose compose chapter.audiojob chapter.wav --progress always
@@ -283,23 +283,34 @@ The selected variant is the exact `<variant>` directory under each producer root
 audiocompose compose-document . \\
   --variant narration--<fingerprint> \\
   --sample-rate 24000 \\
+  --progress always \\
   --json
 ```
 
-The flat CLI also accepts `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
+The flat CLI also accepts `--progress`, `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
 
 The package-root API exposes the same service:
 
 ```python
-from audiocompose import DocumentComposeOptions, compose_document
+from audiocompose import (
+    CompositionProgress,
+    CompositionProgressCallback,
+    DocumentComposeOptions,
+    compose_document,
+)
 
+events: list[CompositionProgress] = []
+progress_callback: CompositionProgressCallback = events.append
 result = compose_document(
     ".",
     variant="narration--525856299523",
     options=DocumentComposeOptions(sample_rate=24_000),
+    on_progress=progress_callback,
 )
 print(result.status, result.output, result.report_path)
 ```
+
+`on_progress` uses the existing `CompositionProgressCallback` contract and reports actual Composer work. When a verified output is reused, no DSP runs and no composition events are emitted; AudioCompose does not synthesize progress for reuse. Progress is observational only: it does not change artifact identity, output roots, or output/report behavior. The `renderplan_root`, `voicerender_root`, `output_root`, and media-root overrides work as before.
 
 UtterPlan owns semantic planning and VoiceRender owns synthesis and producer-native controls. AudioCompose follows RenderPlan flow order and role semantics, derives symbolic pause durations from the RenderProfile snapshot by default (or accepts a strict explicit pause policy), and realizes only the explicitly deferred emphasis capability it owns. All completed audio is lowered to the ordinary producer-neutral `AudioJob` and passed through the existing `Composer`; no document-specific DSP path is introduced.
 

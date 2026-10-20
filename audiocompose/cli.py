@@ -182,6 +182,7 @@ def _parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="recompose and replace an existing document output"
     )
     _add_json(compose_document)
+    _add_progress(compose_document)
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -400,7 +401,7 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     progress_renderer: CliProgressRenderer | None = None
-    if args.command in {"compose", "compose-renderplan", "compose-book"}:
+    if args.command in {"compose", "compose-renderplan", "compose-book", "compose-document"}:
         command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
             args.command, "compose"
         )
@@ -476,6 +477,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "compose-document":
             from .document import DocumentComposeOptions, compose_document
 
+            if progress_renderer is not None:
+                progress_renderer.set_phase("preparing document")
+            document_progress_callback = (
+                progress_renderer.on_composition_progress
+                if progress_renderer is not None and progress_renderer.enabled
+                else None
+            )
             document_result = compose_document(
                 args.document,
                 variant=args.variant,
@@ -494,7 +502,10 @@ def main(argv: list[str] | None = None) -> int:
                 save_audiojob=args.save_audiojob,
                 force=args.force,
                 emphasis_policy=args.emphasis_policy,
+                on_progress=document_progress_callback,
             )
+            if progress_renderer is not None:
+                progress_renderer.finish(success=document_result.exit_code == 0)
             if args.json:
                 print(json.dumps(document_result.to_dict(), indent=2, sort_keys=True))
             else:

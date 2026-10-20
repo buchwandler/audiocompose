@@ -312,7 +312,19 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     from audiocompose.job import load_job
 
     workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
-    first = compose_document(workspace, variant=variant)
+    events = []
+    first = compose_document(workspace, variant=variant, on_progress=events.append)
+    assert events
+    assert events[0].kind == "compose_started"
+    assert events[-1].kind == "compose_completed"
+    assert events[0].completed_items == 0
+    assert events[0].total_items == events[-1].completed_items == events[-1].total_items == 1
+    item_events = [event for event in events if event.item_index is not None]
+    assert item_events
+    assert all(event.item_index == 0 and event.total_items == 1 for event in item_events)
+    assert [event.completed_items for event in events] == sorted(
+        event.completed_items for event in events
+    )
 
     assert first.status == "written"
     assert first.success and first.exit_code == 0
@@ -329,8 +341,15 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     assert report["pause_policy_provenance"] == "renderprofile"
     assert report["output_geometry"]["sha256"] == first.sha256
 
-    reused = compose_document(workspace, variant=variant)
+    output_before_reuse = first.output.stat()
+    reuse_events = []
+    reused = compose_document(workspace, variant=variant, on_progress=reuse_events.append)
     assert reused.status == "reused"
+    output_after_reuse = first.output.stat()
+    assert reuse_events == []
+    assert reused.sha256 == first.sha256
+    assert output_after_reuse.st_size == output_before_reuse.st_size
+    assert output_after_reuse.st_mtime_ns == output_before_reuse.st_mtime_ns
 
     diagnostics_path = workspace / "voicerender" / variant / DOCUMENT_ID / "render-diagnostics.json"
     diagnostics_path.write_text(
@@ -530,12 +549,16 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
         "--sample-rate",
         "8000",
         "--json",
+        "--progress",
+        "always",
     ]
 
     assert main(command) == 0
     captured = capsys.readouterr()
     result = json.loads(captured.out)
-    assert captured.err == ""
+    assert "preparing document" in captured.err
+    assert "composing" in captured.err
+    assert "complete" in captured.err
     assert result["format"] == "audiocompose-document-result"
     assert result["status"] == "written"
     assert result["sample_rate"] == 8_000
@@ -548,7 +571,10 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
     human_command[1] = str(workspace / DOCUMENT_SOURCE_FILENAME)
     human_command.remove("--json")
     assert main(human_command) == 0
-    human = capsys.readouterr().out
+    human_capture = capsys.readouterr()
+    human = human_capture.out
+    assert "preparing document" in human_capture.err
+    assert "complete" in human_capture.err
     assert "AudioCompose document compose" in human
     assert "document:    document-0001" in human
     assert "status:      reused" in human
