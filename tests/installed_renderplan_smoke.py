@@ -45,7 +45,12 @@ from voicerender.engines.selection import EngineRequest
 from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_render import render_renderplan
 
-from audiocompose import BookComposeResult, compose_book
+from audiocompose import (
+    BookComposeResult,
+    DocumentComposeResult,
+    compose_book,
+    compose_document,
+)
 from audiocompose.integrations.renderplan_metadata import (
     RENDER_DIAGNOSTICS_FILENAME,
     VOICERENDER_DEFERRED_CAPABILITIES,
@@ -164,11 +169,89 @@ class _Adapter:
         yield self.session
 
 
+def _compose_installed_document(root: Path, profile: RenderProfile) -> DocumentComposeResult:
+    text = "Installed VoiceRender document-workspace smoke."
+    workspace = root / "document-workspace"
+    utterplan_dir = workspace / "utterplan"
+    utterplan_dir.mkdir(parents=True)
+    (workspace / "document.ssmd.md").write_text(text + "\n", encoding="utf-8")
+    (workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "ssmdconvert.document",
+                "schema_version": 1,
+                "ssmd_version": "0.9",
+                "document": {"id": "document-0001", "path": "document.ssmd.md"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source_plan = utterplan.FlowPlan(language="en-US", flow=())
+    source_path = utterplan_dir / "document.utterplan.toml"
+    source_plan.save(source_path)
+    profile_id = profile.profile_id or profile.computed_id()
+    fingerprint = profile_id.removeprefix("sha256:")[:12]
+    variant = f"document-smoke--{fingerprint}"
+    variant_dir = workspace / "renderplan" / variant
+    render_dir = workspace / "voicerender" / variant / "document-0001"
+    variant_dir.mkdir(parents=True)
+    render_dir.mkdir(parents=True)
+    save_profile(profile, variant_dir / "renderprofile.toml")
+
+    speech = SpeechItem(
+        number=1,
+        text=text,
+        language="en-US",
+        role="narrator",
+        binding={
+            "renderer": ENGINE_ID,
+            "target_id": TARGET_ID,
+            "voice": "smoke-voice",
+        },
+        controls=(SpeechControl(0, len(text), "emphasis", {"level": "moderate"}),),
+        source=(SourceSpan("document.ssmd.md", 0, len(text)),),
+    )
+    plan = RenderPlan(
+        source_plan_id=source_plan.plan_id,
+        render_profile_id=profile_id,
+        flow=(speech,),
+    ).with_identity()
+    save_plan(plan, variant_dir / "document.renderplan.toml")
+    preflight = preflight_render_plan(
+        plan,
+        workspace / "preflight.toml",
+        emphasis_policy="defer-to-compose",
+    )
+    assert preflight.status == "ok", preflight.to_dict()
+    rendered = render_renderplan(
+        plan,
+        preflight=preflight,
+        output_dir=render_dir,
+        cache_dir=workspace / "cache",
+        emphasis_policy="defer-to-compose",
+    )
+    assert not rendered.failed, rendered.error
+    assert rendered.manifest.complete
+    assert _version_tuple(rendered.manifest.producer.version) >= (0, 2, 4)
+
+    result = compose_document(workspace, variant=variant)
+    assert isinstance(result, DocumentComposeResult)
+    assert result.status == "written"
+    assert result.output.is_file()
+    assert result.audiojob.is_dir()
+    assert result.report_path.is_file()
+    load_job(result.audiojob).validate(verify_sources=True)
+    return result
+
+
 def main() -> None:
     assert Path(sys.prefix).resolve() in Path(__import__("audiocompose").__file__).resolve().parents
     assert Path(sys.prefix).resolve() in Path(voicerender.__file__).resolve().parents
+    assert Path(sys.prefix).resolve() in Path(utterplan.__file__).resolve().parents
     assert _version_tuple(version("renderplan")) >= (0, 1, 2)
-    assert _version_tuple(version("voicerender")) >= (0, 2, 0)
+    assert (0, 6, 4) <= _version_tuple(version("utterplan")) < (0, 7, 0)
+    assert _version_tuple(version("voicerender")) >= (0, 2, 4)
     assert _version_tuple(version("voicerender")) < (0, 3, 0)
 
     register_adapter(_Adapter())
@@ -250,7 +333,7 @@ def main() -> None:
     assert not rendered.failed, rendered.error
     manifest = load_manifest(rendered.manifest_path)
     assert manifest.complete and manifest.producer.name == "voicerender"
-    assert _version_tuple(manifest.producer.version) >= (0, 2, 0)
+    assert _version_tuple(manifest.producer.version) >= (0, 2, 4)
     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     assert diagnostics["pending_composition"] is True
@@ -323,7 +406,9 @@ def main() -> None:
     assert (
         result.outcomes[0].render_diagnostics_sha256 == job.source[VOICERENDER_DIAGNOSTICS_SHA256]
     )
-    print("installed VoiceRender v0.2 artifact -> AudioCompose book smoke passed")
+    document_result = _compose_installed_document(root, profile)
+    assert document_result.document_id == "document-0001"
+    print("installed VoiceRender v0.2.4 artifact -> AudioCompose book and document smoke passed")
 
 
 if __name__ == "__main__":

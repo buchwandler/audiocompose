@@ -29,6 +29,25 @@ class BookComposeError(AudioComposeError):
         self.details = dict(details or {})
 
 
+class DocumentComposeError(AudioComposeError):
+    """Document orchestration error with stable downstream-facing attributes."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        document_id: str | None = None,
+        variant: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.document_id = document_id
+        self.variant = variant
+        self.details = dict(details or {})
+
+
 class AudioValidationError(AudioComposeError, ValueError):
     """An AudioJob or audio source is invalid."""
 

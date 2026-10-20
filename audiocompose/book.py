@@ -32,6 +32,7 @@ from renderplan import (
     validate_set_chapter_plan,
 )
 
+from ._workspace_policy import build_workspace_output_policy
 from .errors import BookComposeError, HandoffValidationError, IntegrationError
 from .integrations.renderplan_metadata import (
     RENDER_DIAGNOSTICS_FILENAME,
@@ -41,7 +42,6 @@ from .integrations.renderplan_metadata import (
     VOICERENDER_DIAGNOSTICS_SHA256,
     VOICERENDER_EMPHASIS_POLICY,
 )
-from .loudness import LoudnessPolicy
 from .model import OutputPolicy
 from .progress import CompositionProgress
 
@@ -369,34 +369,7 @@ def default_book_output_policy(
     options: BookComposeOptions | None = None,
 ) -> OutputPolicy:
     """Build a policy from CLI-compatible defaults and optional public overrides."""
-    settings = options or BookComposeOptions()
-    defaults = OutputPolicy()
-    loudness_defaults = defaults.loudness
-    return OutputPolicy(
-        sample_rate=(
-            defaults.sample_rate if settings.sample_rate is None else settings.sample_rate
-        ),
-        channels=defaults.channels if settings.channels is None else settings.channels,
-        clip_policy=defaults.clip_policy if settings.clip_policy is None else settings.clip_policy,
-        loudness=LoudnessPolicy(
-            target_lufs=settings.target_lufs,
-            true_peak_ceiling_dbtp=(
-                loudness_defaults.true_peak_ceiling_dbtp
-                if settings.true_peak_ceiling_dbtp is None
-                else settings.true_peak_ceiling_dbtp
-            ),
-            peak_policy=(
-                loudness_defaults.peak_policy
-                if settings.peak_policy is None
-                else settings.peak_policy
-            ),
-            collect_metrics=(
-                loudness_defaults.collect_metrics
-                if settings.collect_metrics is None
-                else settings.collect_metrics
-            ),
-        ),
-    )
+    return build_workspace_output_policy(options)
 
 
 @dataclass(frozen=True, slots=True)

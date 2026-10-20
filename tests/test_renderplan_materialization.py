@@ -926,6 +926,6 @@ def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
     assert not any(
         item.lower().startswith(("voicerender", "utterplan")) for item in base_dependencies
     )
-    assert any(item.startswith("utterplan>=0.6.3,<0.7") for item in extra_dependencies)
-    assert any(item.startswith("voicerender>=0.2.0,<0.3") for item in extra_dependencies)
+    assert any(item.startswith("utterplan>=0.6.4,<0.7") for item in extra_dependencies)
+    assert any(item.startswith("voicerender>=0.2.4,<0.3") for item in extra_dependencies)
     assert (project_path.parent / "audiocompose/integrations/voicerender.py").is_file()

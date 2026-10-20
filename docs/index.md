@@ -4,7 +4,7 @@ AudioCompose composes completed audio through producer-neutral `AudioJob` values
 
 ## Single-document RenderPlan composition
 
-`audiocompose.compose_renderplan(...)` is the public package-root API for composing one completed RenderPlan and RenderManifest into a WAV. It validates the handoff and speech artifacts, materializes the generic AudioJob, composes the document, and returns a typed `RenderPlanComposeResult` with output metadata, timeline, and emphasis diagnostics. Callers such as Readio do not need to import `audiocompose.integrations`.
+`audiocompose.compose_renderplan(...)` is the public package-root API for composing one completed RenderPlan and RenderManifest into a WAV. It validates the handoff and speech artifacts, materializes the generic AudioJob, composes the document, and returns a typed `RenderPlanComposeResult` with output metadata, timeline, and emphasis diagnostics. Other Python orchestration clients do not need to import `audiocompose.integrations`.
 
 ```python
 import audiocompose
@@ -18,6 +18,14 @@ result = audiocompose.compose_renderplan(
 ```
 
 The manifest defaults to `render-manifest.toml` inside `render_dir`; when `media_root` is omitted, relative external media resolves beneath the plan file's parent. `OutputPolicy` carries the existing sample-rate, clipping, and loudness/peak controls, with mono-only output. Emphasis defaults to `segment_fallback`; `strict` rejects partial-span emphasis. Set `save_audiojob` only when the intermediate job should be persisted. See the [direct RenderPlan composition guide](https://github.com/buchwandler/audiocompose#direct-renderplan-composition) for the CLI workflow and full behavior.
+
+## SSMDDoc workspace composition
+
+`audiocompose compose-document WORKSPACE --variant VARIANT` composes one rendered SSMDDoc from the direct `utterplan/`, `renderplan/<variant>/`, `voicerender/<variant>/`, and `audiocompose/<variant>/` stages. It accepts the workspace root or canonical `document.ssmd.md`, requires a complete VoiceRender handoff, and writes a WAV, reproducible AudioJob, and atomic compose report under the AudioCompose variant directory. The profile snapshot supplies the default symbolic pause policy; RenderPlan roles remain authoritative, and only explicitly deferred emphasis owned by AudioCompose is realized. See [SSMDDoc workspace composition in the README](https://github.com/buchwandler/audiocompose#ssmdoc-document-workspace-composition) for layout, CLI controls, Python API, provenance reuse, and ownership details.
+
+```bash
+audiocompose compose-document . --variant narration--<fingerprint> --json
+```
 
 ## Book-level RenderPlan composition
 

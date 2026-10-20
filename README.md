@@ -132,7 +132,7 @@ The adapter follows `RenderPlan.flow` in order. It materializes each pause using
 
 ### Public single-document Python API
 
-The package-root `compose_renderplan` function verifies the handoff, materializes and composes one document, atomically writes its WAV, and returns a typed `RenderPlanComposeResult`. Readio and other callers can use this supported API without importing `audiocompose.integrations`:
+The package-root `compose_renderplan` function verifies the handoff, materializes and composes one document, atomically writes its WAV, and returns a typed `RenderPlanComposeResult`. Other Python orchestration clients can use this supported API without importing `audiocompose.integrations`:
 
 ```python
 import audiocompose
@@ -183,7 +183,7 @@ audiocompose compose-book BOOK \
   --variant narration--<fingerprint>
 ```
 
-The book handoff requires a complete RenderManifest and VoiceRender v0.2 diagnostics. AudioCompose validates producer identity, plan correspondence, diagnostics provenance, and declared deferred controls; it owns only the declared `audiocompose.emphasis.gain.v1` capability. VoiceRender-native controls remain producer-owned, and unknown deferred capabilities fail closed. The optional `audiocompose[voicerender]` extra requires VoiceRender `>=0.2.0,<0.3`; VoiceRender 0.1.x is not supported by this integration.
+The book handoff requires a complete RenderManifest and VoiceRender v0.2 diagnostics. AudioCompose validates producer identity, plan correspondence, diagnostics provenance, and declared deferred controls; it owns only the declared `audiocompose.emphasis.gain.v1` capability. VoiceRender-native controls remain producer-owned, and unknown deferred capabilities fail closed. The optional `audiocompose[voicerender]` extra requires UtterPlan `>=0.6.4,<0.7` and VoiceRender `>=0.2.4,<0.3`; these floors are required for the SSMDDoc direct-workspace contract.
 The minimal Python counterpart is in [examples/compose_rendered_book.py](examples/compose_rendered_book.py); it assumes rendered artifacts already exist and never synthesizes speech.
 
 `BOOK` may be the workspace root or its canonical `chapters/` directory. The required `--variant` is the exact `<profile-label>--<profile-fingerprint>` directory present under both `renderplan/` and `voicerender/`. AudioCompose loads `renderplan/<variant>/renderplan-set.toml` through `renderplan`; this set is authoritative for selected chapter IDs and order. A number selector, inclusive range, comma-separated selectors, or `all` may be passed with `--chapters` (default `all`):
@@ -215,7 +215,7 @@ audiocompose/<variant>/
 
 Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override the corresponding book roots. `--media-root` is forwarded to every RenderPlan materialization; when omitted, relative external `AudioItem` WAV paths use the individual plan's directory. Output mastering options (`--sample-rate`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`) match the direct command. Reproducible AudioJob bundles are always saved beside the chapter WAVs by default; `--save-audiojobs DIR` overrides their root. Supply `--pauses POLICY.toml` to override the default policy derived from the selected RenderProfile snapshot.
 
-Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC, but `compose-book` rejects a selected chapter whose manifest is incomplete; finish rendering before composing. The specialist book facade verifies the chapter handoff and persists its reproducible AudioJob, then invokes the ordinary producer-neutral `Composer`. For books, symbolic UtterPlan pause intents resolve through a strict AudioCompose policy derived from the selected RenderProfile snapshot by default or supplied with `--pauses`; direct `compose-renderplan` continues to use literal RenderPlan pause durations. The base install does not require UtterPlan or VoiceRender; install `audiocompose[voicerender]` for the book integration.
+Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC, but `compose-book` rejects a selected chapter whose manifest is incomplete; finish rendering before composing. The specialist book facade verifies the chapter handoff and persists its reproducible AudioJob, then invokes the ordinary producer-neutral `Composer`. For books, symbolic UtterPlan pause intents resolve through a strict AudioCompose policy derived from the selected RenderProfile snapshot by default or supplied with `--pauses`; direct `compose-renderplan` continues to use literal RenderPlan pause durations. The base install does not require UtterPlan or VoiceRender; install `audiocompose[voicerender]` for optional book and SSMDDoc integrations.
 
 Reuse is conservative: the report, persisted AudioJob, and WAV must match the current variant, source chapter/plan, RenderManifest identity and file hash, pause/output policies, AudioJob ID/schema, AudioCompose version, output hash, and WAV geometry. Symlinked or stale artifacts are never reused; an existing output without matching provenance fails with `output.exists`, while `--force` recomposes and atomically replaces selected WAVs. The batch continues after independent chapter failures by default; `--fail-fast` marks later selections skipped. Ordered progress callbacks receive book and chapter events; callback exceptions become `progress.callback_failed`. `--json` writes only the machine-readable result to stdout, while the human summary includes the report path.
 
@@ -254,6 +254,54 @@ for outcome in result.outcomes:
 Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
 
 `compose-report.toml` is the version-1 filesystem hand-off (`format = "audiocompose-book-report"`, `version = 1`). Its root records the variant, profile and pause-policy identities/provenance, AudioCompose version, relative workspace/AudioJob roots, counts, and output policy. Each item includes source/order and handoff identity, report-relative UtterPlan/RenderManifest paths, output basename, status, and any available errors. Successful items also record RenderManifest ID and file hash, pause/output-policy IDs, AudioJob ID/schema and bundle name, WAV SHA-256, sample rate, channels, and frames; newly written outputs include duration. Paths stay relative to their owning book/report roots where practical. Unselected prior item records remain in RenderPlan-set order when a subset is composed.
+
+## SSMDDoc document-workspace composition
+
+`audiocompose compose-document` composes one completed SSMDDoc from its canonical workspace. Pass either the workspace directory or its canonical `document.ssmd.md`; AudioCompose reads the SSMDDoc v1 manifest and resolves the direct stage roots:
+
+```text
+WORKSPACE/
+├── manifest.json
+├── document.ssmd.md
+├── utterplan/document.utterplan.toml
+├── renderplan/<variant>/
+│   ├── renderprofile.toml
+│   └── document.renderplan.toml
+├── voicerender/<variant>/document-0001/
+│   ├── render-manifest.toml
+│   ├── render-diagnostics.json
+│   └── 000001.wav
+└── audiocompose/<variant>/
+    ├── document-0001.audiojob/
+    ├── document-0001.wav
+    └── compose-report.toml
+```
+
+The selected variant is the exact `<variant>` directory under each producer root. AudioCompose verifies the RenderProfile fingerprint and RenderPlan/source identities, then requires a complete VoiceRender manifest, matching speech artifacts, and trusted diagnostics before composing. It does not create plans, run preflight, or synthesize speech.
+
+```bash
+audiocompose compose-document . \\
+  --variant narration--<fingerprint> \\
+  --sample-rate 24000 \\
+  --json
+```
+
+The flat CLI also accepts `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
+
+The package-root API exposes the same service:
+
+```python
+from audiocompose import DocumentComposeOptions, compose_document
+
+result = compose_document(
+    ".",
+    variant="narration--525856299523",
+    options=DocumentComposeOptions(sample_rate=24_000),
+)
+print(result.status, result.output, result.report_path)
+```
+
+UtterPlan owns semantic planning and VoiceRender owns synthesis and producer-native controls. AudioCompose follows RenderPlan flow order and role semantics, derives symbolic pause durations from the RenderProfile snapshot by default (or accepts a strict explicit pause policy), and realizes only the explicitly deferred emphasis capability it owns. All completed audio is lowered to the ordinary producer-neutral `AudioJob` and passed through the existing `Composer`; no document-specific DSP path is introduced.
 
 ## Debugging and analysis
 

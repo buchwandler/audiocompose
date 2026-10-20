@@ -142,6 +142,46 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_json(compose_book)
     _add_progress(compose_book)
+    compose_document = subparsers.add_parser(
+        "compose-document", help="compose one rendered SSMDDoc variant"
+    )
+    compose_document.add_argument(
+        "document", help="SSMDDoc workspace root or canonical document.ssmd.md"
+    )
+    compose_document.add_argument(
+        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
+    )
+    compose_document.add_argument(
+        "--pauses",
+        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
+    )
+    compose_document.add_argument("--renderplan-root", help="override the document RenderPlan root")
+    compose_document.add_argument(
+        "--voicerender-root", help="override the document VoiceRender root"
+    )
+    compose_document.add_argument("--output-root", help="override the AudioCompose output root")
+    compose_document.add_argument(
+        "--media-root", help="explicit base directory for relative external AudioItems"
+    )
+    compose_document.add_argument(
+        "--emphasis-policy",
+        choices=("segment_fallback", "strict"),
+        default="segment_fallback",
+        help="partial-span emphasis policy (default: segment_fallback)",
+    )
+    compose_document.add_argument("--sample-rate", type=int)
+    compose_document.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+    compose_document.add_argument("--target-lufs", type=float)
+    compose_document.add_argument("--true-peak-ceiling-dbtp", type=float)
+    compose_document.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    compose_document.add_argument(
+        "--save-audiojob",
+        help="override the intermediate AudioJob bundle path (defaults inside the output variant)",
+    )
+    compose_document.add_argument(
+        "--force", action="store_true", help="recompose and replace an existing document output"
+    )
+    _add_json(compose_document)
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -433,6 +473,46 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  failed:    {book_result.failed}")
                 print(f"  skipped:   {book_result.skipped}")
             return book_result.exit_code
+        elif args.command == "compose-document":
+            from .document import DocumentComposeOptions, compose_document
+
+            document_result = compose_document(
+                args.document,
+                variant=args.variant,
+                pause_policy=args.pauses,
+                options=DocumentComposeOptions(
+                    sample_rate=args.sample_rate,
+                    clip_policy=args.clip_policy,
+                    target_lufs=args.target_lufs,
+                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+                    peak_policy=args.peak_policy,
+                ),
+                renderplan_root=args.renderplan_root,
+                voicerender_root=args.voicerender_root,
+                output_root=args.output_root,
+                media_root=args.media_root,
+                save_audiojob=args.save_audiojob,
+                force=args.force,
+                emphasis_policy=args.emphasis_policy,
+            )
+            if args.json:
+                print(json.dumps(document_result.to_dict(), indent=2, sort_keys=True))
+            else:
+                context = document_result.request.context
+                print("AudioCompose document compose")
+                print(f"  workspace:   {document_result.workspace}")
+                print(f"  document:    {document_result.document_id}")
+                print(f"  variant:     {document_result.variant}")
+                print(f"  renderplan:  {context.renderplan_path}")
+                print(f"  speech:      {context.render_dir}")
+                print(f"  output:      {document_result.output}")
+                print(f"  audiojob:    {document_result.audiojob}")
+                print(f"  report:      {document_result.report_path}")
+                print(f"  status:      {document_result.status}")
+                print(f"  duration:    {document_result.duration_seconds:.3f}s")
+                for diagnostic in document_result.diagnostics:
+                    print(f"  warning:     {diagnostic['message']}")
+            return document_result.exit_code
         elif args.command == "compose-renderplan":
             import audiocompose
 

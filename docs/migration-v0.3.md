@@ -7,8 +7,8 @@ AudioCompose v0.3.0 adds book-level composition for already-rendered variants an
 ## Dependency floors
 
 - The base installation requires `renderplan>=0.1.2,<0.2`.
-- The optional `audiocompose[voicerender]` extra requires `utterplan>=0.6.3,<0.7` and `voicerender>=0.2.0,<0.3`.
-- VoiceRender 0.1.x is not supported by the v0.3 optional integration. Install the extra with `pip install 'audiocompose[voicerender]'` and use VoiceRender 0.2.x.
+- The optional `audiocompose[voicerender]` extra requires `utterplan>=0.6.4,<0.7` and `voicerender>=0.2.4,<0.3`.
+- VoiceRender releases before 0.2.4 do not provide the SSMDDoc document workspace contract. Install the extra with `pip install 'audiocompose[voicerender]'` to use supported producer versions.
 
 ## VoiceRender book handoff
 

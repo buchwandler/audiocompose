@@ -595,7 +595,10 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         assert nested[-1].composition is not None
         assert nested[-1].composition.kind == "compose_completed"
     assert api_result.exit_code == 0
-    assert not (api_workspace / ".readio").exists()
+    assert (api_workspace / "utterplan").is_dir()
+    assert (api_workspace / "renderplan" / api_variant).is_dir()
+    assert (api_workspace / "voicerender" / api_variant).is_dir()
+    assert api_result.report_path.parent == api_workspace / "audiocompose" / api_variant
 
     cli_command = [
         "compose-book",
@@ -607,8 +610,11 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         "--json",
     ]
     assert main(cli_command) == 0
-    assert not (cli_workspace / ".readio").exists()
+    assert (cli_workspace / "utterplan").is_dir()
+    assert (cli_workspace / "renderplan" / cli_variant).is_dir()
+    assert (cli_workspace / "voicerender" / cli_variant).is_dir()
     cli_result = json.loads(capsys.readouterr().out)
+    assert Path(cli_result["report"]).parent == cli_workspace / "audiocompose" / cli_variant
     api_items = api_result.to_dict()["items"]
     assert api_items == cli_result["items"]
     assert [item["id"] for item in api_items] == ["chapter-0005", "chapter-0008"]
@@ -692,7 +698,7 @@ def test_compose_book_rejects_missing_voice_diagnostics(tmp_path):
     assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
 
 
-def test_installed_package_metadata_rejects_renderplan_010():
+def test_installed_package_metadata_has_supported_producer_floors():
     from importlib.metadata import requires
 
     from packaging.requirements import Requirement
@@ -706,9 +712,10 @@ def test_installed_package_metadata_rejects_renderplan_010():
     assert Version("0.1.0") not in renderplan.specifier
     assert Version("0.1.1") not in renderplan.specifier
     assert Version("0.1.2") in renderplan.specifier
-    assert Version("0.6.2") not in utterplan.specifier
-    assert Version("0.6.3") in utterplan.specifier
-    assert Version("0.2.0") in voicerender.specifier
+    assert Version("0.6.3") not in utterplan.specifier
+    assert Version("0.6.4") in utterplan.specifier
+    assert Version("0.2.3") not in voicerender.specifier
+    assert Version("0.2.4") in voicerender.specifier
     assert Version("0.3.0") not in voicerender.specifier
 
 
@@ -1374,12 +1381,12 @@ class BlockProducerImports(importlib.abc.MetaPathFinder):
         if fullname == 'utterplan' or fullname.startswith('utterplan.'):
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0, BlockProducerImports())
-from audiocompose import AudioJob, Composer
+from audiocompose import AudioJob, Composer, compose_document
 from audiocompose.cli import main
 assert main(['compose-book', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
 assert not any(name == 'voicerender' or name.startswith('voicerender.') for name in sys.modules)
 assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in sys.modules)
-assert AudioJob and Composer
+assert AudioJob and Composer and compose_document
 """
     completed = subprocess.run(
         [sys.executable, "-c", script, str(workspace), variant],

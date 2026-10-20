@@ -86,11 +86,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             "numpy==1.24.0" "audiosig==0.1.6" "renderplan==0.1.2" \
-            "utterplan==0.6.3" "voicerender==0.2.0" "pytest==8.0.0"
+            "utterplan==0.6.4" "voicerender==0.2.4" "pytest==8.0.0"
           python -m pip install --no-deps -e .
 
       - name: Verify public producer handoff materialization
-        run: python -m pytest -q tests/test_voicerender_materialization.py tests/test_compose_book.py
+        run: python -m pytest -q tests/test_voicerender_materialization.py tests/test_compose_book.py tests/test_compose_document.py
 
   producer-compatibility-range:
     runs-on: ubuntu-latest
@@ -108,11 +108,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             "numpy>=1.23" "audiosig>=0.1.6,<0.2" "renderplan>=0.1.2,<0.2" \
-            "utterplan>=0.6.3,<0.7" "voicerender>=0.2.0,<0.3" "pytest>=8"
+            "utterplan>=0.6.4,<0.7" "voicerender>=0.2.4,<0.3" "pytest>=8"
           python -m pip install --no-deps -e .
 
       - name: Verify public producer handoff materialization
-        run: python -m pytest -q tests/test_voicerender_materialization.py tests/test_compose_book.py
+        run: python -m pytest -q tests/test_voicerender_materialization.py tests/test_compose_book.py tests/test_compose_document.py
 
   package:
     runs-on: ubuntu-latest
@@ -136,7 +136,7 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/audiocompose-wheel-venv"
           wheel=$(printf '%s\n' dist/audiocompose-*.whl)
-          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" -m pip install "$wheel" "utterplan>=0.6.3,<0.7" "voicerender>=0.2.0,<0.3"
+          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" -m pip install "$wheel" "utterplan>=0.6.4,<0.7" "voicerender>=0.2.4,<0.3"
 
       - name: Smoke-test installed wheel
         run: |

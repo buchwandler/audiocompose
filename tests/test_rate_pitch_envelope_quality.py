@@ -49,7 +49,7 @@ def test_public_composer_renders_envelope_with_stable_identity_and_resampled_spa
     output_rate = 24_000
     source = _voiced_signal(source_rate)
     operation = _transition()
-    metadata = {"readio.segment_id": "seg-000481", "custom": {"opaque": True}}
+    metadata = {"external.segment_id": "seg-000481", "custom": {"opaque": True}}
     clip = AudioClip(
         "seg-000481",
         AudioBufferSource(source, source_rate),

@@ -15,7 +15,20 @@ from .book import (
 )
 from .composer import Composer, estimate_composition
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
-from .errors import AudioComposeError, AudioValidationError, CompositionError
+from .document import (
+    DocumentComposeOptions,
+    DocumentComposeRequest,
+    DocumentComposeResult,
+    compose_document,
+    default_document_output_policy,
+    resolve_document,
+)
+from .errors import (
+    AudioComposeError,
+    AudioValidationError,
+    CompositionError,
+    DocumentComposeError,
+)
 from .job import load_job, save_job
 from .loudness import LoudnessPolicy, LoudnessResult
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, OutputPolicy, Silence
@@ -51,6 +64,10 @@ __all__ = [
     "AudioClip",
     "AudioComposeError",
     "BookComposeError",
+    "DocumentComposeError",
+    "DocumentComposeOptions",
+    "DocumentComposeRequest",
+    "DocumentComposeResult",
     "BookComposeRequest",
     "BookComposeOptions",
     "BookComposeProgress",
@@ -76,10 +93,13 @@ __all__ = [
     "Composer",
     "CompositionEstimate",
     "compose_book",
+    "compose_document",
     "compose_renderplan",
     "estimate_composition",
     "default_book_output_policy",
+    "default_document_output_policy",
     "resolve_book",
+    "resolve_document",
     "DiagnosticSeverity",
     "FadeIn",
     "FadeOut",

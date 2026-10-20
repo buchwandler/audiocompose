@@ -107,13 +107,14 @@ jobs:
               assert Version("0.2.0") not in renderplan.specifier
 
               utterplan = optional_requirement(requirements, "utterplan", "voicerender")
-              assert Version("0.6.2") not in utterplan.specifier
-              assert Version("0.6.3") in utterplan.specifier
+              assert Version("0.6.3") not in utterplan.specifier
+              assert Version("0.6.4") in utterplan.specifier
               assert Version("0.7.0") not in utterplan.specifier
 
               voicerender = optional_requirement(requirements, "voicerender", "voicerender")
               assert Version("0.1.1") not in voicerender.specifier
-              assert Version("0.2.0") in voicerender.specifier
+              assert Version("0.2.3") not in voicerender.specifier
+              assert Version("0.2.4") in voicerender.specifier
               assert Version("0.3.0") not in voicerender.specifier
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY
