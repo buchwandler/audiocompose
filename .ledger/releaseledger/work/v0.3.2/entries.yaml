@@ -1,0 +1,59 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.3.2
+git_base_ref: 92d16211cc5dd2b919da05c42a0ba218c2ef4959
+git_base_sha: 92d16211cc5dd2b919da05c42a0ba218c2ef4959
+git_head_ref: 549adf71cd79a1c676843bb7e40c7867df75c047
+git_head_sha: 549adf71cd79a1c676843bb7e40c7867df75c047
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added SSMDDoc workspace composition with validated handoffs and reproducible artifact reuse"
+    status: accepted
+    source_refs:
+      - git:a9f0367e0de4b8d933b32964c43e66a16519e187
+    paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/_workspace_policy.py
+      - audiocompose/book.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/document_contract.py
+      - audiocompose/errors.py
+      - docs/architecture.md
+      - docs/index.md
+      - docs/migration-v0.3.md
+      - pyproject.toml
+      - tests/installed_renderplan_smoke.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_rate_pitch_envelope_quality.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_schema_resources.py
+    sources:
+      - git:a9f0367e0de4b8d933b32964c43e66a16519e187
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: "Changed document composition to report progress without contaminating JSON or emitting events on verified reuse"
+    status: accepted
+    source_refs:
+      - git:549adf71cd79a1c676843bb7e40c7867df75c047
+    paths:
+      - README.md
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - tests/test_compose_document.py
+    sources:
+      - git:549adf71cd79a1c676843bb7e40c7867df75c047
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

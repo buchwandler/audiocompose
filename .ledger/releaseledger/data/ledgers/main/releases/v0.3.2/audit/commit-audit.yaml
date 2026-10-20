@@ -1,0 +1,102 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.3.2
+git_base_ref: v0.3.1
+git_base_sha: 92d16211cc5dd2b919da05c42a0ba218c2ef4959
+git_head_ref: HEAD
+git_head_sha: 549adf71cd79a1c676843bb7e40c7867df75c047
+git_range: 92d16211cc5dd2b919da05c42a0ba218c2ef4959..549adf71cd79a1c676843bb7e40c7867df75c047
+commit_count: 2
+rows:
+  - sha: a9f0367e0de4b8d933b32964c43e66a16519e187
+    source_ref: git:a9f0367e0de4b8d933b32964c43e66a16519e187
+    short_sha: a9f0367
+    changed_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/_workspace_policy.py
+      - audiocompose/book.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/document_contract.py
+      - audiocompose/errors.py
+      - docs/architecture.md
+      - docs/index.md
+      - docs/migration-v0.3.md
+      - pyproject.toml
+      - tests/installed_renderplan_smoke.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_rate_pitch_envelope_quality.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_schema_resources.py
+    stats:
+      files_changed: 20
+      insertions: 2034
+      deletions: 78
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/_workspace_policy.py
+      - audiocompose/book.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/document_contract.py
+      - audiocompose/errors.py
+      - docs/architecture.md
+      - docs/index.md
+      - docs/migration-v0.3.md
+      - pyproject.toml
+      - tests/installed_renderplan_smoke.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_rate_pitch_envelope_quality.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_schema_resources.py
+    observed_behavior:
+      Added SSMDDoc v1 document-workspace resolution and composition
+      via the package API and CLI, validating manifest, RenderProfile, RenderPlan, and
+      VoiceRender handoffs, persisting reproducible AudioJob/report artifacts, and reusing
+      only verified outputs; updated optional integration floors.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add support for document dir"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 549adf71cd79a1c676843bb7e40c7867df75c047
+    source_ref: git:549adf71cd79a1c676843bb7e40c7867df75c047
+    short_sha: 549adf7
+    changed_paths:
+      - README.md
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - tests/test_compose_document.py
+    stats:
+      files_changed: 4
+      insertions: 59
+      deletions: 9
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - tests/test_compose_document.py
+    observed_behavior:
+      Added document-composition progress callbacks and CLI progress
+      output while keeping JSON stdout clean and suppressing events for verified output
+      reuse.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: update api"
+    target_entry_id: entry-0002
+    notes: ""

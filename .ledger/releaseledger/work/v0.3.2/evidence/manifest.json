@@ -1,0 +1,59 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 2034,
+      "deletions": 78,
+      "patch_file": "a9f0367.patch",
+      "patch_sha256": "d1f7ae05846ca2d5a188bcb547729687f83d02d5e186c08b9b959baea9da0a2b",
+      "paths": [
+        ".github/workflows/python-publish.yml",
+        ".github/workflows/tests.yml",
+        "README.md",
+        "audiocompose/__init__.py",
+        "audiocompose/_workspace_policy.py",
+        "audiocompose/book.py",
+        "audiocompose/cli.py",
+        "audiocompose/document.py",
+        "audiocompose/document_contract.py",
+        "audiocompose/errors.py",
+        "docs/architecture.md",
+        "docs/index.md",
+        "docs/migration-v0.3.md",
+        "pyproject.toml",
+        "tests/installed_renderplan_smoke.py",
+        "tests/test_compose_book.py",
+        "tests/test_compose_document.py",
+        "tests/test_rate_pitch_envelope_quality.py",
+        "tests/test_renderplan_materialization.py",
+        "tests/test_schema_resources.py"
+      ],
+      "sha": "a9f0367e0de4b8d933b32964c43e66a16519e187",
+      "short_sha": "a9f0367",
+      "source_ref": "git:a9f0367e0de4b8d933b32964c43e66a16519e187"
+    },
+    {
+      "additions": 59,
+      "deletions": 9,
+      "patch_file": "549adf7.patch",
+      "patch_sha256": "d686bd27a6006abee1cb84f5ff87ee160a67bb150474e0ef4b238f5489d50401",
+      "paths": [
+        "README.md",
+        "audiocompose/cli.py",
+        "audiocompose/document.py",
+        "tests/test_compose_document.py"
+      ],
+      "sha": "549adf71cd79a1c676843bb7e40c7867df75c047",
+      "short_sha": "549adf7",
+      "source_ref": "git:549adf71cd79a1c676843bb7e40c7867df75c047"
+    }
+  ],
+  "git_base_ref": "92d16211cc5dd2b919da05c42a0ba218c2ef4959",
+  "git_base_sha": "92d16211cc5dd2b919da05c42a0ba218c2ef4959",
+  "git_head_ref": "549adf71cd79a1c676843bb7e40c7867df75c047",
+  "git_head_sha": "549adf71cd79a1c676843bb7e40c7867df75c047",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.2",
+  "schema_version": 1
+}

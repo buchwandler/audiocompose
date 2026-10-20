@@ -1,0 +1,204 @@
+ README.md                      | 17 ++++++++++++++---
+ audiocompose/cli.py            | 13 ++++++++++++-
+ audiocompose/document.py       |  4 +++-
+ tests/test_compose_document.py | 34 ++++++++++++++++++++++++++++++----
+ 4 files changed, 59 insertions(+), 9 deletions(-)
+
+diff --git a/README.md b/README.md
+index b9c6e7e..d5d2610 100644
+--- a/README.md
++++ b/README.md
+@@ -98,7 +98,7 @@ audiocompose inspect chapter.audiojob
+ audiocompose compose chapter.audiojob chapter.wav
+ ```
+
+-`compose`, `compose-renderplan`, and `compose-book` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
++`compose`, `compose-renderplan`, `compose-book`, and `compose-document` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
+
+ ```bash
+ audiocompose compose chapter.audiojob chapter.wav --progress always
+@@ -283,24 +283,35 @@ The selected variant is the exact `<variant>` directory under each producer root
+ audiocompose compose-document . \\
+   --variant narration--<fingerprint> \\
+   --sample-rate 24000 \\
++  --progress always \\
+   --json
+ ```
+
+-The flat CLI also accepts `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
++The flat CLI also accepts `--progress`, `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
+
+ The package-root API exposes the same service:
+
+ ```python
+-from audiocompose import DocumentComposeOptions, compose_document
++from audiocompose import (
++    CompositionProgress,
++    CompositionProgressCallback,
++    DocumentComposeOptions,
++    compose_document,
++)
+
++events: list[CompositionProgress] = []
++progress_callback: CompositionProgressCallback = events.append
+ result = compose_document(
+     ".",
+     variant="narration--525856299523",
+     options=DocumentComposeOptions(sample_rate=24_000),
++    on_progress=progress_callback,
+ )
+ print(result.status, result.output, result.report_path)
+ ```
+
++`on_progress` uses the existing `CompositionProgressCallback` contract and reports actual Composer work. When a verified output is reused, no DSP runs and no composition events are emitted; AudioCompose does not synthesize progress for reuse. Progress is observational only: it does not change artifact identity, output roots, or output/report behavior. The `renderplan_root`, `voicerender_root`, `output_root`, and media-root overrides work as before.
++
+ UtterPlan owns semantic planning and VoiceRender owns synthesis and producer-native controls. AudioCompose follows RenderPlan flow order and role semantics, derives symbolic pause durations from the RenderProfile snapshot by default (or accepts a strict explicit pause policy), and realizes only the explicitly deferred emphasis capability it owns. All completed audio is lowered to the ordinary producer-neutral `AudioJob` and passed through the existing `Composer`; no document-specific DSP path is introduced.
+
+ ## Debugging and analysis
+diff --git a/audiocompose/cli.py b/audiocompose/cli.py
+index 83aa6b6..c4613ee 100644
+--- a/audiocompose/cli.py
++++ b/audiocompose/cli.py
+@@ -182,6 +182,7 @@ def _parser() -> argparse.ArgumentParser:
+         "--force", action="store_true", help="recompose and replace an existing document output"
+     )
+     _add_json(compose_document)
++    _add_progress(compose_document)
+     analyze = subparsers.add_parser("analyze")
+     analyze.add_argument("input")
+     _add_analysis_options(analyze)
+@@ -400,7 +401,7 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
+ def main(argv: list[str] | None = None) -> int:
+     args = _parser().parse_args(argv)
+     progress_renderer: CliProgressRenderer | None = None
+-    if args.command in {"compose", "compose-renderplan", "compose-book"}:
++    if args.command in {"compose", "compose-renderplan", "compose-book", "compose-document"}:
+         command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
+             args.command, "compose"
+         )
+@@ -476,6 +477,13 @@ def main(argv: list[str] | None = None) -> int:
+         elif args.command == "compose-document":
+             from .document import DocumentComposeOptions, compose_document
+
++            if progress_renderer is not None:
++                progress_renderer.set_phase("preparing document")
++            document_progress_callback = (
++                progress_renderer.on_composition_progress
++                if progress_renderer is not None and progress_renderer.enabled
++                else None
++            )
+             document_result = compose_document(
+                 args.document,
+                 variant=args.variant,
+@@ -494,7 +502,10 @@ def main(argv: list[str] | None = None) -> int:
+                 save_audiojob=args.save_audiojob,
+                 force=args.force,
+                 emphasis_policy=args.emphasis_policy,
++                on_progress=document_progress_callback,
+             )
++            if progress_renderer is not None:
++                progress_renderer.finish(success=document_result.exit_code == 0)
+             if args.json:
+                 print(json.dumps(document_result.to_dict(), indent=2, sort_keys=True))
+             else:
+diff --git a/audiocompose/document.py b/audiocompose/document.py
+index 35081f2..390a729 100644
+--- a/audiocompose/document.py
++++ b/audiocompose/document.py
+@@ -21,6 +21,7 @@ from .document_contract import (
+ )
+ from .errors import DocumentComposeError, HandoffValidationError, IntegrationError
+ from .integrations.renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
++from .progress import CompositionProgressCallback
+
+
+ def _error(
+@@ -660,6 +661,7 @@ def compose_document(
+     save_audiojob: str | Path | None = None,
+     force: bool = False,
+     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
++    on_progress: CompositionProgressCallback | None = None,
+ ) -> DocumentComposeResult:
+     """Verify and compose one rendered SSMDDoc using its selected workspace variant."""
+     from .composer import Composer
+@@ -813,7 +815,7 @@ def compose_document(
+             context.output_variant_dir.mkdir(parents=True, exist_ok=True)
+             if context.output_variant_dir.is_symlink():
+                 raise OSError(f"refusing symlink output directory: {context.output_variant_dir}")
+-            composition = Composer().compose(job)
++            composition = Composer().compose(job, on_progress=on_progress)
+             atomic_write_wav(
+                 context.output_path,
+                 composition.audio,
+diff --git a/tests/test_compose_document.py b/tests/test_compose_document.py
+index adc5b25..142ff34 100644
+--- a/tests/test_compose_document.py
++++ b/tests/test_compose_document.py
+@@ -312,7 +312,19 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
+     from audiocompose.job import load_job
+
+     workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+-    first = compose_document(workspace, variant=variant)
++    events = []
++    first = compose_document(workspace, variant=variant, on_progress=events.append)
++    assert events
++    assert events[0].kind == "compose_started"
++    assert events[-1].kind == "compose_completed"
++    assert events[0].completed_items == 0
++    assert events[0].total_items == events[-1].completed_items == events[-1].total_items == 1
++    item_events = [event for event in events if event.item_index is not None]
++    assert item_events
++    assert all(event.item_index == 0 and event.total_items == 1 for event in item_events)
++    assert [event.completed_items for event in events] == sorted(
++        event.completed_items for event in events
++    )
+
+     assert first.status == "written"
+     assert first.success and first.exit_code == 0
+@@ -329,8 +341,15 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
+     assert report["pause_policy_provenance"] == "renderprofile"
+     assert report["output_geometry"]["sha256"] == first.sha256
+
+-    reused = compose_document(workspace, variant=variant)
++    output_before_reuse = first.output.stat()
++    reuse_events = []
++    reused = compose_document(workspace, variant=variant, on_progress=reuse_events.append)
+     assert reused.status == "reused"
++    output_after_reuse = first.output.stat()
++    assert reuse_events == []
++    assert reused.sha256 == first.sha256
++    assert output_after_reuse.st_size == output_before_reuse.st_size
++    assert output_after_reuse.st_mtime_ns == output_before_reuse.st_mtime_ns
+
+     diagnostics_path = workspace / "voicerender" / variant / DOCUMENT_ID / "render-diagnostics.json"
+     diagnostics_path.write_text(
+@@ -530,12 +549,16 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
+         "--sample-rate",
+         "8000",
+         "--json",
++        "--progress",
++        "always",
+     ]
+
+     assert main(command) == 0
+     captured = capsys.readouterr()
+     result = json.loads(captured.out)
+-    assert captured.err == ""
++    assert "preparing document" in captured.err
++    assert "composing" in captured.err
++    assert "complete" in captured.err
+     assert result["format"] == "audiocompose-document-result"
+     assert result["status"] == "written"
+     assert result["sample_rate"] == 8_000
+@@ -548,7 +571,10 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
+     human_command[1] = str(workspace / DOCUMENT_SOURCE_FILENAME)
+     human_command.remove("--json")
+     assert main(human_command) == 0
+-    human = capsys.readouterr().out
++    human_capture = capsys.readouterr()
++    human = human_capture.out
++    assert "preparing document" in human_capture.err
++    assert "complete" in human_capture.err
+     assert "AudioCompose document compose" in human
+     assert "document:    document-0001" in human
+     assert "status:      reused" in human
