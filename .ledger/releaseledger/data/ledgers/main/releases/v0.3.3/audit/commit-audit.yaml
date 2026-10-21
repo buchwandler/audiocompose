@@ -1,0 +1,77 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.3.3
+git_base_ref: v0.3.2
+git_base_sha: 6aa813ea4394ab3b7d9e1d9b2ca4a2b893961b62
+git_head_ref: HEAD
+git_head_sha: 9f10d8a9807ab923b8cf88a9a88fcff311ae6ae2
+git_range: 6aa813ea4394ab3b7d9e1d9b2ca4a2b893961b62..9f10d8a9807ab923b8cf88a9a88fcff311ae6ae2
+commit_count: 1
+rows:
+  - sha: 9f10d8a9807ab923b8cf88a9a88fcff311ae6ae2
+    source_ref: git:9f10d8a9807ab923b8cf88a9a88fcff311ae6ae2
+    short_sha: 9f10d8a
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/book.py
+      - audiocompose/bundle.py
+      - audiocompose/bundle_contract.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/document_contract.py
+      - docs/architecture.md
+      - docs/index.md
+      - docs/migration-v0.3.md
+      - examples/compose_rendered_book.py
+      - examples/compose_rendered_bundle.py
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_schema_resources.py
+      - tests/test_voicerender_materialization.py
+    stats:
+      files_changed: 21
+      insertions: 682
+      deletions: 640
+    inspected: true
+    inspected_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md
+      - README.md
+      - audiocompose/__init__.py
+      - audiocompose/book.py
+      - audiocompose/bundle.py
+      - audiocompose/bundle_contract.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/document_contract.py
+      - docs/architecture.md
+      - docs/index.md
+      - docs/migration-v0.3.md
+      - examples/compose_rendered_book.py
+      - examples/compose_rendered_bundle.py
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_schema_resources.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior:
+      Introduced a validated .ssmd-bundle workspace identity contract
+      and a public compose_bundle facade that dispatches book or document composition
+      from manifest format; replaced the separate flat CLI commands with bundle compose
+      and wrapped JSON results in a neutral bundle envelope while retaining kind-specific
+      reports and progress.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: remove ssmdbook and ssmdoc introduce ssmd bundle"
+    target_entry_id: entry-0001
+    notes: ""

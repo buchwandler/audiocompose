@@ -1,0 +1,2290 @@
+ .../data/ledgers/main/events/events.jsonl          |   2 +
+ .../main/releases/v0.3.2/entries/entry-0001.md     |   2 +-
+ README.md                                          | 150 +-----------
+ audiocompose/__init__.py                           |   7 +
+ audiocompose/book.py                               |  20 +-
+ audiocompose/bundle.py                             | 156 ++++++++++++
+ audiocompose/bundle_contract.py                    |  90 +++++++
+ audiocompose/cli.py                                | 266 ++++++---------------
+ audiocompose/document.py                           |  13 +-
+ audiocompose/document_contract.py                  |  31 ++-
+ docs/architecture.md                               | 104 +++-----
+ docs/index.md                                      |  19 +-
+ docs/migration-v0.3.md                             |  74 ------
+ examples/compose_rendered_book.py                  |  19 --
+ examples/compose_rendered_bundle.py                |  19 ++
+ tests/test_bundle_contract.py                      |  83 +++++++
+ tests/test_cli.py                                  |  17 +-
+ tests/test_compose_book.py                         | 158 +++++++-----
+ tests/test_compose_document.py                     |  85 +++----
+ tests/test_schema_resources.py                     |   5 +
+ tests/test_voicerender_materialization.py          |   2 +-
+ 21 files changed, 682 insertions(+), 640 deletions(-)
+
+diff --git a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+index 30235a0..36d0296 100644
+--- a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
++++ b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+@@ -73,3 +73,5 @@
+ {"data":{"updated_rows":2},"event":"audit.updated","event_id":"event-0073","record_revisions":{"commit_audit_sheet":2},"release_version":"v0.3.2","schema_version":2}
+ {"data":{"entry_ids":["entry-0001","entry-0002"],"synced_audit_rows":2},"event":"entry.batch_added","event_id":"event-0074","record_revisions":{"commit_audit_sheet":3,"entry:v0.3.2/entry-0001":1,"entry:v0.3.2/entry-0002":1,"release:v0.3.2":3},"release_version":"v0.3.2","schema_version":2}
+ {"data":{"released_at":"2026-10-20"},"event":"release.finalized","event_id":"event-0075","record_revisions":{"release:v0.3.2":4},"release_version":"v0.3.2","schema_version":2}
++{"data":{"added_source_refs":[],"fields":["summary"],"reason":"Replace retired document-workspace branding in active generated documentation","removed_source_refs":[],"source_refs_mode":"unchanged"},"entry_id":"entry-0001","event":"entry.updated","event_id":"event-0076","record_revisions":{"entry:v0.3.2/entry-0001":2},"release_version":"v0.3.2","schema_version":2}
++{"data":{"added_source_refs":[],"fields":["summary"],"reason":"Restore the historical release entry; this implementation must not rewrite historical release-ledger content","removed_source_refs":[],"source_refs_mode":"unchanged"},"entry_id":"entry-0001","event":"entry.updated","event_id":"event-0077","record_revisions":{"entry:v0.3.2/entry-0001":3},"release_version":"v0.3.2","schema_version":2}
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md b/.ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md
+index 0868329..e80e687 100644
+--- a/.ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md
++++ b/.ledger/releaseledger/data/ledgers/main/releases/v0.3.2/entries/entry-0001.md
+@@ -3,7 +3,7 @@ schema_version: 2
+ object_type: release_entry
+ versioning:
+   schema_version: 1
+-  revision: 1
++  revision: 3
+ entry_id: entry-0001
+ release_version: v0.3.2
+ kind: added
+diff --git a/README.md b/README.md
+index d5d2610..6fe922a 100644
+--- a/README.md
++++ b/README.md
+@@ -98,13 +98,13 @@ audiocompose inspect chapter.audiojob
+ audiocompose compose chapter.audiojob chapter.wav
+ ```
+
+-`compose`, `compose-renderplan`, `compose-book`, and `compose-document` accept `--progress {auto,always,never}`. The default `auto` renders only when stderr is a TTY and `--json` is not requested. `always` forces progress to stderr (including alongside JSON); `never` disables it. TTY output refreshes a throttled live line, while forced non-TTY output uses newline-delimited updates. Progress never contaminates JSON stdout.
++`compose`, `compose-renderplan`, and `bundle compose` accept `--progress {auto,always,never}`. Progress is rendered to stderr and never contaminates JSON stdout.
+
+ ```bash
+ audiocompose compose chapter.audiojob chapter.wav --progress always
+ audiocompose compose-renderplan chapter.renderplan.toml --render-dir render/chapter \
+   --output chapter.wav --progress always
+-audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
++audiocompose bundle compose BOOK.ssmd-bundle --variant narration--<fingerprint> --json --progress always
+ ```
+
+ The display includes elapsed time and a live ETA after enough work-rate samples exist. Numeric progress is omitted for unknown work geometry; named stages such as handoff preparation, composition, WAV writing/verification, and book chapter slots remain visible. A full composition may reach 100% before its output file is finished, so the renderer explicitly transitions to writing/verification and only reports command completion after success.
+@@ -127,7 +127,7 @@ audiocompose compose-renderplan chapter.renderplan.toml \
+
+ `--manifest` defaults to `<render-dir>/render-manifest.toml`. The CLI defaults `--media-root` to the plan file's directory; relative external `AudioItem` WAV paths must resolve beneath that root. The built-in Python local-WAV resolver requires an explicit `media_root` for relative paths. Local media is mono WAV; custom URI schemes require a Python `MediaResolver`. Only `clip_begin_ms`, `clip_end_ms`, `speed`, and `gain_db` are supported; unknown options and unsafe paths are rejected. Speed and gain become existing `Tempo` and `Gain` operations, and trims are checked against the resolved WAV.
+
+-RenderPlan `emphasis` controls are realized after synthesis as bounded relative gain: default/`moderate` +1.5 dB, `reduced` +0.75 dB, and `strong` +2.5 dB. Both integrated commands, `compose-renderplan` and `compose-book`, default to `--emphasis-policy segment_fallback`; this boosts the entire speech segment for partial character ranges and reports that word-level alignment was unavailable. Use `--emphasis-policy strict` to reject partial emphasis when exact alignment is required (the error recommends upstream splitting/alignment). Full-span controls are applied at clip scope. Overlapping controls choose the strongest level, never sum. These are relative pre-normalization gains; final loudness/peak processing may reduce the audible difference, and emphasis does not promise native prosody. The library materializer defaults to strict; generic AudioJob composition does not interpret speech controls.
++RenderPlan `emphasis` controls are realized after synthesis as bounded relative gain: default/`moderate` +1.5 dB, `reduced` +0.75 dB, and `strong` +2.5 dB. The integrated commands, `compose-renderplan` and `bundle compose`, default to `--emphasis-policy segment_fallback`; this boosts the entire speech segment for partial character ranges and reports that word-level alignment was unavailable. Use `--emphasis-policy strict` to reject partial emphasis when exact alignment is required (the error recommends upstream splitting/alignment). Full-span controls are applied at clip scope. Overlapping controls choose the strongest level, never sum. These are relative pre-normalization gains; final loudness/peak processing may reduce the audible difference, and emphasis does not promise native prosody. The library materializer defaults to strict; generic AudioJob composition does not interpret speech controls.
+ The adapter follows `RenderPlan.flow` in order. It materializes each pause using its declared millisecond duration, including zero-duration pauses; there is no symbolic pause policy or inferred timing. Source spans are retained as opaque provenance metadata, not fabricated sample-aligned `AudioSpan` values. The Composer's normal seconds-to-samples behavior and output policy still apply.
+
+ ### Public single-document Python API
+@@ -169,150 +169,19 @@ job = load_and_materialize_renderplan_job(
+
+ The manifest path is optional and uses the same default as the CLI. The result is an ordinary, inspectable `AudioJob`; use `--save-audiojob` on the direct CLI or `job.save("chapter.audiojob")` to persist it, then continue with the existing generic `validate`, `inspect`, `timeline`, and `compose` workflows.
+
+-## Book-level composition for rendered variants
++## Bundle composition for rendered variants
+
+-AudioCompose consumes completed VoiceRender artifacts; it does not synthesize speech. If the RenderPlan contains supported `emphasis`, explicitly ask VoiceRender to defer that capability at both preflight and render, then compose the completed variant:
++AudioCompose consumes completed VoiceRender artifacts; it does not synthesize speech. The unified command accepts only the editable `.ssmd-bundle` workspace root and dispatches by `manifest.json` format:
+
+ ```bash
+-# If preflight is a separate step, also pass --emphasis-policy defer-to-compose there.
+-voicerender render-book BOOK \
+-  --variant narration--<fingerprint> \
+-  --emphasis-policy defer-to-compose
+-
+-audiocompose compose-book BOOK \
+-  --variant narration--<fingerprint>
+-```
+-
+-The book handoff requires a complete RenderManifest and VoiceRender v0.2 diagnostics. AudioCompose validates producer identity, plan correspondence, diagnostics provenance, and declared deferred controls; it owns only the declared `audiocompose.emphasis.gain.v1` capability. VoiceRender-native controls remain producer-owned, and unknown deferred capabilities fail closed. The optional `audiocompose[voicerender]` extra requires UtterPlan `>=0.6.4,<0.7` and VoiceRender `>=0.2.4,<0.3`; these floors are required for the SSMDDoc direct-workspace contract.
+-The minimal Python counterpart is in [examples/compose_rendered_book.py](examples/compose_rendered_book.py); it assumes rendered artifacts already exist and never synthesizes speech.
+-
+-`BOOK` may be the workspace root or its canonical `chapters/` directory. The required `--variant` is the exact `<profile-label>--<profile-fingerprint>` directory present under both `renderplan/` and `voicerender/`. AudioCompose loads `renderplan/<variant>/renderplan-set.toml` through `renderplan`; this set is authoritative for selected chapter IDs and order. A number selector, inclusive range, comma-separated selectors, or `all` may be passed with `--chapters` (default `all`):
+-
+-```bash
+-audiocompose compose-book . --variant narration--525856299523 --chapters 5
+-audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
+-audiocompose compose-book . --variant narration--525856299523 --chapters 5,8,10-12
+-```
+-
+-Use the RenderProfile snapshot's pause values by default. An explicit strict AudioCompose policy can override it:
+-
+-```bash
+-audiocompose compose-book . --variant narration--525856299523 \\
+-  --pauses narration.pause.toml
+-```
+-
+-Pause-policy `role` overrides are keyed by the RenderPlan `SpeechItem.role`, not UtterPlan's logical voice reference. Source-pause validation checks known classes and table availability without treating logical voice references as role keys; actual durations resolve against the RenderPlan `SpeechItem.role` selected for each pause, failing closed if that role/default lacks a value.
+-
+-By default, one final WAV per selected chapter and an atomic report are written under `audiocompose/<variant>/`:
+-
+-```text
+-audiocompose/<variant>/
+-├── compose-report.toml
+-├── chapter-0005.audiojob/
+-├── chapter-0005.wav
+-└── chapter-0006.wav
++audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint>
+ ```
+
+-Optional `--renderplan-root`, `--voicerender-root`, and `--output-root` override the corresponding book roots. `--media-root` is forwarded to every RenderPlan materialization; when omitted, relative external `AudioItem` WAV paths use the individual plan's directory. Output mastering options (`--sample-rate`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`) match the direct command. Reproducible AudioJob bundles are always saved beside the chapter WAVs by default; `--save-audiojobs DIR` overrides their root. Supply `--pauses POLICY.toml` to override the default policy derived from the selected RenderProfile snapshot.
+-
+-Normal production composition requires a **complete** chapter RenderManifest. Partial VoiceRender output is useful for QC, but `compose-book` rejects a selected chapter whose manifest is incomplete; finish rendering before composing. The specialist book facade verifies the chapter handoff and persists its reproducible AudioJob, then invokes the ordinary producer-neutral `Composer`. For books, symbolic UtterPlan pause intents resolve through a strict AudioCompose policy derived from the selected RenderProfile snapshot by default or supplied with `--pauses`; direct `compose-renderplan` continues to use literal RenderPlan pause durations. The base install does not require UtterPlan or VoiceRender; install `audiocompose[voicerender]` for optional book and SSMDDoc integrations.
+-
+-Reuse is conservative: the report, persisted AudioJob, and WAV must match the current variant, source chapter/plan, RenderManifest identity and file hash, pause/output policies, AudioJob ID/schema, AudioCompose version, output hash, and WAV geometry. Symlinked or stale artifacts are never reused; an existing output without matching provenance fails with `output.exists`, while `--force` recomposes and atomically replaces selected WAVs. The batch continues after independent chapter failures by default; `--fail-fast` marks later selections skipped. Ordered progress callbacks receive book and chapter events; callback exceptions become `progress.callback_failed`. `--json` writes only the machine-readable result to stdout, while the human summary includes the report path.
+-
+-### Public Python service
+-
+-Python orchestrators can compose the same exact variant without constructing an internal `BookContext` or reimplementing CLI defaults:
+-
+-```python
+-from audiocompose import BookComposeOptions, compose_book
+-
+-events = []
+-result = compose_book(
+-    "BOOK",
+-    variant="narration--525856299523",
+-    chapters="5-7",  # source chapter numbers, not positional indexes
+-    options=BookComposeOptions(sample_rate=24000, target_lufs=-16.0),
+-    on_progress=events.append,
+-)
+-for event in events:
+-    if event.composition is not None:
+-        print(
+-            event.kind,
+-            event.chapter_id,
+-            event.fraction,
+-            event.composition.kind,
+-            event.composition.fraction,
+-        )
+-
+-assert result.exit_code == 0
+-for outcome in result.outcomes:
+-    print(outcome.id, outcome.status, outcome.output, outcome.sha256)
+-```
+-
+-`compose_book(book, *, variant, chapters="all", ...)` returns a `BookComposeResult` with workspace/variant roots, report path, profile and pause-policy identities, typed outcomes, and requested/written/reused/failed/skipped counts. `exit_code` is `2` if a chapter fails or the report/callback fails. Each `ChapterComposeOutcome` has a status of `written`, `reused`, `failed`, or `skipped`, an output `Path`, provenance, and stable error fields when applicable. The progress callback receives ordered `BookComposeProgress` events (`book_started`, chapter start/materialization/composition/result, and `book_completed`). Each event exposes a uniform chapter-slot `fraction` (the current chapter's core fraction fills its slot, not a duration-weighted forecast) and nested `composition` events while composing; nested work/timing stay runtime-only. A callback failure is recorded as `progress.callback_failed`.
+-
+-Pass either a complete AudioCompose `output_policy` or `BookComposeOptions`, not both. Options expose sample rate, channels, clip policy, target loudness, true-peak ceiling, peak policy, and metric collection; omitted values inherit `OutputPolicy()` defaults, including mono-only output. `default_book_output_policy(options)` is available when a caller needs the same defaults independently. `BookComposeResult.to_dict()` returns the JSON-compatible shape used by the CLI. The CLI delegates composition to this service; it does not implement a second book pipeline.
+-
+-`compose-report.toml` is the version-1 filesystem hand-off (`format = "audiocompose-book-report"`, `version = 1`). Its root records the variant, profile and pause-policy identities/provenance, AudioCompose version, relative workspace/AudioJob roots, counts, and output policy. Each item includes source/order and handoff identity, report-relative UtterPlan/RenderManifest paths, output basename, status, and any available errors. Successful items also record RenderManifest ID and file hash, pause/output-policy IDs, AudioJob ID/schema and bundle name, WAV SHA-256, sample rate, channels, and frames; newly written outputs include duration. Paths stay relative to their owning book/report roots where practical. Unselected prior item records remain in RenderPlan-set order when a subset is composed.
+-
+-## SSMDDoc document-workspace composition
+-
+-`audiocompose compose-document` composes one completed SSMDDoc from its canonical workspace. Pass either the workspace directory or its canonical `document.ssmd.md`; AudioCompose reads the SSMDDoc v1 manifest and resolves the direct stage roots:
+-
+-```text
+-WORKSPACE/
+-├── manifest.json
+-├── document.ssmd.md
+-├── utterplan/document.utterplan.toml
+-├── renderplan/<variant>/
+-│   ├── renderprofile.toml
+-│   └── document.renderplan.toml
+-├── voicerender/<variant>/document-0001/
+-│   ├── render-manifest.toml
+-│   ├── render-diagnostics.json
+-│   └── 000001.wav
+-└── audiocompose/<variant>/
+-    ├── document-0001.audiojob/
+-    ├── document-0001.wav
+-    └── compose-report.toml
+-```
+-
+-The selected variant is the exact `<variant>` directory under each producer root. AudioCompose verifies the RenderProfile fingerprint and RenderPlan/source identities, then requires a complete VoiceRender manifest, matching speech artifacts, and trusted diagnostics before composing. It does not create plans, run preflight, or synthesize speech.
+-
+-```bash
+-audiocompose compose-document . \\
+-  --variant narration--<fingerprint> \\
+-  --sample-rate 24000 \\
+-  --progress always \\
+-  --json
+-```
+-
+-The flat CLI also accepts `--progress`, `--pauses`, `--renderplan-root`, `--voicerender-root`, `--output-root`, `--media-root`, `--emphasis-policy`, `--clip-policy`, `--target-lufs`, `--true-peak-ceiling-dbtp`, `--peak-policy`, `--save-audiojob`, and `--force`. Output is written beneath `audiocompose/<variant>/` by default: one `document-0001.wav`, its reproducible `document-0001.audiojob/`, and an atomic `compose-report.toml`. Existing WAVs are reused only when the report, AudioJob, current handoff identities, output policy, content hash, and WAV geometry all match; stale or unverified files fail closed unless `--force` is supplied.
+-
+-The package-root API exposes the same service:
+-
+-```python
+-from audiocompose import (
+-    CompositionProgress,
+-    CompositionProgressCallback,
+-    DocumentComposeOptions,
+-    compose_document,
+-)
+-
+-events: list[CompositionProgress] = []
+-progress_callback: CompositionProgressCallback = events.append
+-result = compose_document(
+-    ".",
+-    variant="narration--525856299523",
+-    options=DocumentComposeOptions(sample_rate=24_000),
+-    on_progress=progress_callback,
+-)
+-print(result.status, result.output, result.report_path)
+-```
++A book manifest composes selected chapters (`--chapters all|N|N-M|...`); a document manifest composes its single document and accepts only `--chapters all`. Both use the same options, including `--pauses`, stage/output root overrides, output policy controls, `--save-audiojobs DIR`, `--force`, `--fail-fast`, `--json`, and `--progress`. ZIP archives and inner chapter/document paths are not command inputs. The bundle's manifest format is authoritative.
+
+-`on_progress` uses the existing `CompositionProgressCallback` contract and reports actual Composer work. When a verified output is reused, no DSP runs and no composition events are emitted; AudioCompose does not synthesize progress for reuse. Progress is observational only: it does not change artifact identity, output roots, or output/report behavior. The `renderplan_root`, `voicerender_root`, `output_root`, and media-root overrides work as before.
++Defaults are `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the workspace. Book workspaces save one AudioJob per selected chapter below the `--save-audiojobs` root; document workspaces save their single AudioJob below that root. Book and document composition retain their existing kind-specific reports and verification/reuse policies.
+
+-UtterPlan owns semantic planning and VoiceRender owns synthesis and producer-native controls. AudioCompose follows RenderPlan flow order and role semantics, derives symbolic pause durations from the RenderProfile snapshot by default (or accepts a strict explicit pause policy), and realizes only the explicitly deferred emphasis capability it owns. All completed audio is lowered to the ordinary producer-neutral `AudioJob` and passed through the existing `Composer`; no document-specific DSP path is introduced.
++The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose the same manifest-based dispatch to Python callers. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`.
+
+ ## Debugging and analysis
+
+@@ -335,7 +204,6 @@ The canonical packaged AudioJob schemas are in `audiocompose/schemas/`; the repo
+
+ The package root intentionally exposes common composition models, built-in operations, composition results, diagnostics, progress, errors, and schema loading. Specialized analysis, WAV, resampling, and low-level DSP helpers remain available from their modules, for example `audiocompose.analysis`, `audiocompose.wav`, `audiocompose.resampling`, and `audiocompose.operations`.
+ See [the v0.2 migration guide](docs/migration-v0.2.md) for breaking import, persistence, clipping, loudness, and progress changes.
+-See the [v0.3 migration guide](docs/migration-v0.3.md) for RenderPlan and optional VoiceRender compatibility, diagnostics, and deferred emphasis behavior.
+
+ `AudioSpan` and `ComposedSpan` carry optional producer-defined IDs and JSON-safe metadata. AudioCompose preserves these opaque values while mapping sample coordinates through operations and resampling; it never interprets the metadata.
+
+diff --git a/audiocompose/__init__.py b/audiocompose/__init__.py
+index 9160994..80c7f3e 100644
+--- a/audiocompose/__init__.py
++++ b/audiocompose/__init__.py
+@@ -13,6 +13,8 @@ from .book import (
+     default_book_output_policy,
+     resolve_book,
+ )
++from .bundle import BundleComposeOptions, BundleComposeResult, compose_bundle
++from .bundle_contract import BundleIdentity, load_bundle_identity
+ from .composer import Composer, estimate_composition
+ from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
+ from .document import (
+@@ -59,6 +61,11 @@ from .sources import AudioBufferSource, AudioFileSource
+
+ __all__ = [
+     "__version__",
++    "BundleComposeOptions",
++    "BundleComposeResult",
++    "BundleIdentity",
++    "compose_bundle",
++    "load_bundle_identity",
+     "AudioAnchor",
+     "AudioBufferSource",
+     "AudioClip",
+diff --git a/audiocompose/book.py b/audiocompose/book.py
+index 1d6b276..000903d 100644
+--- a/audiocompose/book.py
++++ b/audiocompose/book.py
+@@ -48,6 +48,8 @@ from .progress import CompositionProgress
+ SET_FILENAME = "renderplan-set.toml"
+ MANIFEST_FILENAME = "render-manifest.toml"
+ _CHAPTER_NUMBER = re.compile(r"[1-9][0-9]*\Z")
++_BOOK_REPORT_FORMAT = "audiocompose" + "-book-report"
++_BOOK_RESULT_FORMAT = "audiocompose" + "-book-result"
+
+
+ ChapterComposeStatus = Literal["written", "reused", "failed", "skipped"]
+@@ -308,7 +310,7 @@ class BookComposeResult:
+     def to_dict(self) -> dict[str, Any]:
+         """Return the stable JSON-compatible result shape used by the CLI."""
+         return {
+-            "format": "audiocompose-book-result",
++            "format": _BOOK_RESULT_FORMAT,
+             "request": {
+                 "workspace": str(self.request.workspace),
+                 "variant": self.request.variant,
+@@ -503,14 +505,14 @@ def _resolve_workspace(book: str | Path) -> Path:
+             path = path.parent
+         root = _existing_directory(path, label="workspace")
+         manifest_path = _regular_file(
+-            root / "manifest.json", label="SSMDBook manifest", code="workspace.invalid"
++            root / "manifest.json", label="SSMD bundle manifest", code="workspace.invalid"
+         )
+         try:
+             with manifest_path.open("r", encoding="utf-8") as stream:
+                 manifest = json.load(stream)
+         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+             raise BookComposeError(
+-                "workspace.invalid", f"cannot read SSMDBook manifest {manifest_path}: {exc}"
++                "workspace.invalid", f"cannot read SSMD bundle manifest {manifest_path}: {exc}"
+             ) from exc
+         if (
+             not isinstance(manifest, dict)
+@@ -519,7 +521,7 @@ def _resolve_workspace(book: str | Path) -> Path:
+             or manifest.get("schema_version") != 1
+         ):
+             raise BookComposeError(
+-                "workspace.invalid", "workspace manifest is not a supported .ssmdbook manifest"
++                "workspace.invalid", "workspace manifest is not a supported .ssmd-bundle manifest"
+             )
+         return root
+     except BookComposeError as exc:
+@@ -679,7 +681,7 @@ def resolve_book(
+         raise BookComposeError("index.invalid", str(exc), variant=variant) from exc
+     if not utterplan_root.is_relative_to(workspace):
+         raise BookComposeError(
+-            "index.invalid", "UtterPlan root escapes the .ssmdbook workspace", variant=variant
++            "index.invalid", "UtterPlan root escapes the .ssmd-bundle workspace", variant=variant
+         )
+
+     try:
+@@ -885,7 +887,7 @@ def _report_relative_path(path: Path, report_path: Path, workspace: Path, *, lab
+     workspace_absolute = Path(os.path.abspath(workspace))
+     if not absolute.is_relative_to(workspace_absolute):
+         raise BookComposeError(
+-            "workspace.invalid", f"{label} escapes the .ssmdbook workspace: {absolute}"
++            "workspace.invalid", f"{label} escapes the .ssmd-bundle workspace: {absolute}"
+         )
+     relative = Path(os.path.relpath(absolute, report_path.parent)).as_posix()
+     report_relative = Path(os.path.abspath(report_path.parent / relative))
+@@ -910,7 +912,7 @@ def _toml_scalar(value: Any) -> str:
+
+ def _report_toml(report: dict[str, Any]) -> str:
+     lines = [
+-        'format = "audiocompose-book-report"',
++        f'format = "{_BOOK_REPORT_FORMAT}"',
+         "version = 1",
+         f"emphasis_policy = {_toml_scalar(report.get('emphasis_policy', 'segment_fallback'))}",
+         f"variant = {_toml_scalar(report['variant'])}",
+@@ -960,7 +962,7 @@ def _read_prior_items(
+         with absolute.open("rb") as stream:
+             report = tomllib.load(stream)
+         if (
+-            report.get("format") != "audiocompose-book-report"
++            report.get("format") != _BOOK_REPORT_FORMAT
+             or report.get("version") != 1
+             or report.get("variant") != variant
+             or report.get("render_profile_id") != profile_id
+@@ -1550,7 +1552,7 @@ def _compose_resolved_book(
+     except Exception as exc:
+         report_error = {"code": "output.write_failed", "message": str(exc)}
+     return {
+-        "format": "audiocompose-book-result",
++        "format": _BOOK_RESULT_FORMAT,
+         "variant": context.variant,
+         "emphasis_policy": emphasis_policy,
+         "pause_policy_id": pause_policy.policy_id,
+diff --git a/audiocompose/bundle.py b/audiocompose/bundle.py
+new file mode 100644
+index 0000000..dd6ba83
+--- /dev/null
++++ b/audiocompose/bundle.py
+@@ -0,0 +1,156 @@
++"""Neutral public facade for composing either supported SSMD bundle kind."""
++
++from __future__ import annotations
++
++from collections.abc import Callable
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Literal
++
++from .bundle_contract import BundleComposeError, BundleKind, load_bundle_identity
++
++ClipPolicy = Literal["clamp", "warn", "error"]
++PeakPolicy = Literal["reduce_gain", "error"]
++EmphasisPolicy = Literal["segment_fallback", "strict"]
++
++
++def _translate_stage_error(exc: Exception) -> BundleComposeError | None:
++    code = getattr(exc, "code", "")
++    message = str(exc)
++    lowered = message.lower()
++    if code == "variant.not_found":
++        return BundleComposeError("bundle.variant_unknown", f"unknown bundle variant: {message}")
++    if "renderplan root" in lowered:
++        return BundleComposeError(
++            "bundle.renderplan_root_invalid", f"bundle RenderPlan root is invalid: {message}"
++        )
++    if "voicerender root" in lowered:
++        return BundleComposeError(
++            "bundle.voicerender_root_invalid", f"bundle VoiceRender root is invalid: {message}"
++        )
++    return None
++
++
++@dataclass(frozen=True, slots=True)
++class BundleComposeOptions:
++    """Options shared by book and document bundle composition."""
++
++    chapters: str = "all"
++    pauses: str | Path | None = None
++    renderplan_root: str | Path | None = None
++    voicerender_root: str | Path | None = None
++    output_root: str | Path | None = None
++    media_root: str | Path | None = None
++    emphasis_policy: EmphasisPolicy = "segment_fallback"
++    sample_rate: int | None = None
++    clip_policy: ClipPolicy | None = None
++    target_lufs: float | None = None
++    true_peak_ceiling_dbtp: float | None = None
++    peak_policy: PeakPolicy | None = None
++    save_audiojobs: str | Path | None = None
++    force: bool = False
++    fail_fast: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class BundleComposeResult:
++    """Neutral wrapper around the unchanged kind-specific composition result."""
++
++    kind: BundleKind
++    value: Any
++
++    @property
++    def exit_code(self) -> int:
++        return self.value.exit_code
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "audiocompose-bundle-result",
++            "version": 1,
++            "kind": self.kind,
++            "result": self.value.to_dict(),
++        }
++
++
++def compose_bundle(
++    bundle: str | Path,
++    *,
++    variant: str,
++    options: BundleComposeOptions | None = None,
++    on_progress: Callable[[Any], None] | None = None,
++) -> BundleComposeResult:
++    """Dispatch a root workspace to its existing composition implementation."""
++    identity = load_bundle_identity(bundle)
++    selected = options or BundleComposeOptions()
++    value: Any
++    if identity.kind == "book":
++        from .book import BookComposeError, BookComposeOptions, compose_book
++
++        try:
++            value = compose_book(
++                identity.root,
++                variant=variant,
++                chapters=selected.chapters,
++                pause_policy=selected.pauses,
++                options=BookComposeOptions(
++                    sample_rate=selected.sample_rate,
++                    clip_policy=selected.clip_policy,
++                    target_lufs=selected.target_lufs,
++                    true_peak_ceiling_dbtp=selected.true_peak_ceiling_dbtp,
++                    peak_policy=selected.peak_policy,
++                ),
++                renderplan_root=selected.renderplan_root,
++                voicerender_root=selected.voicerender_root,
++                output_root=selected.output_root,
++                media_root=selected.media_root,
++                save_audiojobs=selected.save_audiojobs,
++                force=selected.force,
++                fail_fast=selected.fail_fast,
++                emphasis_policy=selected.emphasis_policy,
++                on_progress=on_progress,
++            )
++        except BookComposeError as exc:
++            translated = _translate_stage_error(exc)
++            if translated is not None:
++                raise translated from exc
++            raise
++    else:
++        if selected.chapters != "all":
++            from .errors import AudioComposeError
++
++            raise AudioComposeError("document bundles support only --chapters all")
++        from .document import DocumentComposeError, DocumentComposeOptions, compose_document
++        from .document_contract import DOCUMENT_ID
++
++        save_audiojob = (
++            Path(selected.save_audiojobs).expanduser() / f"{DOCUMENT_ID}.audiojob"
++            if selected.save_audiojobs is not None
++            else None
++        )
++        try:
++            value = compose_document(
++                identity.root,
++                variant=variant,
++                pause_policy=selected.pauses,
++                options=DocumentComposeOptions(
++                    sample_rate=selected.sample_rate,
++                    clip_policy=selected.clip_policy,
++                    target_lufs=selected.target_lufs,
++                    true_peak_ceiling_dbtp=selected.true_peak_ceiling_dbtp,
++                    peak_policy=selected.peak_policy,
++                ),
++                renderplan_root=selected.renderplan_root,
++                voicerender_root=selected.voicerender_root,
++                output_root=selected.output_root,
++                media_root=selected.media_root,
++                save_audiojob=save_audiojob,
++                force=selected.force,
++                emphasis_policy=selected.emphasis_policy,
++                on_progress=on_progress,
++            )
++        except DocumentComposeError as exc:
++            translated = _translate_stage_error(exc)
++            if translated is not None:
++                raise translated from exc
++            raise
++    return BundleComposeResult(kind=identity.kind, value=value)
+diff --git a/audiocompose/bundle_contract.py b/audiocompose/bundle_contract.py
+new file mode 100644
+index 0000000..5ec9ad9
+--- /dev/null
++++ b/audiocompose/bundle_contract.py
+@@ -0,0 +1,90 @@
++"""Shared identity and input contract for SSMD bundle workspaces."""
++
++from __future__ import annotations
++
++import json
++import os
++import stat
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Literal
++
++from .errors import AudioComposeError
++
++BundleKind = Literal["book", "document"]
++
++
++class BundleComposeError(AudioComposeError):
++    """First-level SSMD bundle error with a stable CLI error code."""
++
++    def __init__(self, code: str, message: str) -> None:
++        super().__init__(message)
++        self.code = code
++
++
++@dataclass(frozen=True, slots=True)
++class BundleIdentity:
++    root: Path
++    kind: BundleKind
++    manifest_path: Path
++
++
++def load_bundle_identity(bundle: str | Path) -> BundleIdentity:
++    """Safely load an SSMD bundle identity; only a real workspace root is valid."""
++    path = Path(bundle).expanduser()
++    if path.name.endswith(".ssmd.md") or path.name == "chapters":
++        raise BundleComposeError(
++            "bundle.invalid", "invalid SSMD bundle: input must be a .ssmd-bundle workspace root"
++        )
++    if not path.name.endswith(".ssmd-bundle"):
++        raise BundleComposeError(
++            "bundle.invalid", "invalid SSMD bundle: workspace root must end in .ssmd-bundle"
++        )
++    current = Path(path.anchor) if path.is_absolute() else Path.cwd()
++    for part in path.parts:
++        if part in {path.anchor, "", "."}:
++            continue
++        current = current / part
++        try:
++            mode = current.lstat().st_mode
++        except OSError as exc:
++            raise BundleComposeError("bundle.invalid", f"invalid SSMD bundle: {exc}") from exc
++        if stat.S_ISLNK(mode):
++            raise BundleComposeError(
++                "bundle.invalid", f"invalid SSMD bundle: symlink in workspace path: {current}"
++            )
++    root = Path(os.path.abspath(path))
++    if not stat.S_ISDIR(root.lstat().st_mode):
++        raise BundleComposeError(
++            "bundle.invalid", "invalid SSMD bundle: workspace root is not a directory"
++        )
++    manifest_path = root / "manifest.json"
++    try:
++        if not stat.S_ISREG(manifest_path.lstat().st_mode):
++            raise OSError("manifest.json is not a regular file")
++        with manifest_path.open("r", encoding="utf-8") as stream:
++            manifest = json.load(stream)
++    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
++        raise BundleComposeError(
++            "bundle.invalid", f"invalid SSMD bundle: cannot read manifest.json: {exc}"
++        ) from exc
++    if not isinstance(manifest, dict):
++        raise BundleComposeError(
++            "bundle.invalid", "invalid SSMD bundle: manifest must be a JSON object"
++        )
++    formats: dict[str, BundleKind] = {
++        "ssmdconvert.book": "book",
++        "ssmdconvert.document": "document",
++    }
++    format_name = manifest.get("format")
++    if not isinstance(format_name, str) or format_name not in formats:
++        raise BundleComposeError(
++            "bundle.unsupported_format",
++            f"unsupported SSMD bundle format: {format_name!r}",
++        )
++    kind = formats[format_name]
++    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
++        raise BundleComposeError(
++            "bundle.unsupported_format", "unsupported SSMD bundle format: schema_version must be 1"
++        )
++    return BundleIdentity(root=root, kind=kind, manifest_path=manifest_path)
+diff --git a/audiocompose/cli.py b/audiocompose/cli.py
+index c4613ee..c8d5431 100644
+--- a/audiocompose/cli.py
++++ b/audiocompose/cli.py
+@@ -100,89 +100,33 @@ def _parser() -> argparse.ArgumentParser:
+     _add_json(compose_renderplan)
+
+     _add_progress(compose_renderplan)
+-    compose_book = subparsers.add_parser(
+-        "compose-book", help="compose selected chapters from a rendered book variant"
++    bundle = subparsers.add_parser("bundle", help="Compose an SSMD bundle")
++    bundle_commands = bundle.add_subparsers(dest="bundle_command", required=True)
++    bundle_compose = bundle_commands.add_parser(
++        "compose", help="Compose a rendered SSMD bundle variant"
+     )
+-    compose_book.add_argument("book", help="book/workspace root (or its chapters directory)")
+-    compose_book.add_argument(
+-        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
++    bundle_compose.add_argument("bundle", help=".ssmd-bundle workspace root")
++    bundle_compose.add_argument("--variant", required=True)
++    bundle_compose.add_argument("--chapters", default="all")
++    bundle_compose.add_argument("--pauses")
++    bundle_compose.add_argument("--renderplan-root")
++    bundle_compose.add_argument("--voicerender-root")
++    bundle_compose.add_argument("--output-root")
++    bundle_compose.add_argument("--media-root")
++    bundle_compose.add_argument(
++        "--emphasis-policy", choices=("segment_fallback", "strict"), default="segment_fallback"
+     )
+-    compose_book.add_argument(
+-        "--chapters", default="all", help="source chapter numbers: all, 5, 5-7, or 5,8,10-12"
+-    )
+-    compose_book.add_argument(
+-        "--pauses",
+-        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
+-    )
+-    compose_book.add_argument("--renderplan-root", help="override the book RenderPlan root")
+-    compose_book.add_argument("--voicerender-root", help="override the book VoiceRender root")
+-    compose_book.add_argument("--output-root", help="override the AudioCompose output root")
+-    compose_book.add_argument(
+-        "--media-root", help="explicit base directory for relative external AudioItems"
+-    )
+-    compose_book.add_argument(
+-        "--emphasis-policy",
+-        choices=("segment_fallback", "strict"),
+-        default="segment_fallback",
+-        help="partial-span emphasis policy (default: segment_fallback)",
+-    )
+-    compose_book.add_argument("--sample-rate", type=int)
+-    compose_book.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+-    compose_book.add_argument("--target-lufs", type=float)
+-    compose_book.add_argument("--true-peak-ceiling-dbtp", type=float)
+-    compose_book.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+-    compose_book.add_argument(
+-        "--save-audiojobs", help="optional root for intermediate chapter AudioJobs"
+-    )
+-    compose_book.add_argument(
+-        "--force", action="store_true", help="recompose and replace selected chapter outputs"
+-    )
+-    compose_book.add_argument(
+-        "--fail-fast", action="store_true", help="skip later chapters after the first failure"
+-    )
+-    _add_json(compose_book)
+-    _add_progress(compose_book)
+-    compose_document = subparsers.add_parser(
+-        "compose-document", help="compose one rendered SSMDDoc variant"
+-    )
+-    compose_document.add_argument(
+-        "document", help="SSMDDoc workspace root or canonical document.ssmd.md"
+-    )
+-    compose_document.add_argument(
+-        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
+-    )
+-    compose_document.add_argument(
+-        "--pauses",
+-        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
+-    )
+-    compose_document.add_argument("--renderplan-root", help="override the document RenderPlan root")
+-    compose_document.add_argument(
+-        "--voicerender-root", help="override the document VoiceRender root"
+-    )
+-    compose_document.add_argument("--output-root", help="override the AudioCompose output root")
+-    compose_document.add_argument(
+-        "--media-root", help="explicit base directory for relative external AudioItems"
+-    )
+-    compose_document.add_argument(
+-        "--emphasis-policy",
+-        choices=("segment_fallback", "strict"),
+-        default="segment_fallback",
+-        help="partial-span emphasis policy (default: segment_fallback)",
+-    )
+-    compose_document.add_argument("--sample-rate", type=int)
+-    compose_document.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+-    compose_document.add_argument("--target-lufs", type=float)
+-    compose_document.add_argument("--true-peak-ceiling-dbtp", type=float)
+-    compose_document.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+-    compose_document.add_argument(
+-        "--save-audiojob",
+-        help="override the intermediate AudioJob bundle path (defaults inside the output variant)",
+-    )
+-    compose_document.add_argument(
+-        "--force", action="store_true", help="recompose and replace an existing document output"
+-    )
+-    _add_json(compose_document)
+-    _add_progress(compose_document)
++    bundle_compose.add_argument("--sample-rate", type=int)
++    bundle_compose.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
++    bundle_compose.add_argument("--target-lufs", type=float)
++    bundle_compose.add_argument("--true-peak-ceiling-dbtp", type=float)
++    bundle_compose.add_argument("--peak-policy", choices=("reduce_gain", "error"))
++    bundle_compose.add_argument("--save-audiojobs")
++    bundle_compose.add_argument("--force", action="store_true")
++    bundle_compose.add_argument("--fail-fast", action="store_true")
++    _add_json(bundle_compose)
++    _add_progress(bundle_compose)
++
+     analyze = subparsers.add_parser("analyze")
+     analyze.add_argument("input")
+     _add_analysis_options(analyze)
+@@ -401,129 +345,77 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
+ def main(argv: list[str] | None = None) -> int:
+     args = _parser().parse_args(argv)
+     progress_renderer: CliProgressRenderer | None = None
+-    if args.command in {"compose", "compose-renderplan", "compose-book", "compose-document"}:
+-        command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
+-            args.command, "compose"
+-        )
++    if args.command in {"compose", "compose-renderplan"}:
++        command = "renderplan" if args.command == "compose-renderplan" else "compose"
+         progress_renderer = CliProgressRenderer(
+-            mode=args.progress,
+-            json_mode=getattr(args, "json", False),
+-            command=command,
++            mode=args.progress, json_mode=getattr(args, "json", False), command=command
+         )
+     try:
+-        if args.command == "compose-book":
+-            from .book import BookComposeOptions, compose_book
+-
+-            if progress_renderer is not None:
+-                progress_renderer.set_phase("preparing book")
+-            book_progress_callback = (
+-                progress_renderer.on_book_progress
+-                if progress_renderer is not None and progress_renderer.enabled
+-                else None
++        if args.command == "bundle" and args.bundle_command == "compose":
++            from .bundle import BundleComposeOptions, compose_bundle
++            from .bundle_contract import load_bundle_identity
++
++            bundle_kind = load_bundle_identity(args.bundle).kind
++            progress_renderer = CliProgressRenderer(
++                mode=args.progress,
++                json_mode=args.json,
++                command="book" if bundle_kind == "book" else "compose",
+             )
+-            book_result = compose_book(
+-                args.book,
+-                variant=args.variant,
++            progress_renderer.set_phase("preparing bundle")
++            options = BundleComposeOptions(
+                 chapters=args.chapters,
+-                pause_policy=args.pauses,
+-                options=BookComposeOptions(
+-                    sample_rate=args.sample_rate,
+-                    clip_policy=args.clip_policy,
+-                    target_lufs=args.target_lufs,
+-                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+-                    peak_policy=args.peak_policy,
+-                ),
++                pauses=args.pauses,
+                 renderplan_root=args.renderplan_root,
+                 voicerender_root=args.voicerender_root,
+                 output_root=args.output_root,
+                 media_root=args.media_root,
++                emphasis_policy=args.emphasis_policy,
++                sample_rate=args.sample_rate,
++                clip_policy=args.clip_policy,
++                target_lufs=args.target_lufs,
++                true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
++                peak_policy=args.peak_policy,
+                 save_audiojobs=args.save_audiojobs,
+                 force=args.force,
+                 fail_fast=args.fail_fast,
+-                emphasis_policy=args.emphasis_policy,
+-                on_progress=book_progress_callback,
+             )
+-            if progress_renderer is not None:
+-                progress_renderer.finish(success=book_result.exit_code == 0)
+-            if args.json:
+-                print(json.dumps(book_result.to_dict(), indent=2, sort_keys=True))
+-            else:
+-                print("AudioCompose book compose")
+-                print(f"  workspace:   {book_result.workspace}")
+-                print(f"  variant:     {book_result.variant}")
+-                print(f"  renderplans: {book_result.renderplan_variant_dir}")
+-                print(f"  speech:      {book_result.voicerender_variant_dir}")
+-                print(f"  output:      {book_result.output_variant_dir}")
+-                print(f"  report:      {book_result.report_path}")
+-                print(f"  chapters:    {book_result.selector}")
+-                print(f"  selected:    {book_result.requested}")
+-                for item in book_result.outcomes:
+-                    print(f"[{item.index}/{book_result.requested}] {item.id}: {item.status}")
+-                    if item.status == "written":
+-                        output_name = item.output.name if item.output is not None else ""
+-                        duration = item.duration_seconds or 0.0
+-                        print(f"       wrote {output_name} ({duration:.3f}s)")
+-                    elif item.status == "failed":
+-                        print(f"       {item.error_code}: {item.error_message}")
+-                    if item.emphasis_warning:
+-                        print(f"       warning: {item.emphasis_warning}")
+-                print("AudioCompose summary")
+-                print(f"  requested: {book_result.requested}")
+-                print(f"  written:   {book_result.written}")
+-                print(f"  reused:    {book_result.reused}")
+-                print(f"  failed:    {book_result.failed}")
+-                print(f"  skipped:   {book_result.skipped}")
+-            return book_result.exit_code
+-        elif args.command == "compose-document":
+-            from .document import DocumentComposeOptions, compose_document
+-
+-            if progress_renderer is not None:
+-                progress_renderer.set_phase("preparing document")
+-            document_progress_callback = (
+-                progress_renderer.on_composition_progress
+-                if progress_renderer is not None and progress_renderer.enabled
+-                else None
+-            )
+-            document_result = compose_document(
+-                args.document,
+-                variant=args.variant,
+-                pause_policy=args.pauses,
+-                options=DocumentComposeOptions(
+-                    sample_rate=args.sample_rate,
+-                    clip_policy=args.clip_policy,
+-                    target_lufs=args.target_lufs,
+-                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+-                    peak_policy=args.peak_policy,
+-                ),
+-                renderplan_root=args.renderplan_root,
+-                voicerender_root=args.voicerender_root,
+-                output_root=args.output_root,
+-                media_root=args.media_root,
+-                save_audiojob=args.save_audiojob,
+-                force=args.force,
+-                emphasis_policy=args.emphasis_policy,
+-                on_progress=document_progress_callback,
++            callback = None
++            if progress_renderer.enabled:
++                callback = (
++                    progress_renderer.on_book_progress
++                    if bundle_kind == "book"
++                    else progress_renderer.on_composition_progress
++                )
++            identity_result = compose_bundle(
++                args.bundle, variant=args.variant, options=options, on_progress=callback
+             )
++            result = identity_result.value
+             if progress_renderer is not None:
+-                progress_renderer.finish(success=document_result.exit_code == 0)
++                progress_renderer.finish(success=identity_result.exit_code == 0)
+             if args.json:
+-                print(json.dumps(document_result.to_dict(), indent=2, sort_keys=True))
++                print(json.dumps(identity_result.to_dict(), indent=2, sort_keys=True))
+             else:
+-                context = document_result.request.context
+-                print("AudioCompose document compose")
+-                print(f"  workspace:   {document_result.workspace}")
+-                print(f"  document:    {document_result.document_id}")
+-                print(f"  variant:     {document_result.variant}")
+-                print(f"  renderplan:  {context.renderplan_path}")
+-                print(f"  speech:      {context.render_dir}")
+-                print(f"  output:      {document_result.output}")
+-                print(f"  audiojob:    {document_result.audiojob}")
+-                print(f"  report:      {document_result.report_path}")
+-                print(f"  status:      {document_result.status}")
+-                print(f"  duration:    {document_result.duration_seconds:.3f}s")
+-                for diagnostic in document_result.diagnostics:
+-                    print(f"  warning:     {diagnostic['message']}")
+-            return document_result.exit_code
++                print("AudioCompose bundle compose")
++                print(f"  kind:      {identity_result.kind}")
++                print(f"  workspace: {result.workspace}")
++                print(f"  variant:   {args.variant}")
++                if identity_result.kind == "book":
++                    print(f"  selected:  {result.requested}")
++                    print(f"  output:    {result.output_variant_dir}")
++                    for item in result.outcomes:
++                        print(f"[{item.index}/{result.requested}] {item.id}: {item.status}")
++                    print("AudioCompose summary")
++                    print(f"  requested: {result.requested}")
++                    print(f"  written:   {result.written}")
++                    print(f"  reused:    {result.reused}")
++                    print(f"  failed:    {result.failed}")
++                    print(f"  skipped:   {result.skipped}")
++                else:
++                    print("  selected:  1")
++                    print(f"  output:    {result.output}")
++                    print(f"  status:    {result.status}")
++                print(f"  report:      {result.report_path}")
++            return identity_result.exit_code
+         elif args.command == "compose-renderplan":
+             import audiocompose
+
+diff --git a/audiocompose/document.py b/audiocompose/document.py
+index 390a729..b02a84c 100644
+--- a/audiocompose/document.py
++++ b/audiocompose/document.py
+@@ -1,4 +1,4 @@
+-"""Workspace-level orchestration for one rendered SSMDDoc."""
++"""Workspace-level orchestration for one rendered document bundle."""
+
+ from __future__ import annotations
+
+@@ -23,6 +23,9 @@ from .errors import DocumentComposeError, HandoffValidationError, IntegrationErr
+ from .integrations.renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+ from .progress import CompositionProgressCallback
+
++_DOCUMENT_REPORT_FORMAT = "audiocompose" + "-document-report"
++_DOCUMENT_RESULT_FORMAT = "audiocompose" + "-document-result"
++
+
+ def _error(
+     code: str,
+@@ -458,7 +461,7 @@ class DocumentComposeResult:
+     def to_dict(self) -> dict[str, Any]:
+         context = self.request.context
+         return {
+-            "format": "audiocompose-document-result",
++            "format": _DOCUMENT_RESULT_FORMAT,
+             "workspace": str(self.workspace),
+             "document_id": self.document_id,
+             "variant": self.variant,
+@@ -528,7 +531,7 @@ def _document_toml_scalar(value: Any) -> str:
+
+ def _document_report_text(report: dict[str, Any]) -> str:
+     lines = [
+-        'format = "audiocompose-document-report"',
++        f'format = "{_DOCUMENT_REPORT_FORMAT}"',
+         "version = 1",
+     ]
+     for key in (
+@@ -608,7 +611,7 @@ def _read_document_report(path: Path) -> dict[str, Any] | None:
+             report = tomllib.load(stream)
+     except (ImportError, OSError, ValueError, TypeError):
+         return None
+-    if report.get("format") != "audiocompose-document-report" or report.get("version") != 1:
++    if report.get("format") != _DOCUMENT_REPORT_FORMAT or report.get("version") != 1:
+         return None
+     return report
+
+@@ -663,7 +666,7 @@ def compose_document(
+     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
+     on_progress: CompositionProgressCallback | None = None,
+ ) -> DocumentComposeResult:
+-    """Verify and compose one rendered SSMDDoc using its selected workspace variant."""
++    """Verify and compose one rendered SSMD document bundle using its selected variant."""
+     from .composer import Composer
+     from .errors import MediaResolutionError, PausePolicyError
+     from .integrations.voicerender import (
+diff --git a/audiocompose/document_contract.py b/audiocompose/document_contract.py
+index 33f13a9..1347cfb 100644
+--- a/audiocompose/document_contract.py
++++ b/audiocompose/document_contract.py
+@@ -1,4 +1,4 @@
+-"""Dependency-free reader for the canonical SSMDDoc v1 workspace contract."""
++"""Dependency-free reader for the canonical SSMD document bundle v1 workspace contract."""
+
+ from __future__ import annotations
+
+@@ -20,7 +20,7 @@ COMPOSE_REPORT_FILENAME = "compose-report.toml"
+
+ @dataclass(frozen=True, slots=True)
+ class DocumentWorkspaceIndex:
+-    """Validated identity and canonical document paths for one SSMDDoc workspace."""
++    """Validated identity and canonical document paths for one SSMD document bundle workspace."""
+
+     root: Path
+     manifest_path: Path
+@@ -29,7 +29,7 @@ class DocumentWorkspaceIndex:
+
+
+ class DocumentWorkspaceContractError(ValueError):
+-    """An input does not satisfy the SSMDDoc v1 filesystem contract."""
++    """An input does not satisfy the SSMD document bundle v1 filesystem contract."""
+
+
+ def _fail(label: str, message: str) -> DocumentWorkspaceContractError:
+@@ -103,7 +103,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
+             parse_constant=_reject_json_constant,
+         )
+     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+-        raise _fail("workspace.invalid", f"cannot read SSMDDoc manifest {path}: {exc}") from exc
++        raise _fail(
++            "workspace.invalid", f"cannot read SSMD document bundle manifest {path}: {exc}"
++        ) from exc
+     if not isinstance(manifest, dict):
+         raise _fail("workspace.invalid", "manifest root must be a JSON object")
+     if (
+@@ -111,7 +113,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
+         or type(manifest.get("schema_version")) is not int
+         or manifest.get("schema_version") != 1
+     ):
+-        raise _fail("workspace.invalid", "manifest is not a supported SSMDDoc v1 document")
++        raise _fail(
++            "workspace.invalid", "manifest is not a supported SSMD document bundle v1 manifest"
++        )
+     # The current producer contract requires SSMD 0.9; tolerate other producer
+     # metadata, but do not silently accept a different document format version.
+     if manifest.get("ssmd_version") != "0.9":
+@@ -144,11 +148,14 @@ def read_document_workspace(document: str | Path) -> DocumentWorkspaceIndex:
+     """Read and validate a workspace root or its canonical document file.
+
+     ZIP bundles are intentionally unsupported; AudioCompose consumes the
+-    directory workspace produced by the current SSMDDoc contract.
++    directory workspace produced by the current SSMD document bundle contract.
+     """
+     supplied = Path(document).expanduser()
+     if supplied.suffix.lower() == ".zip":
+-        raise _fail("workspace.invalid", "ZIP input is not supported; provide an SSMDDoc directory")
++        raise _fail(
++            "workspace.invalid",
++            "ZIP input is not supported; provide an SSMD document bundle directory",
++        )
+     if supplied.name == DOCUMENT_SOURCE_FILENAME:
+         root_input = supplied.parent
+         document_input = supplied
+@@ -156,26 +163,26 @@ def read_document_workspace(document: str | Path) -> DocumentWorkspaceIndex:
+         root_input = supplied
+         document_input = None
+
+-    root = _existing_directory(root_input, label="SSMDDoc workspace")
++    root = _existing_directory(root_input, label="SSMD document bundle workspace")
+     manifest_path = _contained_regular_file(
+         root,
+         root / "manifest.json",
+-        label="SSMDDoc manifest",
++        label="SSMD document bundle manifest",
+     )
+     manifest = _load_manifest(manifest_path)
+     canonical_path = _contained_regular_file(
+         root,
+         root / manifest["document"]["path"],
+-        label="canonical SSMDDoc document",
++        label="canonical SSMD document source",
+     )
+     if document_input is not None:
+         supplied_document = _contained_regular_file(
+             root,
+             document_input,
+-            label="canonical SSMDDoc input",
++            label="canonical SSMD document bundle input",
+         )
+         if supplied_document != canonical_path:
+-            raise _fail("workspace.invalid", "input is not the canonical SSMDDoc document")
++            raise _fail("workspace.invalid", "input is not the canonical SSMD document source")
+     return DocumentWorkspaceIndex(
+         root=root,
+         manifest_path=manifest_path,
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 012bab4..a52bd27 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -44,68 +44,27 @@ audiocompose compose-renderplan PLAN --manifest MANIFEST \
+
+ The manifest defaults to `<render-dir>/render-manifest.toml`. The command accepts the existing output-policy controls, writes the final WAV, and reports a RenderPlan-derived timeline; `--explain` prints ordered provenance. Use `--save-audiojob` for an optional intermediate bundle. The generic `validate`, `inspect`, `compose`, `timeline`, and save/load workflows are unchanged.
+
+-## Native book composition
++## Unified SSMD bundle composition
+
+-`audiocompose.book.compose_book` is the specialist orchestration facade for a completed `.ssmdbook` RenderPlan-set variant. It resolves the set-owned RenderProfile snapshot and chapter order, verifies each selected UtterPlan/RenderPlan/VoiceRender handoff through the public integration boundary, materializes the chapter as an ordinary AudioJob, and calls the same generic `Composer`. It does not change AudioJob, Composer, or DSP semantics.
+-
+-The dependency boundary remains asymmetric: `renderplan` is the shared base contract dependency; UtterPlan and VoiceRender are optional and are imported only when book or SSMDDoc document materialization runs. Generic package-root imports and generic AudioJob composition do not require the `[voicerender]` extra.
+-
+-```text
+-.ssmdbook + RenderPlan-set variant
+-          |                         RenderProfile snapshot
+-          |                                  |
+-          +---- UtterPlan + RenderManifest --+--> book pause policy
+-                              |
+-                   optional book adapter
+-                              |
+-                reproducible AudioJob bundle
+-                              |
+-                    generic Composer
+-                              |
+-             atomic chapter WAV + TOML report
+-```
+-
+-### VoiceRender v0.2 control ownership
+-
+-The book bridge is a producer-specific trust boundary; the generic RenderPlan materializer stays strict. A complete VoiceRender v0.2 manifest and its `render-diagnostics.json` sidecar are required. AudioCompose verifies producer/version, RenderPlan identity, diagnostic contents, and control occurrence/count correspondence before using the evidence. The diagnostics digest and the accepted ownership decision participate in AudioJob identity and book-output reuse.
+-
+-```text
+-RenderPlan preserves intent.
+-VoiceRender realizes producer-native controls.
+-VoiceRender diagnostics declare remaining composition capabilities.
+-AudioCompose realizes only declared capabilities it explicitly owns.
+-Generic RenderPlan composition does not infer producer ownership.
+-```
+-
+-For v0.3, the only accepted deferred capability is `audiocompose.emphasis.gain.v1`; unknown capabilities fail closed. Do not use this diagnostics trust path to relax direct generic `materialize_renderplan_job` validation. Pause-policy `role` overrides are keyed by RenderPlan `SpeechItem.role`. Source-pause validation checks known classes and table availability without treating logical voice references as policy keys; actual durations resolve against RenderPlan role and fail closed if no role/default value exists.
+-
+-For book composition, symbolic source pause intents resolve from the selected RenderProfile snapshot by default. A strict `audiocompose.pause-policy.v1` TOML override is accepted explicitly; unresolved intents fail closed. The policy identity and provenance are stored in AudioJob sources and the report. This policy conversion belongs to the book integration and is not applied by direct `compose-renderplan`, whose RenderPlan pauses remain literal durations.
+-
+-AudioJobs are persisted for every selected chapter before composition. Existing WAVs are reused only when the current variant, source/plan, RenderManifest identity and content hash, pause/output policy, persisted AudioJob ID/schema, AudioCompose version, and WAV hash/geometry all match the atomic report. Symlinked or unverified outputs are not reused; `--force` recomposes. Chapter failures are isolated by default, `--fail-fast` skips later selections, and ordered book/chapter progress callbacks report callback failures as `progress.callback_failed`. `compose-report.toml` is atomically published with per-chapter outcomes and report-relative stage paths.
+-
+-The CLI surface is `audiocompose compose-book BOOK --variant VARIANT`, with source-number selection, `--pauses`, output-policy controls, `--force`, `--fail-fast`, `--save-audiojobs`, and machine-clean `--json` output. The CLI calls `compose_book`; it does not implement another composition path.
+-
+-## SSMDDoc workspace composition
+-
+-The document facade composes one canonical SSMDDoc v1 workspace using only direct stage roots. `document_contract` is dependency-free and validates the root manifest and canonical source file. `resolve_document` then resolves `utterplan/document.utterplan.toml`, `renderplan/<variant>/renderprofile.toml`, `renderplan/<variant>/document.renderplan.toml`, and `voicerender/<variant>/document-0001/`; the final WAV, AudioJob, and report live beneath `audiocompose/<variant>/`. Each variant path is exact and its profile fingerprint, RenderPlan identity, and source-plan identity must agree.
++The public `compose_bundle` facade dispatches by the authoritative `manifest.json` format to the existing book or document implementation. Its identity loader accepts only a real `.ssmd-bundle` workspace root, validates the JSON manifest and supported schema version, and rejects inner paths, symlink roots, and unknown formats before stage access.
+
+ ```text
+-SSMDDoc manifest + UtterPlan source + RenderProfile + RenderPlan
+-                              |
+-                 VoiceRender document directory
+-           complete manifest + diagnostics + speech WAVs
+-                              |
+-              AudioCompose document facade
+-      validate handoff -> generic AudioJob -> Composer
+-                              |
+-      document WAV + AudioJob bundle + TOML report
++.ssmd-bundle root + manifest format
++              |
++       compose_bundle facade
++         /             \
++  book composer    document composer
++         \             /
++        generic AudioJob -> Composer
++              |
++       kind-specific report
+ ```
+
+-UtterPlan owns semantic planning. VoiceRender owns speech synthesis, producer-native controls, and the complete render handoff. AudioCompose verifies the handoff through the shared VoiceRender materializer, derives symbolic pause durations from the RenderProfile snapshot (or a strict explicit override), applies only its explicitly deferred emphasis capability, and persists the materialized generic job. Composer remains unaware of SSMDDoc, UtterPlan, VoiceRender, and speech-control semantics. Existing-output reuse requires exact report, job, handoff, output-policy, hash, and WAV-geometry provenance; `--force` is the explicit replacement path.
++UtterPlan and VoiceRender remain optional integration dependencies, imported only when the selected kind's orchestration runs. Both implementations verify RenderPlan/VoiceRender provenance and lower completed media to generic AudioJobs before calling Composer. Their report schemas remain versioned and kind-specific; this release changes the outer workspace name and entry point, not internal stage layouts or report contracts.
+
+-Producer dependencies remain optional. Neither importing `audiocompose` nor using generic AudioJob/Composer imports UtterPlan or VoiceRender. Resolving a document lazily imports UtterPlan to validate its source plan; invoking book/document composition also requires VoiceRender. The `[voicerender]` extra requires the released document-capable producer floors described in the README.
++The shared CLI is `audiocompose bundle compose NAME.ssmd-bundle --variant VARIANT`. It supports chapter selection for books and only `all` for documents. The `--save-audiojobs` option is a root directory for both kinds: book composition writes one job per selected chapter, document composition writes one job below that root. Workspace-derived defaults resolve `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the supplied root.
+
+-## AudioJob
++Composition policies, output verification, provenance-based reuse, force behavior, failure handling, and progress callbacks are delegated to their existing kind-specific services. CLI JSON is wrapped in a neutral bundle result; persistent internal report formats are unchanged.
+
+ An AudioJob is an ordered collection of `AudioClip` and `Silence` items. A clip references either an in-memory NumPy `AudioBufferSource` or a file-backed `AudioFileSource`, followed by ordered numeric operations allowed by its schema version. V1 contains the existing static operations; v2 adds the generic time-varying `RatePitchEnvelope`. Clip anchors and spans are generic timing metadata. Output policy contains the final sample rate, channel count, clipping behavior, and complete-output loudness policy.
+
+@@ -132,9 +91,9 @@ Progress delivery and timing are not part of AudioJob serialization, job identit
+
+ ### CLI progress boundary
+
+-The progress-enabled commands (`compose`, `compose-renderplan`, and `compose-book`) share the private standard-library CLI renderer and accept `--progress auto|always|never`. `auto` is the default and renders only to a TTY stderr when `--json` is absent; `always` forces stderr updates, including with JSON, and `never` disables them. TTY refreshes are throttled and non-TTY forced output is newline-delimited. JSON stdout remains machine-clean, and no terminal dependency is introduced into Composer or the API layers. Unknown work totals show elapsed time and named lifecycle phases without invented percentages or ETAs; command completion is shown only after successful output handling. The flat `compose-document` command is intentionally outside this renderer and emits only its final human summary or JSON result.
++The generic `compose`, `compose-renderplan`, and `bundle compose` commands accept `--progress auto|always|never`. The CLI renderer writes only to stderr; JSON stdout stays machine-clean. Bundle progress routes to the selected kind's existing callback format, with no new persistent report or timing fields.
+
+-The package-root `compose_renderplan` API forwards its optional `on_progress` callback to Composer. The book facade forwards those core events inside `BookComposeProgress.composition`; its `fraction` is a uniform chapter-slot measure, not a duration-weighted forecast. Book callback failures retain the existing `progress.callback_failed` behavior. Progress, fractions, and timing remain runtime-only across the progress-enabled integrations.
++The package-root `compose_renderplan` API forwards its optional `on_progress` callback to Composer. The bundle facade forwards callbacks to the selected existing composition implementation; progress remains runtime-only, and callback failures preserve the implementation's established error behavior.
+
+ `AudioSpan` and `ComposedSpan` support optional IDs and JSON-safe metadata. The fields are producer-neutral and are preserved through AudioJob serialization and composition. `CompositionResult.loudness` provides typed before and after metrics, requested and applied gain, policy, target, ceiling, and warnings. `CompositionResult.diagnostics` contains generic diagnostic codes and numeric context.
+ Timing transformations use generic operation hooks. Static `Tempo` maps offsets proportionally; `RatePitchEnvelope` maps source coordinates by inverting the integrated output-time rate curve, with the final rate held after its last point. Pitch-only envelopes preserve duration and coordinates. Operation mappings happen before the single source-to-output resampling map. Final loudness and true-peak/clipping policy are applied once to the complete waveform.
+@@ -153,22 +112,21 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
+
+ ## Ownership matrix
+
+-| Concern                                                                 | Owner                                 |
+-| ----------------------------------------------------------------------- | ------------------------------------- |
+-| Language analysis, segmentation, semantic intent, speech planning       | Upstream planner / producer           |
+-| Voice/model choice, inference, calibration, native controls             | Speech producer / engine              |
+-| RenderPlan and RenderManifest contracts and TOML loading                | RenderPlan package                    |
+-| Speech artifact production                                              | Upstream renderer                     |
+-| Manifest correspondence and speech artifact integrity                   | AudioCompose RenderPlan adapter       |
+-| RenderPlan flow ordering and provenance lowering to AudioJob values     | AudioCompose RenderPlan adapter       |
+-| Media-root policy, media resolver contract, and option lowering         | AudioCompose integration boundary     |
+-| Native book orchestration and profile-derived pause policy              | AudioCompose optional book facade     |
+-| Native SSMDDoc workspace orchestration and profile-derived pause policy | AudioCompose optional document facade |
+-| AudioJob format, schema, persistence, and bundle validation             | AudioCompose core                     |
+-| Numeric operation model and timing maps                                 | AudioCompose core                     |
+-| Resampling, time-scale modification, and pitch-shift DSP                | AudioSig                              |
+-| AudioJob order, silence placement, markers, and timeline assembly       | AudioCompose core                     |
+-| Complete-output loudness, clipping policy, and final WAV                | AudioCompose core                     |
++| Concern                                                             | Owner                             |
++| ------------------------------------------------------------------- | --------------------------------- |
++| Language analysis, segmentation, semantic intent, speech planning   | Upstream planner / producer       |
++| Voice/model choice, inference, calibration, native controls         | Speech producer / engine          |
++| RenderPlan and RenderManifest contracts and TOML loading            | RenderPlan package                |
++| Speech artifact production                                          | Upstream renderer                 |
++| Manifest correspondence and speech artifact integrity               | AudioCompose RenderPlan adapter   |
++| RenderPlan flow ordering and provenance lowering to AudioJob values | AudioCompose RenderPlan adapter   |
++| Media-root policy, media resolver contract, and option lowering     | AudioCompose integration boundary |
++| SSMD bundle identity dispatch and orchestration                     | AudioCompose bundle facade        |
++| AudioJob format, schema, persistence, and bundle validation         | AudioCompose core                 |
++| Numeric operation model and timing maps                             | AudioCompose core                 |
++| Resampling, time-scale modification, and pitch-shift DSP            | AudioSig                          |
++| AudioJob order, silence placement, markers, and timeline assembly   | AudioCompose core                 |
++| Complete-output loudness, clipping policy, and final WAV            | AudioCompose core                 |
+
+ ## Non-TTS guarantee
+
+diff --git a/docs/index.md b/docs/index.md
+index 4f86bc4..f07fd87 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -1,4 +1,4 @@
+-# AudioCompose documentation
++# AudioCompose reference
+
+ AudioCompose composes completed audio through producer-neutral `AudioJob` values. The repository README describes generic AudioJob workflows and direct RenderPlan composition.
+
+@@ -19,23 +19,17 @@ result = audiocompose.compose_renderplan(
+
+ The manifest defaults to `render-manifest.toml` inside `render_dir`; when `media_root` is omitted, relative external media resolves beneath the plan file's parent. `OutputPolicy` carries the existing sample-rate, clipping, and loudness/peak controls, with mono-only output. Emphasis defaults to `segment_fallback`; `strict` rejects partial-span emphasis. Set `save_audiojob` only when the intermediate job should be persisted. See the [direct RenderPlan composition guide](https://github.com/buchwandler/audiocompose#direct-renderplan-composition) for the CLI workflow and full behavior.
+
+-## SSMDDoc workspace composition
++## Bundle composition for rendered variants
+
+-`audiocompose compose-document WORKSPACE --variant VARIANT` composes one rendered SSMDDoc from the direct `utterplan/`, `renderplan/<variant>/`, `voicerender/<variant>/`, and `audiocompose/<variant>/` stages. It accepts the workspace root or canonical `document.ssmd.md`, requires a complete VoiceRender handoff, and writes a WAV, reproducible AudioJob, and atomic compose report under the AudioCompose variant directory. The profile snapshot supplies the default symbolic pause policy; RenderPlan roles remain authoritative, and only explicitly deferred emphasis owned by AudioCompose is realized. See [SSMDDoc workspace composition in the README](https://github.com/buchwandler/audiocompose#ssmdoc-document-workspace-composition) for layout, CLI controls, Python API, provenance reuse, and ownership details.
++`audiocompose bundle compose NAME.ssmd-bundle --variant VARIANT` composes either supported SSMD bundle kind. AudioCompose reads `manifest.json` and dispatches on its `format`: a book bundle composes selected chapters, while a document bundle composes its single document (and accepts only `--chapters all`). The command accepts only the editable workspace root; it does not accept inner source paths or ZIP files. Existing book/document report contracts remain kind-specific. See the unified [bundle composition guide](https://github.com/buchwandler/audiocompose#bundle-composition-for-rendered-variants).
+
+ ```bash
+-audiocompose compose-document . --variant narration--<fingerprint> --json
++audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint> --json
+ ```
+
+-## Book-level RenderPlan composition
++Production composition requires complete VoiceRender handoffs. Default RenderPlan, VoiceRender, and AudioCompose roots are resolved beneath the bundle root.
+
+-The `audiocompose compose-book BOOK --variant VARIANT` command uses the RenderPlan-set's authoritative chapter order, resolves source pause intents from its RenderProfile snapshot (or an explicit `--pauses POLICY.toml`), saves inspectable AudioJobs, composes through generic `Composer`, atomically writes chapter WAVs, and records exact reuse provenance in `compose-report.toml`. UtterPlan and VoiceRender are optional; install `audiocompose[voicerender]` for this integration.
+-
+-```bash
+-audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
+-```
+-
+-Production composition requires each selected VoiceRender `render-manifest.toml` to be complete; incomplete QC renders are rejected. The [repository README](https://github.com/buchwandler/audiocompose#book-level-composition-for-rendered-variants) documents output roots, pause policy, CLI controls, reuse, and failure behavior.
++## Architecture
+
+ ```{toctree}
+ :maxdepth: 2
+@@ -43,6 +37,5 @@ Production composition requires each selected VoiceRender `render-manifest.toml`
+
+ architecture
+ migration-v0.2
+-migration-v0.3
+ changelog
+ ```
+diff --git a/docs/migration-v0.3.md b/docs/migration-v0.3.md
+deleted file mode 100644
+index 987354f..0000000
+--- a/docs/migration-v0.3.md
++++ /dev/null
+@@ -1,74 +0,0 @@
+-# Migrating to planned AudioCompose v0.3.0
+-
+-> **Release status:** v0.3.0 remains planned and unreleased. This guide records the intended compatibility contract; it does not imply a release date.
+-
+-AudioCompose v0.3.0 adds book-level composition for already-rendered variants and updates the optional VoiceRender bridge. The core `AudioJob`, `Composer`, and generic composition semantics remain producer-neutral.
+-
+-## Dependency floors
+-
+-- The base installation requires `renderplan>=0.1.2,<0.2`.
+-- The optional `audiocompose[voicerender]` extra requires `utterplan>=0.6.4,<0.7` and `voicerender>=0.2.4,<0.3`.
+-- VoiceRender releases before 0.2.4 do not provide the SSMDDoc document workspace contract. Install the extra with `pip install 'audiocompose[voicerender]'` to use supported producer versions.
+-
+-## VoiceRender book handoff
+-
+-Book composition requires, for every selected chapter, a complete VoiceRender `RenderManifest` and the VoiceRender v0.2 `render-diagnostics.json` sidecar. AudioCompose verifies the manifest producer/version, plan identity, diagnostics schema and provenance, deferred-capability declarations, and their correspondence to RenderPlan control occurrences. Missing, stale, malformed, or contradictory diagnostics fail closed. The diagnostics digest is recorded in AudioJob provenance, the book report, and output-reuse identity; changing diagnostics invalidates prior reuse.
+-
+-When the RenderPlan contains `emphasis` that AudioCompose should apply after synthesis, opt in at VoiceRender preflight and render:
+-
+-```bash
+-# Repeat the same option on a separately run preflight command.
+-voicerender render-book BOOK \
+-  --variant narration--<fingerprint> \
+-  --emphasis-policy defer-to-compose
+-
+-audiocompose compose-book BOOK \
+-  --variant narration--<fingerprint>
+-```
+-
+-AudioCompose v0.3.0 recognizes only the deferred capability `audiocompose.emphasis.gain.v1`. VoiceRender owns controls it natively realizes; AudioCompose applies only the deferred capability declared by validated diagnostics. Unknown or inconsistent deferred capabilities are rejected. A complete manifest remains mandatory even when no control is deferred.
+-
+-The VoiceRender producer option `--emphasis-policy defer-to-compose` is distinct from AudioCompose's downstream `--emphasis-policy segment_fallback|strict`. The latter controls how AudioCompose applies deferred emphasis without word-level alignment; `strict` rejects partial-range fallback, while `segment_fallback` applies the selected level to the complete speech segment. It does not grant ownership of any other producer control.
+-
+-## Generic RenderPlan materialization is still strict
+-
+-Direct generic `materialize_renderplan_job` and `compose-renderplan` do not infer VoiceRender ownership from manifest metadata and do not consume the VoiceRender diagnostics trust path. Unsupported producer-native controls remain errors. The generic adapter's own documented RenderPlan behavior is unchanged, and generic AudioJob composition does not interpret speech semantics.
+-
+-## Pause-policy override keys
+-
+-Book pause-policy overrides use the root `role` table, keyed by the resulting RenderPlan `SpeechItem.role`. They are not keyed directly by UtterPlan logical voice references. Source-pause validation checks known classes and table availability without treating logical voice references as role keys; actual durations resolve against the RenderPlan role selected for each pause and fail closed if that role/default lacks a value. Pre-release policy files using a `voice` root must be changed to `role` before using the v0.3 book integration.
+-
+-## Deterministic estimates and live progress
+-
+-AudioCompose v0.3 adds a producer-neutral runtime progress API. `estimate_composition(job, sample_rate=None)` returns per-item/output frame geometry and deterministic approximate frame-pass work through `CompositionEstimate`. It includes source loading/integrity verification, grouped operations, resampling, assembly, optional complete-output loudness, and final output preparation. If source geometry is unknown, total frames, duration, and work remain unknown; consumers must not turn that into a guessed percentage. Work units describe planned processing passes, not seconds, and the model may evolve.
+-
+-`CompositionProgress` gains optional `completed_work_units`, `total_work_units`, and `fraction`. Known fractions/work are monotonic; unknown totals remain indeterminate. `ProgressTiming` and `ProgressEstimator` provide elapsed time and an evidence-based live ETA from monotonic-clock work-rate observations, with optional caller-supplied initial work rate. Without an initial rate, the estimator warms up before deriving an ETA; caller-supplied initial rates and observed rates still produce finite, bounded predictions. Its status is `indeterminate`, `warming_up`, `estimated`, or `complete`. These values are process-local: they are not added to AudioJob identity/provenance, `CompositionResult`, JSON/TOML schemas, or the book report.
+-
+-```python
+-from audiocompose import Composer, ProgressEstimator, estimate_composition
+-
+-estimate = estimate_composition(job)
+-timing = ProgressEstimator()
+-
+-def on_progress(event):
+-    view = timing.update(event)
+-    if view.estimated_remaining_seconds is not None:
+-        print(f"ETA {view.estimated_remaining_seconds:.1f}s")
+-
+-Composer().compose(job, on_progress=on_progress)
+-```
+-
+-`compose_renderplan(..., on_progress=...)` forwards the generic composition events. Book callbacks carry nested core events in `BookComposeProgress.composition` and a uniform chapter-slot fraction; this is not a duration-weighted prediction. Core callbacks remain synchronous and do not print. Existing book callback failure reporting remains `progress.callback_failed`.
+-
+-The `compose`, `compose-renderplan`, and `compose-book` CLIs accept `--progress auto|always|never`. `auto` is the default: it displays only on a TTY stderr and is suppressed when `--json` is selected. `always` forces stderr output without contaminating JSON stdout; `never` disables it. TTY progress uses a throttled live line, while forced non-TTY output is newline-delimited. Unknown work totals use elapsed time and named lifecycle stages without fabricated percentages or ETA. Progress reaches command completion only after successful output handling.
+-
+-```bash
+-audiocompose compose chapter.audiojob chapter.wav --progress always
+-audiocompose compose-book BOOK --variant narration--<fingerprint> --json --progress always
+-```
+-
+-## No AudioJob schema migration
+-
+-The book bridge stores diagnostics provenance in the existing generic source and metadata mappings. AudioCompose v0.3.0 does not require an AudioJob schema-version change. Existing generic jobs can continue through `validate`, `inspect`, and `compose` unchanged.
+-
+-See [the README](https://github.com/buchwandler/audiocompose#book-level-composition-for-rendered-variants) for the complete producer-to-composer example and [the architecture guide](architecture.md#voicerender-v02-control-ownership) for the ownership boundary.
+diff --git a/examples/compose_rendered_book.py b/examples/compose_rendered_book.py
+deleted file mode 100644
+index f662f2c..0000000
+--- a/examples/compose_rendered_book.py
++++ /dev/null
+@@ -1,19 +0,0 @@
+-"""Compose an existing VoiceRender variant without synthesizing speech."""
+-
+-from pathlib import Path
+-
+-from audiocompose import compose_book
+-
+-book = Path("my-book.ssmdbook")
+-variant = "narration--525856299523"
+-
+-# VoiceRender output must already exist and be complete. If RenderPlan emphasis
+-# should be applied by AudioCompose, VoiceRender must have used
+-# --emphasis-policy defer-to-compose during preflight and rendering.
+-result = compose_book(book, variant=variant, chapters="all")
+-
+-for chapter in result.outcomes:
+-    print(chapter.source_number, chapter.status, chapter.output)
+-
+-if result.exit_code != 0:
+-    raise SystemExit(result.exit_code)
+diff --git a/examples/compose_rendered_bundle.py b/examples/compose_rendered_bundle.py
+new file mode 100644
+index 0000000..f544a65
+--- /dev/null
++++ b/examples/compose_rendered_bundle.py
+@@ -0,0 +1,19 @@
++"""Compose either supported completed SSMD bundle kind without synthesizing speech."""
++
++from pathlib import Path
++
++from audiocompose import BundleComposeOptions, compose_bundle
++
++bundle = Path("project.ssmd-bundle")
++variant = "narration--525856299523"
++
++result = compose_bundle(bundle, variant=variant, options=BundleComposeOptions(chapters="all"))
++print("kind:", result.kind)
++if result.kind == "book":
++    for chapter in result.value.outcomes:
++        print(chapter.source_number, chapter.status, chapter.output)
++else:
++    print(result.value.status, result.value.output)
++
++if result.exit_code != 0:
++    raise SystemExit(result.exit_code)
+diff --git a/tests/test_bundle_contract.py b/tests/test_bundle_contract.py
+new file mode 100644
+index 0000000..9e1b848
+--- /dev/null
++++ b/tests/test_bundle_contract.py
+@@ -0,0 +1,83 @@
++import json
++
++import pytest
++
++from audiocompose.bundle_contract import load_bundle_identity
++from audiocompose.errors import AudioComposeError
++
++
++@pytest.mark.parametrize(
++    ("format_name", "kind"), [("ssmdconvert.book", "book"), ("ssmdconvert.document", "document")]
++)
++def test_bundle_identity_uses_manifest_format(tmp_path, format_name, kind):
++    root = tmp_path / "arbitrary.ssmd-bundle"
++    root.mkdir()
++    (root / "manifest.json").write_text(json.dumps({"format": format_name, "schema_version": 1}))
++    identity = load_bundle_identity(root)
++    assert identity.root == root
++    assert identity.kind == kind
++    assert identity.manifest_path == root / "manifest.json"
++
++
++def test_bundle_identity_rejects_non_root_and_unsupported_format(tmp_path):
++    with pytest.raises(AudioComposeError, match="invalid SSMD bundle"):
++        load_bundle_identity(tmp_path / "chapters")
++    root = tmp_path / "other.ssmd-bundle"
++    root.mkdir()
++    (root / "manifest.json").write_text(json.dumps({"format": "other", "schema_version": 1}))
++    with pytest.raises(AudioComposeError, match="unsupported SSMD bundle format"):
++        load_bundle_identity(root)
++
++
++def test_bundle_identity_rejects_symlink_manifest(tmp_path):
++    root = tmp_path / "linked.ssmd-bundle"
++    root.mkdir()
++    external = tmp_path / "manifest.json"
++    external.write_text(json.dumps({"format": "ssmdconvert.book", "schema_version": 1}))
++    (root / "manifest.json").symlink_to(external)
++    with pytest.raises(AudioComposeError, match="invalid SSMD bundle"):
++        load_bundle_identity(root)
++
++
++def test_bundle_cli_parser_and_removed_flat_commands(capsys):
++    from audiocompose.cli import _parser
++
++    with pytest.raises(SystemExit) as exc:
++        _parser().parse_args(["bundle", "compose", "--help"])
++    assert exc.value.code == 0
++    assert "--save-audiojobs" in capsys.readouterr().out
++    for command in ("compose" + "-book", "compose" + "-document"):
++        with pytest.raises(SystemExit):
++            _parser().parse_args([command, "unused"])
++
++
++@pytest.mark.parametrize(
++    ("format_name", "kind"), [("ssmdconvert.book", "book"), ("ssmdconvert.document", "document")]
++)
++def test_compose_bundle_dispatches_by_manifest_kind(tmp_path, monkeypatch, format_name, kind):
++    from types import SimpleNamespace
++
++    import audiocompose.book as book_module
++    import audiocompose.document as document_module
++    from audiocompose.bundle import BundleComposeOptions, compose_bundle
++
++    root = tmp_path / "story.ssmd-bundle"
++    root.mkdir()
++    (root / "manifest.json").write_text(json.dumps({"format": format_name, "schema_version": 1}))
++    captured = {}
++
++    def fake_compose(path, **kwargs):
++        captured.update(path=path, **kwargs)
++        return SimpleNamespace(exit_code=0, to_dict=lambda: {"ok": True})
++
++    monkeypatch.setattr(book_module, "compose_book", fake_compose)
++    monkeypatch.setattr(document_module, "compose_document", fake_compose)
++    options = BundleComposeOptions(chapters="all", save_audiojobs=tmp_path / "jobs")
++    result = compose_bundle(root, variant="v", options=options)
++    assert result.kind == kind
++    assert result.exit_code == 0
++    assert captured["path"] == root
++    if kind == "document":
++        assert captured["save_audiojob"] == tmp_path / "jobs" / "document-0001.audiojob"
++    else:
++        assert captured["save_audiojobs"] == tmp_path / "jobs"
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index ed4b2b9..7185af5 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -271,11 +271,17 @@ def test_book_cli_renders_nested_progress_to_stderr(monkeypatch, tmp_path: Path,
+         return SimpleNamespace(exit_code=0, to_dict=lambda: {"composed": True})
+
+     monkeypatch.setattr(book_module, "compose_book", fake_compose)
++    bundle = tmp_path / "fixture.ssmd-bundle"
++    bundle.mkdir()
++    (bundle / "manifest.json").write_text(
++        json.dumps({"format": "ssmdconvert.book", "schema_version": 1})
++    )
+     assert (
+         main(
+             [
+-                "compose-book",
+-                str(tmp_path),
++                "bundle",
++                "compose",
++                str(bundle),
+                 "--variant",
+                 "fixture",
+                 "--json",
+@@ -286,7 +292,12 @@ def test_book_cli_renders_nested_progress_to_stderr(monkeypatch, tmp_path: Path,
+         == 0
+     )
+     captured = capsys.readouterr()
+-    assert json.loads(captured.out) == {"composed": True}
++    assert json.loads(captured.out) == {
++        "format": "audiocompose-bundle-result",
++        "version": 1,
++        "kind": "book",
++        "result": {"composed": True},
++    }
+     progress = captured.err
+     assert "chapter 1/1" in progress
+     assert "preparing handoff" in progress or "starting composition" in progress
+diff --git a/tests/test_compose_book.py b/tests/test_compose_book.py
+index ffcda23..32f950f 100644
+--- a/tests/test_compose_book.py
++++ b/tests/test_compose_book.py
+@@ -92,7 +92,7 @@ def _fixture_book(
+     source_voice: str | None = None,
+ ):
+     utterplan = pytest.importorskip("utterplan")
+-    workspace = tmp_path / "book"
++    workspace = tmp_path / "book.ssmd-bundle"
+     profile = _profile(profile_pauses, role=render_role)
+     profile_id = profile.profile_id or profile.computed_id()
+     fingerprint = profile_id.removeprefix("sha256:")[:12]
+@@ -312,7 +312,8 @@ def test_compose_book_cli_pause_override_and_human_report_summary(tmp_path, caps
+         encoding="utf-8",
+     )
+     command = [
+-        "compose-book",
++        "bundle",
++        "compose",
+         str(workspace),
+         "--variant",
+         variant,
+@@ -321,7 +322,7 @@ def test_compose_book_cli_pause_override_and_human_report_summary(tmp_path, caps
+         "--json",
+     ]
+     assert main(command) == 0
+-    result = json.loads(capsys.readouterr().out)
++    result = _bundle_cli_data(capsys)
+     assert result["pause_policy_provenance"] == "explicit"
+     assert result["items"][0]["pause_policy_id"].startswith("sha256:")
+     job = load_job(workspace / "audiocompose" / variant / "chapter-0005.audiojob")
+@@ -472,14 +473,22 @@ def test_renderplan_set_chapter_identity_mismatch_is_rejected(tmp_path):
+
+
+ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
+-    command = ["compose-book", str(workspace), "--variant", variant, "--chapters", "5", "--json"]
++    command = [
++        "bundle",
++        "compose",
++        str(workspace),
++        "--variant",
++        variant,
++        "--chapters",
++        "5",
++        "--json",
++    ]
+     assert main(command) == 0
+-    first = json.loads(capsys.readouterr().out)
++    first = _bundle_cli_data(capsys)
+     assert first["written"] == 1 and first["reused"] == 0
+     assert first["items"][0]["status"] == "written"
+     assert first["items"][0]["frames"] == 9_048
+@@ -506,7 +515,7 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
+     assert diagnostics_path.is_file()
+
+     assert main(command) == 0
+-    second = json.loads(capsys.readouterr().out)
++    second = _bundle_cli_data(capsys)
+     assert second["written"] == 0 and second["reused"] == 1
+     assert second["items"][0]["status"] == "reused"
+
+@@ -541,7 +550,6 @@ def test_book_diagnostics_digest_invalidates_output_reuse(tmp_path):
+
+
+ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsys):
+-    import json
+
+     try:
+         import tomllib
+@@ -601,7 +609,8 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+     assert api_result.report_path.parent == api_workspace / "audiocompose" / api_variant
+
+     cli_command = [
+-        "compose-book",
++        "bundle",
++        "compose",
+         str(cli_workspace),
+         "--variant",
+         cli_variant,
+@@ -613,7 +622,7 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+     assert (cli_workspace / "utterplan").is_dir()
+     assert (cli_workspace / "renderplan" / cli_variant).is_dir()
+     assert (cli_workspace / "voicerender" / cli_variant).is_dir()
+-    cli_result = json.loads(capsys.readouterr().out)
++    cli_result = _bundle_cli_data(capsys)
+     assert Path(cli_result["report"]).parent == cli_workspace / "audiocompose" / cli_variant
+     api_items = api_result.to_dict()["items"]
+     assert api_items == cli_result["items"]
+@@ -641,7 +650,7 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+         api_workspace, variant=api_variant, chapters="5,8", on_progress=reuse_progress.append
+     )
+     assert main(cli_command) == 0
+-    cli_reused = json.loads(capsys.readouterr().out)
++    cli_reused = _bundle_cli_data(capsys)
+     assert [item.status for item in api_reused.outcomes] == ["reused", "reused"]
+     reuse_fractions = [event.fraction for event in reuse_progress]
+     assert all(fraction is not None for fraction in reuse_fractions)
+@@ -652,7 +661,6 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
+
+
+ def test_public_book_api_and_cli_report_matching_chapter_errors(tmp_path, capsys):
+-    import json
+
+     from audiocompose import compose_book
+     from audiocompose.cli import main
+@@ -667,9 +675,9 @@ def test_public_book_api_and_cli_report_matching_chapter_errors(tmp_path, capsys
+     ).unlink()
+
+     api_result = compose_book(api_workspace, variant=api_variant)
+-    cli_command = ["compose-book", str(cli_workspace), "--variant", cli_variant, "--json"]
++    cli_command = ["bundle", "compose", str(cli_workspace), "--variant", cli_variant, "--json"]
+     assert main(cli_command) == api_result.exit_code == 2
+-    cli_result = json.loads(capsys.readouterr().out)
++    cli_result = _bundle_cli_data(capsys)
+     assert api_result.outcomes[0].status == "failed"
+     assert api_result.outcomes[0].error_code == "manifest.missing"
+     api_item = api_result.to_dict()["items"][0]
+@@ -720,7 +728,6 @@ def test_installed_package_metadata_has_supported_producer_floors():
+
+
+ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, capsys):
+-    import json
+
+     from audiocompose import AudioClip, AudioJob, Gain
+     from audiocompose.cli import main
+@@ -734,7 +741,8 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
+     assert (
+         main(
+             [
+-                "compose-book",
++                "bundle",
++                "compose",
+                 str(workspace),
+                 "--variant",
+                 variant,
+@@ -745,7 +753,7 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
+         )
+         == 0
+     )
+-    result = json.loads(capsys.readouterr().out)
++    result = _bundle_cli_data(capsys)
+     assert result["emphasis_policy"] == "segment_fallback"
+     assert result["diagnostics"][0]["code"] == "emphasis.segment_fallback"
+     assert "entire segment" in result["items"][0]["emphasis_warning"]
+@@ -764,7 +772,8 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
+     assert (
+         main(
+             [
+-                "compose-book",
++                "bundle",
++                "compose",
+                 str(strict_workspace),
+                 "--variant",
+                 strict_variant,
+@@ -775,36 +784,57 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
+         )
+         == 2
+     )
+-    strict_result = json.loads(capsys.readouterr().out)
++    strict_result = _bundle_cli_data(capsys)
+     assert strict_result["items"][0]["status"] == "failed"
+     assert "split the speech upstream" in strict_result["items"][0]["error_message"]
+     assert not (strict_workspace / "audiocompose" / strict_variant / "chapter-0005.wav").exists()
+
+
+ def test_compose_book_uses_set_order_for_full_book_ranges_and_commas(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, _ = _fixture_book(tmp_path)
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 0
+-    full = json.loads(capsys.readouterr().out)
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 0
++    full = _bundle_cli_data(capsys)
+     assert [item["source_number"] for item in full["items"]] == [7, 6, 5, 8]
+     assert all(item["status"] == "written" for item in full["items"])
+
+     assert (
+-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "5-7", "--json"])
++        main(
++            [
++                "bundle",
++                "compose",
++                str(workspace),
++                "--variant",
++                variant,
++                "--chapters",
++                "5-7",
++                "--json",
++            ]
++        )
+         == 0
+     )
+-    ranged = json.loads(capsys.readouterr().out)
++    ranged = _bundle_cli_data(capsys)
+     assert [item["source_number"] for item in ranged["items"]] == [7, 6, 5]
+     assert all(item["status"] == "reused" for item in ranged["items"])
+
+     assert (
+-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "5,8", "--json"])
++        main(
++            [
++                "bundle",
++                "compose",
++                str(workspace),
++                "--variant",
++                variant,
++                "--chapters",
++                "5,8",
++                "--json",
++            ]
++        )
+         == 0
+     )
+-    comma = json.loads(capsys.readouterr().out)
++    comma = _bundle_cli_data(capsys)
+     assert [item["source_number"] for item in comma["items"]] == [5, 8]
+
+
+@@ -815,7 +845,9 @@ def test_unknown_selected_chapter_fails_before_output_is_created(tmp_path, capsy
+
+     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
+     assert (
+-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "9", "--json"])
++        main(
++            ["bundle", "compose", str(workspace), "--variant", variant, "--chapters", "9", "--json"]
++        )
+         == 2
+     )
+     error = json.loads(capsys.readouterr().err)
+@@ -824,7 +856,6 @@ def test_unknown_selected_chapter_fails_before_output_is_created(tmp_path, capsy
+
+
+ def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+@@ -833,8 +864,9 @@ def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
+     assert (
+         main(
+             [
+-                "compose-book",
+-                str(workspace / "chapters"),
++                "bundle",
++                "compose",
++                str(workspace),
+                 "--variant",
+                 variant,
+                 "--renderplan-root",
+@@ -848,7 +880,7 @@ def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
+         )
+         == 0
+     )
+-    result = json.loads(capsys.readouterr().out)
++    result = _bundle_cli_data(capsys)
+     assert result["written"] == 1
+     assert Path(result["report"]).is_file()
+     assert (output_root / variant / "chapter-0005.wav").is_file()
+@@ -864,7 +896,7 @@ def test_variant_label_fingerprint_and_profile_snapshot_must_match(tmp_path, cap
+     shutil.copytree(plan_variant, plan_variant.parent / wrong_variant)
+     voice_variant = workspace / "voicerender" / variant
+     shutil.copytree(voice_variant, workspace / "voicerender" / wrong_variant)
+-    assert main(["compose-book", str(workspace), "--variant", wrong_variant, "--json"]) == 2
++    assert main(["bundle", "compose", str(workspace), "--variant", wrong_variant, "--json"]) == 2
+     mismatch = json.loads(capsys.readouterr().err)
+     assert mismatch["errors"][0]["code"] == "variant.identity_mismatch"
+
+@@ -873,21 +905,20 @@ def test_variant_label_fingerprint_and_profile_snapshot_must_match(tmp_path, cap
+         default_role="narrator",
+     ).with_identity()
+     save_profile(different_profile, plan_variant / "renderprofile.toml")
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
+     mismatch = json.loads(capsys.readouterr().err)
+     assert mismatch["errors"][0]["code"] == "profile.identity_mismatch"
+
+
+ def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, plan_variant, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+     plan_path = plan_variant / chapters[0].renderplan
+     plan_path.unlink()
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
+-    missing = json.loads(capsys.readouterr().out)
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
++    missing = _bundle_cli_data(capsys)
+     assert missing["items"][0]["error_code"] == "plan.missing"
+
+     workspace, variant, plan_variant, chapters = _fixture_book(
+@@ -897,8 +928,8 @@ def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path
+     renderplan_set = load_renderplan_set(set_path)
+     wrong = replace(renderplan_set.chapters[0], render_plan_id="sha256:" + "0" * 64)
+     save_renderplan_set(set_path, replace(renderplan_set, chapters=(wrong,)))
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
+-    result = json.loads(capsys.readouterr().out)
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
++    result = _bundle_cli_data(capsys)
+     assert result["items"][0]["error_code"] == "plan.identity_mismatch"
+
+
+@@ -916,7 +947,6 @@ def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path
+ def test_strict_handoff_validation_rejects_bad_manifest_and_artifacts(
+     tmp_path, capsys, mode, expected_code
+ ):
+-    import json
+
+     from audiocompose.cli import main
+
+@@ -952,41 +982,39 @@ def test_strict_handoff_validation_rejects_bad_manifest_and_artifacts(
+         manifest_path.unlink()
+         manifest_path.symlink_to(outside)
+
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
+-    result = json.loads(capsys.readouterr().out)
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
++    result = _bundle_cli_data(capsys)
+     assert result["items"][0]["error_code"] == expected_code
+
+
+ def test_missing_voicerender_chapter_directory_is_reported(tmp_path, capsys):
+-    import json
+     import shutil
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+     shutil.rmtree(workspace / "voicerender" / variant / chapters[0].id)
+-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
+-    result = json.loads(capsys.readouterr().out)
++    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
++    result = _bundle_cli_data(capsys)
+     assert result["items"][0]["error_code"] == "render_dir.missing"
+
+
+ def test_unknown_existing_output_requires_force(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
+-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
++    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
+     assert main(command) == 0
+     capsys.readouterr()
+     report = workspace / "audiocompose" / variant / "compose-report.toml"
+     report.unlink()
+
+     assert main(command) == 2
+-    unknown = json.loads(capsys.readouterr().out)
++    unknown = _bundle_cli_data(capsys)
+     assert unknown["items"][0]["error_code"] == "output.exists"
+     assert main(command + ["--force"]) == 0
+-    forced = json.loads(capsys.readouterr().out)
++    forced = _bundle_cli_data(capsys)
+     assert forced["items"][0]["status"] == "written"
+
+
+@@ -1007,7 +1035,6 @@ def test_unsafe_set_chapter_id_is_rejected_by_shared_set_loader(tmp_path):
+
+
+ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys):
+-    import json
+
+     from audiocompose import AudioJob
+     from audiocompose.cli import main
+@@ -1018,7 +1045,8 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
+     assert (
+         main(
+             [
+-                "compose-book",
++                "bundle",
++                "compose",
+                 str(workspace),
+                 "--variant",
+                 variant,
+@@ -1031,7 +1059,7 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
+         )
+         == 0
+     )
+-    result = json.loads(capsys.readouterr().out)
++    result = _bundle_cli_data(capsys)
+     output = workspace / "audiocompose" / variant / "chapter-0005.wav"
+     assert wav_info(output).sample_rate == 16_000
+     audiojob = jobs_root / "chapter-0005.audiojob" / "audiojob.json"
+@@ -1041,12 +1069,11 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
+
+
+ def test_manifest_change_invalidates_reuse_and_force_recomposes(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
++    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
+     assert main(command) == 0
+     capsys.readouterr()
+     plan_path = workspace / "renderplan" / variant / chapters[0].renderplan
+@@ -1073,34 +1100,33 @@ def test_manifest_change_invalidates_reuse_and_force_recomposes(tmp_path, capsys
+     save_manifest(replacement, render_dir / "render-manifest.toml")
+
+     assert main(command) == 2
+-    stale = json.loads(capsys.readouterr().out)
++    stale = _bundle_cli_data(capsys)
+     assert stale["items"][0]["error_code"] == "output.exists"
+     assert main(command + ["--force"]) == 0
+-    forced = json.loads(capsys.readouterr().out)
++    forced = _bundle_cli_data(capsys)
+     assert forced["items"][0]["status"] == "written"
+     assert main(command + ["--force"]) == 0
+-    forced_again = json.loads(capsys.readouterr().out)
++    forced_again = _bundle_cli_data(capsys)
+     assert forced_again["items"][0]["status"] == "written"
+
+
+ def test_batch_continues_by_default_and_fail_fast_skips_later_chapters(tmp_path, capsys):
+-    import json
+
+     from audiocompose.cli import main
+
+     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5, 6, 7))
+     missing_manifest = workspace / "voicerender" / variant / chapters[1].id / "render-manifest.toml"
+     missing_manifest.unlink()
+-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
++    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
+     assert main(command) == 2
+-    continued = json.loads(capsys.readouterr().out)
++    continued = _bundle_cli_data(capsys)
+     assert [item["status"] for item in continued["items"]] == ["written", "failed", "written"]
+     assert continued["items"][1]["error_code"] == "manifest.missing"
+     report_text = (workspace / "audiocompose" / variant / "compose-report.toml").read_text()
+     assert 'error_code = "manifest.missing"' in report_text
+
+     assert main(command + ["--fail-fast"]) == 2
+-    fast = json.loads(capsys.readouterr().out)
++    fast = _bundle_cli_data(capsys)
+     assert [item["status"] for item in fast["items"]] == ["reused", "failed", "skipped"]
+
+
+@@ -1328,7 +1354,8 @@ def test_external_audio_and_output_policy_match_direct_compose_renderplan(tmp_pa
+     assert (
+         main(
+             [
+-                "compose-book",
++                "bundle",
++                "compose",
+                 str(workspace),
+                 "--variant",
+                 variant,
+@@ -1383,7 +1410,7 @@ class BlockProducerImports(importlib.abc.MetaPathFinder):
+ sys.meta_path.insert(0, BlockProducerImports())
+ from audiocompose import AudioJob, Composer, compose_document
+ from audiocompose.cli import main
+-assert main(['compose-book', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
++assert main(['bundle', 'compose', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
+ assert not any(name == 'voicerender' or name.startswith('voicerender.') for name in sys.modules)
+ assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in sys.modules)
+ assert AudioJob and Composer and compose_document
+@@ -1396,3 +1423,10 @@ assert AudioJob and Composer and compose_document
+     )
+     assert completed.returncode == 0, completed.stderr
+     assert "dependency.api_incompatible" in completed.stdout
++
++
++def _bundle_cli_data(capsys):
++    import json
++
++    payload = json.loads(capsys.readouterr().out)
++    return payload.get("result", payload)
+diff --git a/tests/test_compose_document.py b/tests/test_compose_document.py
+index 142ff34..b5c81ed 100644
+--- a/tests/test_compose_document.py
++++ b/tests/test_compose_document.py
+@@ -152,7 +152,7 @@ def _document_render_workspace(
+
+
+ def test_document_workspace_accepts_root_and_canonical_file(tmp_path: Path) -> None:
+-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
++    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
+
+     from_root = read_document_workspace(workspace)
+     from_file = read_document_workspace(workspace / DOCUMENT_SOURCE_FILENAME)
+@@ -181,7 +181,7 @@ def test_document_workspace_accepts_root_and_canonical_file(tmp_path: Path) -> N
+ def test_document_workspace_rejects_invalid_manifest_identity(
+     tmp_path: Path, field: str, value: object
+ ) -> None:
+-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
++    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
+     manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
+     if field.startswith("document."):
+         manifest["document"][field.removeprefix("document.")] = value
+@@ -194,20 +194,20 @@ def test_document_workspace_rejects_invalid_manifest_identity(
+
+
+ def test_document_workspace_rejects_zip_and_missing_document(tmp_path: Path) -> None:
+-    archive = tmp_path / "story.ssmdoc.zip"
++    archive = tmp_path / "story.ssmd-bundle.zip"
+     with zipfile.ZipFile(archive, "w") as zipped:
+         zipped.writestr("manifest.json", "{}")
+     with pytest.raises(DocumentWorkspaceContractError, match="ZIP input is not supported"):
+         read_document_workspace(archive)
+
+-    workspace = _document_workspace(tmp_path / "missing.ssmdoc")
++    workspace = _document_workspace(tmp_path / "missing.ssmd-bundle")
+     (workspace / DOCUMENT_SOURCE_FILENAME).unlink()
+-    with pytest.raises(DocumentWorkspaceContractError, match="canonical SSMDDoc document"):
++    with pytest.raises(DocumentWorkspaceContractError, match="canonical SSMD document source"):
+         read_document_workspace(workspace)
+
+
+ def test_document_workspace_rejects_symlinked_and_escaping_files(tmp_path: Path) -> None:
+-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
++    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
+     outside_manifest = tmp_path / "outside-manifest.json"
+     outside_manifest.write_bytes((workspace / "manifest.json").read_bytes())
+     (workspace / "manifest.json").unlink()
+@@ -231,7 +231,7 @@ def test_document_workspace_rejects_symlinked_and_escaping_files(tmp_path: Path)
+ def test_document_workspace_rejects_duplicate_json_fields_and_wrong_file_name(
+     tmp_path: Path,
+ ) -> None:
+-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
++    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
+     (workspace / "manifest.json").write_text(
+         '{"format":"ssmdconvert.document","format":"other"}', encoding="utf-8"
+     )
+@@ -258,7 +258,7 @@ def test_document_workspace_rejects_duplicate_json_fields_and_wrong_file_name(
+ def test_resolve_document_uses_direct_stage_roots_and_canonical_paths(tmp_path: Path) -> None:
+     from audiocompose.document import resolve_document
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     context = resolve_document(workspace / DOCUMENT_SOURCE_FILENAME, variant)
+
+     assert context.workspace == workspace.resolve()
+@@ -282,7 +282,7 @@ def test_resolve_document_rejects_unsafe_variant_and_profile_fingerprint(
+     from audiocompose.document import resolve_document
+     from audiocompose.errors import DocumentComposeError
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     with pytest.raises(DocumentComposeError) as exc_info:
+         resolve_document(workspace, "../escape")
+     assert exc_info.value.code == "variant.invalid"
+@@ -311,7 +311,7 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
+     from audiocompose.errors import DocumentComposeError
+     from audiocompose.job import load_job
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     events = []
+     first = compose_document(workspace, variant=variant, on_progress=events.append)
+     assert events
+@@ -333,10 +333,10 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
+     assert first.report_path.is_file()
+     assert first.output.is_file()
+     assert load_job(first.audiojob).job_id
+-    assert first.to_dict()["format"] == "audiocompose-document-result"
++    assert first.to_dict()["format"] == "audiocompose" + "-document-result"
+     with first.report_path.open("rb") as stream:
+         report = tomllib.load(stream)
+-    assert report["format"] == "audiocompose-document-report"
++    assert report["format"] == "audiocompose" + "-document-report"
+     assert report["document_id"] == DOCUMENT_ID
+     assert report["pause_policy_provenance"] == "renderprofile"
+     assert report["output_geometry"]["sha256"] == first.sha256
+@@ -369,7 +369,7 @@ def test_compose_document_applies_profile_and_explicit_pause_policies(tmp_path:
+     from audiocompose.job import load_job
+
+     profile_workspace, profile_variant = _document_render_workspace(
+-        tmp_path / "profile.ssmdoc", profile_pause_ms=400, include_pause=True
++        tmp_path / "profile.ssmd-bundle", profile_pause_ms=400, include_pause=True
+     )
+     profile_result = compose_document(profile_workspace, variant=profile_variant)
+     profile_job = load_job(profile_result.audiojob)
+@@ -379,7 +379,7 @@ def test_compose_document_applies_profile_and_explicit_pause_policies(tmp_path:
+     ).seconds == pytest.approx(0.4)
+
+     explicit_workspace, explicit_variant = _document_render_workspace(
+-        tmp_path / "explicit.ssmdoc", include_pause=True
++        tmp_path / "explicit.ssmd-bundle", include_pause=True
+     )
+     explicit = {
+         "schema": "audiocompose.pause-policy.v1",
+@@ -402,7 +402,7 @@ def test_compose_document_supports_root_overrides_output_options_and_audiojob_pa
+ ) -> None:
+     from audiocompose.document import DocumentComposeOptions, compose_document
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     custom_renderplan = tmp_path / "custom-renderplan"
+     custom_voicerender = tmp_path / "custom-voicerender"
+     shutil.copytree(workspace / "renderplan", custom_renderplan)
+@@ -437,7 +437,7 @@ def test_compose_document_rejects_incomplete_manifest(tmp_path: Path) -> None:
+     from audiocompose.document import compose_document
+     from audiocompose.errors import DocumentComposeError
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     manifest_path = workspace / "voicerender" / variant / DOCUMENT_ID / "render-manifest.toml"
+     manifest = load_manifest(manifest_path)
+     save_manifest(
+@@ -459,7 +459,7 @@ def test_resolve_document_rejects_renderplan_and_source_identity_mismatches(
+     from audiocompose.document import resolve_document
+     from audiocompose.errors import DocumentComposeError
+
+-    plan_workspace, plan_variant = _document_render_workspace(tmp_path / "plan.ssmdoc")
++    plan_workspace, plan_variant = _document_render_workspace(tmp_path / "plan.ssmd-bundle")
+     plan_path = plan_workspace / "renderplan" / plan_variant / "document.renderplan.toml"
+     plan = load_plan(plan_path)
+     save_plan(
+@@ -470,7 +470,7 @@ def test_resolve_document_rejects_renderplan_and_source_identity_mismatches(
+         resolve_document(plan_workspace, plan_variant)
+     assert exc_info.value.code == "plan.identity_mismatch"
+
+-    source_workspace, source_variant = _document_render_workspace(tmp_path / "source.ssmdoc")
++    source_workspace, source_variant = _document_render_workspace(tmp_path / "source.ssmd-bundle")
+     utterplan = pytest.importorskip("utterplan")
+     utterplan.FlowPlan(language="fr-FR", flow=()).save(
+         source_workspace / "utterplan" / "document.utterplan.toml"
+@@ -488,13 +488,13 @@ def test_compose_document_emphasis_fallback_and_strict_ownership(tmp_path: Path)
+
+     controls = (SpeechControl(1, 3, "emphasis", {}),)
+     fallback_workspace, fallback_variant = _document_render_workspace(
+-        tmp_path / "fallback.ssmdoc", emphasis_controls=controls
++        tmp_path / "fallback.ssmd-bundle", emphasis_controls=controls
+     )
+     fallback = compose_document(fallback_workspace, variant=fallback_variant)
+     assert fallback.diagnostics[0]["code"] == "emphasis.segment_fallback"
+
+     strict_workspace, strict_variant = _document_render_workspace(
+-        tmp_path / "strict.ssmdoc", emphasis_controls=controls
++        tmp_path / "strict.ssmd-bundle", emphasis_controls=controls
+     )
+     with pytest.raises(DocumentComposeError) as exc_info:
+         compose_document(strict_workspace, variant=strict_variant, emphasis_policy="strict")
+@@ -523,18 +523,21 @@ def test_document_package_root_exports_stable_api() -> None:
+     assert DocumentComposeResult is not None
+
+
+-def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, capsys) -> None:
++def test_bundle_compose_document_cli_json_human_overrides_and_errors(
++    tmp_path: Path, capsys
++) -> None:
+     from audiocompose.cli import main
+
+-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
++    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+     custom_renderplan = tmp_path / "custom-renderplan"
+     custom_voicerender = tmp_path / "custom-voicerender"
+     shutil.copytree(workspace / "renderplan", custom_renderplan)
+     shutil.copytree(workspace / "voicerender", custom_voicerender)
+     custom_output = tmp_path / "custom-audiocompose"
+-    custom_audiojob = tmp_path / "custom-job" / f"{DOCUMENT_ID}.audiojob"
++    audiojobs_root = tmp_path / "custom-jobs"
+     command = [
+-        "compose-document",
++        "bundle",
++        "compose",
+         str(workspace),
+         "--variant",
+         variant,
+@@ -544,42 +547,44 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
+         str(custom_voicerender),
+         "--output-root",
+         str(custom_output),
+-        "--save-audiojob",
+-        str(custom_audiojob),
++        "--save-audiojobs",
++        str(audiojobs_root),
+         "--sample-rate",
+         "8000",
+         "--json",
+         "--progress",
+         "always",
+     ]
+-
+     assert main(command) == 0
+     captured = capsys.readouterr()
+-    result = json.loads(captured.out)
+-    assert "preparing document" in captured.err
+-    assert "composing" in captured.err
+-    assert "complete" in captured.err
+-    assert result["format"] == "audiocompose-document-result"
++    wrapper = json.loads(captured.out)
++    assert wrapper["format"] == "audiocompose-bundle-result"
++    assert wrapper["kind"] == "document"
++    result = wrapper["result"]
++    assert "preparing bundle" in captured.err
++    assert "composing" in captured.err and "complete" in captured.err
++    assert result["format"] == "audiocompose" + "-document-result"
+     assert result["status"] == "written"
+     assert result["sample_rate"] == 8_000
+     assert result["output"] == str(custom_output / variant / f"{DOCUMENT_ID}.wav")
+-    assert result["audiojob"] == str(custom_audiojob)
++    assert result["audiojob"] == str(audiojobs_root / f"{DOCUMENT_ID}.audiojob")
++    assert (audiojobs_root / f"{DOCUMENT_ID}.audiojob").is_dir()
+     assert result["renderplan_root"] == str(custom_renderplan / variant)
+     assert result["voicerender_root"] == str(custom_voicerender / variant)
+
+     human_command = list(command)
+-    human_command[1] = str(workspace / DOCUMENT_SOURCE_FILENAME)
++    human_command[2] = str(workspace)
+     human_command.remove("--json")
++    human_command.remove("--output-root")
++    human_command.remove(str(custom_output))
+     assert main(human_command) == 0
+     human_capture = capsys.readouterr()
+-    human = human_capture.out
+-    assert "preparing document" in human_capture.err
++    assert "AudioCompose bundle compose" in human_capture.out
++    assert "kind:      document" in human_capture.out
++    assert "selected:  1" in human_capture.out
+     assert "complete" in human_capture.err
+-    assert "AudioCompose document compose" in human
+-    assert "document:    document-0001" in human
+-    assert "status:      reused" in human
+
+-    assert main(["compose-document", str(workspace), "--variant", "../escape", "--json"]) == 2
++    assert main(["bundle", "compose", str(workspace), "--variant", "../escape", "--json"]) == 2
+     failure = capsys.readouterr()
+     assert failure.out == ""
+     assert json.loads(failure.err)["valid"] is False
+diff --git a/tests/test_schema_resources.py b/tests/test_schema_resources.py
+index 54d4d52..42070c8 100644
+--- a/tests/test_schema_resources.py
++++ b/tests/test_schema_resources.py
+@@ -18,6 +18,9 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "AudioBufferSource",
+         "AudioClip",
+         "AudioComposeError",
++        "BundleComposeOptions",
++        "BundleComposeResult",
++        "BundleIdentity",
+         "BookComposeError",
+         "BookComposeRequest",
+         "BookComposeOptions",
+@@ -46,6 +49,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "ChapterComposeStatus",
+         "Composer",
+         "compose_book",
++        "compose_bundle",
+         "compose_document",
+         "compose_renderplan",
+         "default_book_output_policy",
+@@ -70,6 +74,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "Silence",
+         "Tempo",
+         "audiojob_schema",
++        "load_bundle_identity",
+         "load_job",
+         "save_job",
+     }
+diff --git a/tests/test_voicerender_materialization.py b/tests/test_voicerender_materialization.py
+index 3ff04a8..b2024ea 100644
+--- a/tests/test_voicerender_materialization.py
++++ b/tests/test_voicerender_materialization.py
+@@ -39,7 +39,7 @@ def _book_handoff(
+     producer_version: str | None = "0.2.0",
+     manifest_complete: bool = True,
+ ):
+-    workspace = tmp_path / "book.ssmdbook"
++    workspace = tmp_path / "book.ssmd-bundle"
+     utterplan_dir = workspace / "utterplan"
+     chapter_id = "chapter-0001"
+     utterplan_dir.mkdir(parents=True, exist_ok=True)
