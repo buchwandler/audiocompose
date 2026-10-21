@@ -1,4 +1,4 @@
-# AudioCompose documentation
+# AudioCompose reference
 
 AudioCompose composes completed audio through producer-neutral `AudioJob` values. The repository README describes generic AudioJob workflows and direct RenderPlan composition.
 
@@ -19,23 +19,17 @@ result = audiocompose.compose_renderplan(
 
 The manifest defaults to `render-manifest.toml` inside `render_dir`; when `media_root` is omitted, relative external media resolves beneath the plan file's parent. `OutputPolicy` carries the existing sample-rate, clipping, and loudness/peak controls, with mono-only output. Emphasis defaults to `segment_fallback`; `strict` rejects partial-span emphasis. Set `save_audiojob` only when the intermediate job should be persisted. See the [direct RenderPlan composition guide](https://github.com/buchwandler/audiocompose#direct-renderplan-composition) for the CLI workflow and full behavior.
 
-## SSMDDoc workspace composition
+## Bundle composition for rendered variants
 
-`audiocompose compose-document WORKSPACE --variant VARIANT` composes one rendered SSMDDoc from the direct `utterplan/`, `renderplan/<variant>/`, `voicerender/<variant>/`, and `audiocompose/<variant>/` stages. It accepts the workspace root or canonical `document.ssmd.md`, requires a complete VoiceRender handoff, and writes a WAV, reproducible AudioJob, and atomic compose report under the AudioCompose variant directory. The profile snapshot supplies the default symbolic pause policy; RenderPlan roles remain authoritative, and only explicitly deferred emphasis owned by AudioCompose is realized. See [SSMDDoc workspace composition in the README](https://github.com/buchwandler/audiocompose#ssmdoc-document-workspace-composition) for layout, CLI controls, Python API, provenance reuse, and ownership details.
-
-```bash
-audiocompose compose-document . --variant narration--<fingerprint> --json
-```
-
-## Book-level RenderPlan composition
-
-The `audiocompose compose-book BOOK --variant VARIANT` command uses the RenderPlan-set's authoritative chapter order, resolves source pause intents from its RenderProfile snapshot (or an explicit `--pauses POLICY.toml`), saves inspectable AudioJobs, composes through generic `Composer`, atomically writes chapter WAVs, and records exact reuse provenance in `compose-report.toml`. UtterPlan and VoiceRender are optional; install `audiocompose[voicerender]` for this integration.
+`audiocompose bundle compose NAME.ssmd-bundle --variant VARIANT` composes either supported SSMD bundle kind. AudioCompose reads `manifest.json` and dispatches on its `format`: a book bundle composes selected chapters, while a document bundle composes its single document (and accepts only `--chapters all`). The command accepts only the editable workspace root; it does not accept inner source paths or ZIP files. Existing book/document report contracts remain kind-specific. See the unified [bundle composition guide](https://github.com/buchwandler/audiocompose#bundle-composition-for-rendered-variants).
 
 ```bash
-audiocompose compose-book . --variant narration--525856299523 --chapters 5-7
+audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint> --json
 ```
 
-Production composition requires each selected VoiceRender `render-manifest.toml` to be complete; incomplete QC renders are rejected. The [repository README](https://github.com/buchwandler/audiocompose#book-level-composition-for-rendered-variants) documents output roots, pause policy, CLI controls, reuse, and failure behavior.
+Production composition requires complete VoiceRender handoffs. Default RenderPlan, VoiceRender, and AudioCompose roots are resolved beneath the bundle root.
+
+## Architecture
 
 ```{toctree}
 :maxdepth: 2
@@ -43,6 +37,5 @@ Production composition requires each selected VoiceRender `render-manifest.toml`
 
 architecture
 migration-v0.2
-migration-v0.3
 changelog
 ```

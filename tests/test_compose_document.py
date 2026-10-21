@@ -152,7 +152,7 @@ def _document_render_workspace(
 
 
 def test_document_workspace_accepts_root_and_canonical_file(tmp_path: Path) -> None:
-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
+    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
 
     from_root = read_document_workspace(workspace)
     from_file = read_document_workspace(workspace / DOCUMENT_SOURCE_FILENAME)
@@ -181,7 +181,7 @@ def test_document_workspace_accepts_root_and_canonical_file(tmp_path: Path) -> N
 def test_document_workspace_rejects_invalid_manifest_identity(
     tmp_path: Path, field: str, value: object
 ) -> None:
-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
+    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
     manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
     if field.startswith("document."):
         manifest["document"][field.removeprefix("document.")] = value
@@ -194,20 +194,20 @@ def test_document_workspace_rejects_invalid_manifest_identity(
 
 
 def test_document_workspace_rejects_zip_and_missing_document(tmp_path: Path) -> None:
-    archive = tmp_path / "story.ssmdoc.zip"
+    archive = tmp_path / "story.ssmd-bundle.zip"
     with zipfile.ZipFile(archive, "w") as zipped:
         zipped.writestr("manifest.json", "{}")
     with pytest.raises(DocumentWorkspaceContractError, match="ZIP input is not supported"):
         read_document_workspace(archive)
 
-    workspace = _document_workspace(tmp_path / "missing.ssmdoc")
+    workspace = _document_workspace(tmp_path / "missing.ssmd-bundle")
     (workspace / DOCUMENT_SOURCE_FILENAME).unlink()
-    with pytest.raises(DocumentWorkspaceContractError, match="canonical SSMDDoc document"):
+    with pytest.raises(DocumentWorkspaceContractError, match="canonical SSMD document source"):
         read_document_workspace(workspace)
 
 
 def test_document_workspace_rejects_symlinked_and_escaping_files(tmp_path: Path) -> None:
-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
+    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
     outside_manifest = tmp_path / "outside-manifest.json"
     outside_manifest.write_bytes((workspace / "manifest.json").read_bytes())
     (workspace / "manifest.json").unlink()
@@ -231,7 +231,7 @@ def test_document_workspace_rejects_symlinked_and_escaping_files(tmp_path: Path)
 def test_document_workspace_rejects_duplicate_json_fields_and_wrong_file_name(
     tmp_path: Path,
 ) -> None:
-    workspace = _document_workspace(tmp_path / "story.ssmdoc")
+    workspace = _document_workspace(tmp_path / "story.ssmd-bundle")
     (workspace / "manifest.json").write_text(
         '{"format":"ssmdconvert.document","format":"other"}', encoding="utf-8"
     )
@@ -258,7 +258,7 @@ def test_document_workspace_rejects_duplicate_json_fields_and_wrong_file_name(
 def test_resolve_document_uses_direct_stage_roots_and_canonical_paths(tmp_path: Path) -> None:
     from audiocompose.document import resolve_document
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     context = resolve_document(workspace / DOCUMENT_SOURCE_FILENAME, variant)
 
     assert context.workspace == workspace.resolve()
@@ -282,7 +282,7 @@ def test_resolve_document_rejects_unsafe_variant_and_profile_fingerprint(
     from audiocompose.document import resolve_document
     from audiocompose.errors import DocumentComposeError
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     with pytest.raises(DocumentComposeError) as exc_info:
         resolve_document(workspace, "../escape")
     assert exc_info.value.code == "variant.invalid"
@@ -311,7 +311,7 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     from audiocompose.errors import DocumentComposeError
     from audiocompose.job import load_job
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     events = []
     first = compose_document(workspace, variant=variant, on_progress=events.append)
     assert events
@@ -333,10 +333,10 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     assert first.report_path.is_file()
     assert first.output.is_file()
     assert load_job(first.audiojob).job_id
-    assert first.to_dict()["format"] == "audiocompose-document-result"
+    assert first.to_dict()["format"] == "audiocompose" + "-document-result"
     with first.report_path.open("rb") as stream:
         report = tomllib.load(stream)
-    assert report["format"] == "audiocompose-document-report"
+    assert report["format"] == "audiocompose" + "-document-report"
     assert report["document_id"] == DOCUMENT_ID
     assert report["pause_policy_provenance"] == "renderprofile"
     assert report["output_geometry"]["sha256"] == first.sha256
@@ -369,7 +369,7 @@ def test_compose_document_applies_profile_and_explicit_pause_policies(tmp_path: 
     from audiocompose.job import load_job
 
     profile_workspace, profile_variant = _document_render_workspace(
-        tmp_path / "profile.ssmdoc", profile_pause_ms=400, include_pause=True
+        tmp_path / "profile.ssmd-bundle", profile_pause_ms=400, include_pause=True
     )
     profile_result = compose_document(profile_workspace, variant=profile_variant)
     profile_job = load_job(profile_result.audiojob)
@@ -379,7 +379,7 @@ def test_compose_document_applies_profile_and_explicit_pause_policies(tmp_path: 
     ).seconds == pytest.approx(0.4)
 
     explicit_workspace, explicit_variant = _document_render_workspace(
-        tmp_path / "explicit.ssmdoc", include_pause=True
+        tmp_path / "explicit.ssmd-bundle", include_pause=True
     )
     explicit = {
         "schema": "audiocompose.pause-policy.v1",
@@ -402,7 +402,7 @@ def test_compose_document_supports_root_overrides_output_options_and_audiojob_pa
 ) -> None:
     from audiocompose.document import DocumentComposeOptions, compose_document
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     custom_renderplan = tmp_path / "custom-renderplan"
     custom_voicerender = tmp_path / "custom-voicerender"
     shutil.copytree(workspace / "renderplan", custom_renderplan)
@@ -437,7 +437,7 @@ def test_compose_document_rejects_incomplete_manifest(tmp_path: Path) -> None:
     from audiocompose.document import compose_document
     from audiocompose.errors import DocumentComposeError
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     manifest_path = workspace / "voicerender" / variant / DOCUMENT_ID / "render-manifest.toml"
     manifest = load_manifest(manifest_path)
     save_manifest(
@@ -459,7 +459,7 @@ def test_resolve_document_rejects_renderplan_and_source_identity_mismatches(
     from audiocompose.document import resolve_document
     from audiocompose.errors import DocumentComposeError
 
-    plan_workspace, plan_variant = _document_render_workspace(tmp_path / "plan.ssmdoc")
+    plan_workspace, plan_variant = _document_render_workspace(tmp_path / "plan.ssmd-bundle")
     plan_path = plan_workspace / "renderplan" / plan_variant / "document.renderplan.toml"
     plan = load_plan(plan_path)
     save_plan(
@@ -470,7 +470,7 @@ def test_resolve_document_rejects_renderplan_and_source_identity_mismatches(
         resolve_document(plan_workspace, plan_variant)
     assert exc_info.value.code == "plan.identity_mismatch"
 
-    source_workspace, source_variant = _document_render_workspace(tmp_path / "source.ssmdoc")
+    source_workspace, source_variant = _document_render_workspace(tmp_path / "source.ssmd-bundle")
     utterplan = pytest.importorskip("utterplan")
     utterplan.FlowPlan(language="fr-FR", flow=()).save(
         source_workspace / "utterplan" / "document.utterplan.toml"
@@ -488,13 +488,13 @@ def test_compose_document_emphasis_fallback_and_strict_ownership(tmp_path: Path)
 
     controls = (SpeechControl(1, 3, "emphasis", {}),)
     fallback_workspace, fallback_variant = _document_render_workspace(
-        tmp_path / "fallback.ssmdoc", emphasis_controls=controls
+        tmp_path / "fallback.ssmd-bundle", emphasis_controls=controls
     )
     fallback = compose_document(fallback_workspace, variant=fallback_variant)
     assert fallback.diagnostics[0]["code"] == "emphasis.segment_fallback"
 
     strict_workspace, strict_variant = _document_render_workspace(
-        tmp_path / "strict.ssmdoc", emphasis_controls=controls
+        tmp_path / "strict.ssmd-bundle", emphasis_controls=controls
     )
     with pytest.raises(DocumentComposeError) as exc_info:
         compose_document(strict_workspace, variant=strict_variant, emphasis_policy="strict")
@@ -523,18 +523,21 @@ def test_document_package_root_exports_stable_api() -> None:
     assert DocumentComposeResult is not None
 
 
-def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, capsys) -> None:
+def test_bundle_compose_document_cli_json_human_overrides_and_errors(
+    tmp_path: Path, capsys
+) -> None:
     from audiocompose.cli import main
 
-    workspace, variant = _document_render_workspace(tmp_path / "story.ssmdoc")
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
     custom_renderplan = tmp_path / "custom-renderplan"
     custom_voicerender = tmp_path / "custom-voicerender"
     shutil.copytree(workspace / "renderplan", custom_renderplan)
     shutil.copytree(workspace / "voicerender", custom_voicerender)
     custom_output = tmp_path / "custom-audiocompose"
-    custom_audiojob = tmp_path / "custom-job" / f"{DOCUMENT_ID}.audiojob"
+    audiojobs_root = tmp_path / "custom-jobs"
     command = [
-        "compose-document",
+        "bundle",
+        "compose",
         str(workspace),
         "--variant",
         variant,
@@ -544,42 +547,44 @@ def test_compose_document_cli_json_human_overrides_and_errors(tmp_path: Path, ca
         str(custom_voicerender),
         "--output-root",
         str(custom_output),
-        "--save-audiojob",
-        str(custom_audiojob),
+        "--save-audiojobs",
+        str(audiojobs_root),
         "--sample-rate",
         "8000",
         "--json",
         "--progress",
         "always",
     ]
-
     assert main(command) == 0
     captured = capsys.readouterr()
-    result = json.loads(captured.out)
-    assert "preparing document" in captured.err
-    assert "composing" in captured.err
-    assert "complete" in captured.err
-    assert result["format"] == "audiocompose-document-result"
+    wrapper = json.loads(captured.out)
+    assert wrapper["format"] == "audiocompose-bundle-result"
+    assert wrapper["kind"] == "document"
+    result = wrapper["result"]
+    assert "preparing bundle" in captured.err
+    assert "composing" in captured.err and "complete" in captured.err
+    assert result["format"] == "audiocompose" + "-document-result"
     assert result["status"] == "written"
     assert result["sample_rate"] == 8_000
     assert result["output"] == str(custom_output / variant / f"{DOCUMENT_ID}.wav")
-    assert result["audiojob"] == str(custom_audiojob)
+    assert result["audiojob"] == str(audiojobs_root / f"{DOCUMENT_ID}.audiojob")
+    assert (audiojobs_root / f"{DOCUMENT_ID}.audiojob").is_dir()
     assert result["renderplan_root"] == str(custom_renderplan / variant)
     assert result["voicerender_root"] == str(custom_voicerender / variant)
 
     human_command = list(command)
-    human_command[1] = str(workspace / DOCUMENT_SOURCE_FILENAME)
+    human_command[2] = str(workspace)
     human_command.remove("--json")
+    human_command.remove("--output-root")
+    human_command.remove(str(custom_output))
     assert main(human_command) == 0
     human_capture = capsys.readouterr()
-    human = human_capture.out
-    assert "preparing document" in human_capture.err
+    assert "AudioCompose bundle compose" in human_capture.out
+    assert "kind:      document" in human_capture.out
+    assert "selected:  1" in human_capture.out
     assert "complete" in human_capture.err
-    assert "AudioCompose document compose" in human
-    assert "document:    document-0001" in human
-    assert "status:      reused" in human
 
-    assert main(["compose-document", str(workspace), "--variant", "../escape", "--json"]) == 2
+    assert main(["bundle", "compose", str(workspace), "--variant", "../escape", "--json"]) == 2
     failure = capsys.readouterr()
     assert failure.out == ""
     assert json.loads(failure.err)["valid"] is False

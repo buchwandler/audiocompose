@@ -271,11 +271,17 @@ def test_book_cli_renders_nested_progress_to_stderr(monkeypatch, tmp_path: Path,
         return SimpleNamespace(exit_code=0, to_dict=lambda: {"composed": True})
 
     monkeypatch.setattr(book_module, "compose_book", fake_compose)
+    bundle = tmp_path / "fixture.ssmd-bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1})
+    )
     assert (
         main(
             [
-                "compose-book",
-                str(tmp_path),
+                "bundle",
+                "compose",
+                str(bundle),
                 "--variant",
                 "fixture",
                 "--json",
@@ -286,7 +292,12 @@ def test_book_cli_renders_nested_progress_to_stderr(monkeypatch, tmp_path: Path,
         == 0
     )
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"composed": True}
+    assert json.loads(captured.out) == {
+        "format": "audiocompose-bundle-result",
+        "version": 1,
+        "kind": "book",
+        "result": {"composed": True},
+    }
     progress = captured.err
     assert "chapter 1/1" in progress
     assert "preparing handoff" in progress or "starting composition" in progress

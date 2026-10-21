@@ -13,6 +13,8 @@ from .book import (
     default_book_output_policy,
     resolve_book,
 )
+from .bundle import BundleComposeOptions, BundleComposeResult, compose_bundle
+from .bundle_contract import BundleIdentity, load_bundle_identity
 from .composer import Composer, estimate_composition
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .document import (
@@ -59,6 +61,11 @@ from .sources import AudioBufferSource, AudioFileSource
 
 __all__ = [
     "__version__",
+    "BundleComposeOptions",
+    "BundleComposeResult",
+    "BundleIdentity",
+    "compose_bundle",
+    "load_bundle_identity",
     "AudioAnchor",
     "AudioBufferSource",
     "AudioClip",

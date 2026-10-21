@@ -92,7 +92,7 @@ def _fixture_book(
     source_voice: str | None = None,
 ):
     utterplan = pytest.importorskip("utterplan")
-    workspace = tmp_path / "book"
+    workspace = tmp_path / "book.ssmd-bundle"
     profile = _profile(profile_pauses, role=render_role)
     profile_id = profile.profile_id or profile.computed_id()
     fingerprint = profile_id.removeprefix("sha256:")[:12]
@@ -312,7 +312,8 @@ def test_compose_book_cli_pause_override_and_human_report_summary(tmp_path, caps
         encoding="utf-8",
     )
     command = [
-        "compose-book",
+        "bundle",
+        "compose",
         str(workspace),
         "--variant",
         variant,
@@ -321,7 +322,7 @@ def test_compose_book_cli_pause_override_and_human_report_summary(tmp_path, caps
         "--json",
     ]
     assert main(command) == 0
-    result = json.loads(capsys.readouterr().out)
+    result = _bundle_cli_data(capsys)
     assert result["pause_policy_provenance"] == "explicit"
     assert result["items"][0]["pause_policy_id"].startswith("sha256:")
     job = load_job(workspace / "audiocompose" / variant / "chapter-0005.audiojob")
@@ -472,14 +473,22 @@ def test_renderplan_set_chapter_identity_mismatch_is_rejected(tmp_path):
 
 
 def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
-    command = ["compose-book", str(workspace), "--variant", variant, "--chapters", "5", "--json"]
+    command = [
+        "bundle",
+        "compose",
+        str(workspace),
+        "--variant",
+        variant,
+        "--chapters",
+        "5",
+        "--json",
+    ]
     assert main(command) == 0
-    first = json.loads(capsys.readouterr().out)
+    first = _bundle_cli_data(capsys)
     assert first["written"] == 1 and first["reused"] == 0
     assert first["items"][0]["status"] == "written"
     assert first["items"][0]["frames"] == 9_048
@@ -506,7 +515,7 @@ def test_compose_book_cli_writes_report_and_reuses_verified_output(tmp_path, cap
     assert diagnostics_path.is_file()
 
     assert main(command) == 0
-    second = json.loads(capsys.readouterr().out)
+    second = _bundle_cli_data(capsys)
     assert second["written"] == 0 and second["reused"] == 1
     assert second["items"][0]["status"] == "reused"
 
@@ -541,7 +550,6 @@ def test_book_diagnostics_digest_invalidates_output_reuse(tmp_path):
 
 
 def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsys):
-    import json
 
     try:
         import tomllib
@@ -601,7 +609,8 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
     assert api_result.report_path.parent == api_workspace / "audiocompose" / api_variant
 
     cli_command = [
-        "compose-book",
+        "bundle",
+        "compose",
         str(cli_workspace),
         "--variant",
         cli_variant,
@@ -613,7 +622,7 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
     assert (cli_workspace / "utterplan").is_dir()
     assert (cli_workspace / "renderplan" / cli_variant).is_dir()
     assert (cli_workspace / "voicerender" / cli_variant).is_dir()
-    cli_result = json.loads(capsys.readouterr().out)
+    cli_result = _bundle_cli_data(capsys)
     assert Path(cli_result["report"]).parent == cli_workspace / "audiocompose" / cli_variant
     api_items = api_result.to_dict()["items"]
     assert api_items == cli_result["items"]
@@ -641,7 +650,7 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         api_workspace, variant=api_variant, chapters="5,8", on_progress=reuse_progress.append
     )
     assert main(cli_command) == 0
-    cli_reused = json.loads(capsys.readouterr().out)
+    cli_reused = _bundle_cli_data(capsys)
     assert [item.status for item in api_reused.outcomes] == ["reused", "reused"]
     reuse_fractions = [event.fraction for event in reuse_progress]
     assert all(fraction is not None for fraction in reuse_fractions)
@@ -652,7 +661,6 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
 
 
 def test_public_book_api_and_cli_report_matching_chapter_errors(tmp_path, capsys):
-    import json
 
     from audiocompose import compose_book
     from audiocompose.cli import main
@@ -667,9 +675,9 @@ def test_public_book_api_and_cli_report_matching_chapter_errors(tmp_path, capsys
     ).unlink()
 
     api_result = compose_book(api_workspace, variant=api_variant)
-    cli_command = ["compose-book", str(cli_workspace), "--variant", cli_variant, "--json"]
+    cli_command = ["bundle", "compose", str(cli_workspace), "--variant", cli_variant, "--json"]
     assert main(cli_command) == api_result.exit_code == 2
-    cli_result = json.loads(capsys.readouterr().out)
+    cli_result = _bundle_cli_data(capsys)
     assert api_result.outcomes[0].status == "failed"
     assert api_result.outcomes[0].error_code == "manifest.missing"
     api_item = api_result.to_dict()["items"][0]
@@ -720,7 +728,6 @@ def test_installed_package_metadata_has_supported_producer_floors():
 
 
 def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, capsys):
-    import json
 
     from audiocompose import AudioClip, AudioJob, Gain
     from audiocompose.cli import main
@@ -734,7 +741,8 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
     assert (
         main(
             [
-                "compose-book",
+                "bundle",
+                "compose",
                 str(workspace),
                 "--variant",
                 variant,
@@ -745,7 +753,7 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
         )
         == 0
     )
-    result = json.loads(capsys.readouterr().out)
+    result = _bundle_cli_data(capsys)
     assert result["emphasis_policy"] == "segment_fallback"
     assert result["diagnostics"][0]["code"] == "emphasis.segment_fallback"
     assert "entire segment" in result["items"][0]["emphasis_warning"]
@@ -764,7 +772,8 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
     assert (
         main(
             [
-                "compose-book",
+                "bundle",
+                "compose",
                 str(strict_workspace),
                 "--variant",
                 strict_variant,
@@ -775,36 +784,57 @@ def test_compose_book_emphasis_default_warning_and_strict_failure(tmp_path, caps
         )
         == 2
     )
-    strict_result = json.loads(capsys.readouterr().out)
+    strict_result = _bundle_cli_data(capsys)
     assert strict_result["items"][0]["status"] == "failed"
     assert "split the speech upstream" in strict_result["items"][0]["error_message"]
     assert not (strict_workspace / "audiocompose" / strict_variant / "chapter-0005.wav").exists()
 
 
 def test_compose_book_uses_set_order_for_full_book_ranges_and_commas(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, _, _ = _fixture_book(tmp_path)
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 0
+    full = _bundle_cli_data(capsys)
     assert [item["source_number"] for item in full["items"]] == [7, 6, 5, 8]
     assert all(item["status"] == "written" for item in full["items"])
 
     assert (
-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "5-7", "--json"])
+        main(
+            [
+                "bundle",
+                "compose",
+                str(workspace),
+                "--variant",
+                variant,
+                "--chapters",
+                "5-7",
+                "--json",
+            ]
+        )
         == 0
     )
-    ranged = json.loads(capsys.readouterr().out)
+    ranged = _bundle_cli_data(capsys)
     assert [item["source_number"] for item in ranged["items"]] == [7, 6, 5]
     assert all(item["status"] == "reused" for item in ranged["items"])
 
     assert (
-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "5,8", "--json"])
+        main(
+            [
+                "bundle",
+                "compose",
+                str(workspace),
+                "--variant",
+                variant,
+                "--chapters",
+                "5,8",
+                "--json",
+            ]
+        )
         == 0
     )
-    comma = json.loads(capsys.readouterr().out)
+    comma = _bundle_cli_data(capsys)
     assert [item["source_number"] for item in comma["items"]] == [5, 8]
 
 
@@ -815,7 +845,9 @@ def test_unknown_selected_chapter_fails_before_output_is_created(tmp_path, capsy
 
     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
     assert (
-        main(["compose-book", str(workspace), "--variant", variant, "--chapters", "9", "--json"])
+        main(
+            ["bundle", "compose", str(workspace), "--variant", variant, "--chapters", "9", "--json"]
+        )
         == 2
     )
     error = json.loads(capsys.readouterr().err)
@@ -824,7 +856,6 @@ def test_unknown_selected_chapter_fails_before_output_is_created(tmp_path, capsy
 
 
 def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
@@ -833,8 +864,9 @@ def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
     assert (
         main(
             [
-                "compose-book",
-                str(workspace / "chapters"),
+                "bundle",
+                "compose",
+                str(workspace),
                 "--variant",
                 variant,
                 "--renderplan-root",
@@ -848,7 +880,7 @@ def test_cli_root_overrides_redirect_outputs(tmp_path, capsys):
         )
         == 0
     )
-    result = json.loads(capsys.readouterr().out)
+    result = _bundle_cli_data(capsys)
     assert result["written"] == 1
     assert Path(result["report"]).is_file()
     assert (output_root / variant / "chapter-0005.wav").is_file()
@@ -864,7 +896,7 @@ def test_variant_label_fingerprint_and_profile_snapshot_must_match(tmp_path, cap
     shutil.copytree(plan_variant, plan_variant.parent / wrong_variant)
     voice_variant = workspace / "voicerender" / variant
     shutil.copytree(voice_variant, workspace / "voicerender" / wrong_variant)
-    assert main(["compose-book", str(workspace), "--variant", wrong_variant, "--json"]) == 2
+    assert main(["bundle", "compose", str(workspace), "--variant", wrong_variant, "--json"]) == 2
     mismatch = json.loads(capsys.readouterr().err)
     assert mismatch["errors"][0]["code"] == "variant.identity_mismatch"
 
@@ -873,21 +905,20 @@ def test_variant_label_fingerprint_and_profile_snapshot_must_match(tmp_path, cap
         default_role="narrator",
     ).with_identity()
     save_profile(different_profile, plan_variant / "renderprofile.toml")
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
     mismatch = json.loads(capsys.readouterr().err)
     assert mismatch["errors"][0]["code"] == "profile.identity_mismatch"
 
 
 def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, plan_variant, chapters = _fixture_book(tmp_path, source_numbers=(5,))
     plan_path = plan_variant / chapters[0].renderplan
     plan_path.unlink()
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
-    missing = json.loads(capsys.readouterr().out)
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
+    missing = _bundle_cli_data(capsys)
     assert missing["items"][0]["error_code"] == "plan.missing"
 
     workspace, variant, plan_variant, chapters = _fixture_book(
@@ -897,8 +928,8 @@ def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path
     renderplan_set = load_renderplan_set(set_path)
     wrong = replace(renderplan_set.chapters[0], render_plan_id="sha256:" + "0" * 64)
     save_renderplan_set(set_path, replace(renderplan_set, chapters=(wrong,)))
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
-    result = json.loads(capsys.readouterr().out)
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
+    result = _bundle_cli_data(capsys)
     assert result["items"][0]["error_code"] == "plan.identity_mismatch"
 
 
@@ -916,7 +947,6 @@ def test_missing_renderplan_and_set_plan_identity_mismatch_fail_cleanly(tmp_path
 def test_strict_handoff_validation_rejects_bad_manifest_and_artifacts(
     tmp_path, capsys, mode, expected_code
 ):
-    import json
 
     from audiocompose.cli import main
 
@@ -952,41 +982,39 @@ def test_strict_handoff_validation_rejects_bad_manifest_and_artifacts(
         manifest_path.unlink()
         manifest_path.symlink_to(outside)
 
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
-    result = json.loads(capsys.readouterr().out)
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
+    result = _bundle_cli_data(capsys)
     assert result["items"][0]["error_code"] == expected_code
 
 
 def test_missing_voicerender_chapter_directory_is_reported(tmp_path, capsys):
-    import json
     import shutil
 
     from audiocompose.cli import main
 
     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
     shutil.rmtree(workspace / "voicerender" / variant / chapters[0].id)
-    assert main(["compose-book", str(workspace), "--variant", variant, "--json"]) == 2
-    result = json.loads(capsys.readouterr().out)
+    assert main(["bundle", "compose", str(workspace), "--variant", variant, "--json"]) == 2
+    result = _bundle_cli_data(capsys)
     assert result["items"][0]["error_code"] == "render_dir.missing"
 
 
 def test_unknown_existing_output_requires_force(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, _, _ = _fixture_book(tmp_path, source_numbers=(5,))
-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
+    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
     assert main(command) == 0
     capsys.readouterr()
     report = workspace / "audiocompose" / variant / "compose-report.toml"
     report.unlink()
 
     assert main(command) == 2
-    unknown = json.loads(capsys.readouterr().out)
+    unknown = _bundle_cli_data(capsys)
     assert unknown["items"][0]["error_code"] == "output.exists"
     assert main(command + ["--force"]) == 0
-    forced = json.loads(capsys.readouterr().out)
+    forced = _bundle_cli_data(capsys)
     assert forced["items"][0]["status"] == "written"
 
 
@@ -1007,7 +1035,6 @@ def test_unsafe_set_chapter_id_is_rejected_by_shared_set_loader(tmp_path):
 
 
 def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys):
-    import json
 
     from audiocompose import AudioJob
     from audiocompose.cli import main
@@ -1018,7 +1045,8 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
     assert (
         main(
             [
-                "compose-book",
+                "bundle",
+                "compose",
                 str(workspace),
                 "--variant",
                 variant,
@@ -1031,7 +1059,7 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
         )
         == 0
     )
-    result = json.loads(capsys.readouterr().out)
+    result = _bundle_cli_data(capsys)
     output = workspace / "audiocompose" / variant / "chapter-0005.wav"
     assert wav_info(output).sample_rate == 16_000
     audiojob = jobs_root / "chapter-0005.audiojob" / "audiojob.json"
@@ -1041,12 +1069,11 @@ def test_compose_book_uses_policy_and_saves_optional_audiojobs(tmp_path, capsys)
 
 
 def test_manifest_change_invalidates_reuse_and_force_recomposes(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
+    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
     assert main(command) == 0
     capsys.readouterr()
     plan_path = workspace / "renderplan" / variant / chapters[0].renderplan
@@ -1073,34 +1100,33 @@ def test_manifest_change_invalidates_reuse_and_force_recomposes(tmp_path, capsys
     save_manifest(replacement, render_dir / "render-manifest.toml")
 
     assert main(command) == 2
-    stale = json.loads(capsys.readouterr().out)
+    stale = _bundle_cli_data(capsys)
     assert stale["items"][0]["error_code"] == "output.exists"
     assert main(command + ["--force"]) == 0
-    forced = json.loads(capsys.readouterr().out)
+    forced = _bundle_cli_data(capsys)
     assert forced["items"][0]["status"] == "written"
     assert main(command + ["--force"]) == 0
-    forced_again = json.loads(capsys.readouterr().out)
+    forced_again = _bundle_cli_data(capsys)
     assert forced_again["items"][0]["status"] == "written"
 
 
 def test_batch_continues_by_default_and_fail_fast_skips_later_chapters(tmp_path, capsys):
-    import json
 
     from audiocompose.cli import main
 
     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5, 6, 7))
     missing_manifest = workspace / "voicerender" / variant / chapters[1].id / "render-manifest.toml"
     missing_manifest.unlink()
-    command = ["compose-book", str(workspace), "--variant", variant, "--json"]
+    command = ["bundle", "compose", str(workspace), "--variant", variant, "--json"]
     assert main(command) == 2
-    continued = json.loads(capsys.readouterr().out)
+    continued = _bundle_cli_data(capsys)
     assert [item["status"] for item in continued["items"]] == ["written", "failed", "written"]
     assert continued["items"][1]["error_code"] == "manifest.missing"
     report_text = (workspace / "audiocompose" / variant / "compose-report.toml").read_text()
     assert 'error_code = "manifest.missing"' in report_text
 
     assert main(command + ["--fail-fast"]) == 2
-    fast = json.loads(capsys.readouterr().out)
+    fast = _bundle_cli_data(capsys)
     assert [item["status"] for item in fast["items"]] == ["reused", "failed", "skipped"]
 
 
@@ -1328,7 +1354,8 @@ def test_external_audio_and_output_policy_match_direct_compose_renderplan(tmp_pa
     assert (
         main(
             [
-                "compose-book",
+                "bundle",
+                "compose",
                 str(workspace),
                 "--variant",
                 variant,
@@ -1383,7 +1410,7 @@ class BlockProducerImports(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockProducerImports())
 from audiocompose import AudioJob, Composer, compose_document
 from audiocompose.cli import main
-assert main(['compose-book', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
+assert main(['bundle', 'compose', sys.argv[1], '--variant', sys.argv[2], '--json']) == 2
 assert not any(name == 'voicerender' or name.startswith('voicerender.') for name in sys.modules)
 assert not any(name == 'utterplan' or name.startswith('utterplan.') for name in sys.modules)
 assert AudioJob and Composer and compose_document
@@ -1396,3 +1423,10 @@ assert AudioJob and Composer and compose_document
     )
     assert completed.returncode == 0, completed.stderr
     assert "dependency.api_incompatible" in completed.stdout
+
+
+def _bundle_cli_data(capsys):
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    return payload.get("result", payload)

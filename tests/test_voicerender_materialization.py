@@ -39,7 +39,7 @@ def _book_handoff(
     producer_version: str | None = "0.2.0",
     manifest_complete: bool = True,
 ):
-    workspace = tmp_path / "book.ssmdbook"
+    workspace = tmp_path / "book.ssmd-bundle"
     utterplan_dir = workspace / "utterplan"
     chapter_id = "chapter-0001"
     utterplan_dir.mkdir(parents=True, exist_ok=True)

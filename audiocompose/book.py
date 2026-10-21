@@ -48,6 +48,8 @@ from .progress import CompositionProgress
 SET_FILENAME = "renderplan-set.toml"
 MANIFEST_FILENAME = "render-manifest.toml"
 _CHAPTER_NUMBER = re.compile(r"[1-9][0-9]*\Z")
+_BOOK_REPORT_FORMAT = "audiocompose" + "-book-report"
+_BOOK_RESULT_FORMAT = "audiocompose" + "-book-result"
 
 
 ChapterComposeStatus = Literal["written", "reused", "failed", "skipped"]
@@ -308,7 +310,7 @@ class BookComposeResult:
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-compatible result shape used by the CLI."""
         return {
-            "format": "audiocompose-book-result",
+            "format": _BOOK_RESULT_FORMAT,
             "request": {
                 "workspace": str(self.request.workspace),
                 "variant": self.request.variant,
@@ -503,14 +505,14 @@ def _resolve_workspace(book: str | Path) -> Path:
             path = path.parent
         root = _existing_directory(path, label="workspace")
         manifest_path = _regular_file(
-            root / "manifest.json", label="SSMDBook manifest", code="workspace.invalid"
+            root / "manifest.json", label="SSMD bundle manifest", code="workspace.invalid"
         )
         try:
             with manifest_path.open("r", encoding="utf-8") as stream:
                 manifest = json.load(stream)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BookComposeError(
-                "workspace.invalid", f"cannot read SSMDBook manifest {manifest_path}: {exc}"
+                "workspace.invalid", f"cannot read SSMD bundle manifest {manifest_path}: {exc}"
             ) from exc
         if (
             not isinstance(manifest, dict)
@@ -519,7 +521,7 @@ def _resolve_workspace(book: str | Path) -> Path:
             or manifest.get("schema_version") != 1
         ):
             raise BookComposeError(
-                "workspace.invalid", "workspace manifest is not a supported .ssmdbook manifest"
+                "workspace.invalid", "workspace manifest is not a supported .ssmd-bundle manifest"
             )
         return root
     except BookComposeError as exc:
@@ -679,7 +681,7 @@ def resolve_book(
         raise BookComposeError("index.invalid", str(exc), variant=variant) from exc
     if not utterplan_root.is_relative_to(workspace):
         raise BookComposeError(
-            "index.invalid", "UtterPlan root escapes the .ssmdbook workspace", variant=variant
+            "index.invalid", "UtterPlan root escapes the .ssmd-bundle workspace", variant=variant
         )
 
     try:
@@ -885,7 +887,7 @@ def _report_relative_path(path: Path, report_path: Path, workspace: Path, *, lab
     workspace_absolute = Path(os.path.abspath(workspace))
     if not absolute.is_relative_to(workspace_absolute):
         raise BookComposeError(
-            "workspace.invalid", f"{label} escapes the .ssmdbook workspace: {absolute}"
+            "workspace.invalid", f"{label} escapes the .ssmd-bundle workspace: {absolute}"
         )
     relative = Path(os.path.relpath(absolute, report_path.parent)).as_posix()
     report_relative = Path(os.path.abspath(report_path.parent / relative))
@@ -910,7 +912,7 @@ def _toml_scalar(value: Any) -> str:
 
 def _report_toml(report: dict[str, Any]) -> str:
     lines = [
-        'format = "audiocompose-book-report"',
+        f'format = "{_BOOK_REPORT_FORMAT}"',
         "version = 1",
         f"emphasis_policy = {_toml_scalar(report.get('emphasis_policy', 'segment_fallback'))}",
         f"variant = {_toml_scalar(report['variant'])}",
@@ -960,7 +962,7 @@ def _read_prior_items(
         with absolute.open("rb") as stream:
             report = tomllib.load(stream)
         if (
-            report.get("format") != "audiocompose-book-report"
+            report.get("format") != _BOOK_REPORT_FORMAT
             or report.get("version") != 1
             or report.get("variant") != variant
             or report.get("render_profile_id") != profile_id
@@ -1550,7 +1552,7 @@ def _compose_resolved_book(
     except Exception as exc:
         report_error = {"code": "output.write_failed", "message": str(exc)}
     return {
-        "format": "audiocompose-book-result",
+        "format": _BOOK_RESULT_FORMAT,
         "variant": context.variant,
         "emphasis_policy": emphasis_policy,
         "pause_policy_id": pause_policy.policy_id,

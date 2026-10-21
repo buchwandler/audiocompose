@@ -100,89 +100,33 @@ def _parser() -> argparse.ArgumentParser:
     _add_json(compose_renderplan)
 
     _add_progress(compose_renderplan)
-    compose_book = subparsers.add_parser(
-        "compose-book", help="compose selected chapters from a rendered book variant"
+    bundle = subparsers.add_parser("bundle", help="Compose an SSMD bundle")
+    bundle_commands = bundle.add_subparsers(dest="bundle_command", required=True)
+    bundle_compose = bundle_commands.add_parser(
+        "compose", help="Compose a rendered SSMD bundle variant"
     )
-    compose_book.add_argument("book", help="book/workspace root (or its chapters directory)")
-    compose_book.add_argument(
-        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
+    bundle_compose.add_argument("bundle", help=".ssmd-bundle workspace root")
+    bundle_compose.add_argument("--variant", required=True)
+    bundle_compose.add_argument("--chapters", default="all")
+    bundle_compose.add_argument("--pauses")
+    bundle_compose.add_argument("--renderplan-root")
+    bundle_compose.add_argument("--voicerender-root")
+    bundle_compose.add_argument("--output-root")
+    bundle_compose.add_argument("--media-root")
+    bundle_compose.add_argument(
+        "--emphasis-policy", choices=("segment_fallback", "strict"), default="segment_fallback"
     )
-    compose_book.add_argument(
-        "--chapters", default="all", help="source chapter numbers: all, 5, 5-7, or 5,8,10-12"
-    )
-    compose_book.add_argument(
-        "--pauses",
-        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
-    )
-    compose_book.add_argument("--renderplan-root", help="override the book RenderPlan root")
-    compose_book.add_argument("--voicerender-root", help="override the book VoiceRender root")
-    compose_book.add_argument("--output-root", help="override the AudioCompose output root")
-    compose_book.add_argument(
-        "--media-root", help="explicit base directory for relative external AudioItems"
-    )
-    compose_book.add_argument(
-        "--emphasis-policy",
-        choices=("segment_fallback", "strict"),
-        default="segment_fallback",
-        help="partial-span emphasis policy (default: segment_fallback)",
-    )
-    compose_book.add_argument("--sample-rate", type=int)
-    compose_book.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
-    compose_book.add_argument("--target-lufs", type=float)
-    compose_book.add_argument("--true-peak-ceiling-dbtp", type=float)
-    compose_book.add_argument("--peak-policy", choices=("reduce_gain", "error"))
-    compose_book.add_argument(
-        "--save-audiojobs", help="optional root for intermediate chapter AudioJobs"
-    )
-    compose_book.add_argument(
-        "--force", action="store_true", help="recompose and replace selected chapter outputs"
-    )
-    compose_book.add_argument(
-        "--fail-fast", action="store_true", help="skip later chapters after the first failure"
-    )
-    _add_json(compose_book)
-    _add_progress(compose_book)
-    compose_document = subparsers.add_parser(
-        "compose-document", help="compose one rendered SSMDDoc variant"
-    )
-    compose_document.add_argument(
-        "document", help="SSMDDoc workspace root or canonical document.ssmd.md"
-    )
-    compose_document.add_argument(
-        "--variant", required=True, help="exact RenderPlan/VoiceRender variant name"
-    )
-    compose_document.add_argument(
-        "--pauses",
-        help="explicit strict AudioCompose pause-policy TOML (defaults to the RenderProfile snapshot)",
-    )
-    compose_document.add_argument("--renderplan-root", help="override the document RenderPlan root")
-    compose_document.add_argument(
-        "--voicerender-root", help="override the document VoiceRender root"
-    )
-    compose_document.add_argument("--output-root", help="override the AudioCompose output root")
-    compose_document.add_argument(
-        "--media-root", help="explicit base directory for relative external AudioItems"
-    )
-    compose_document.add_argument(
-        "--emphasis-policy",
-        choices=("segment_fallback", "strict"),
-        default="segment_fallback",
-        help="partial-span emphasis policy (default: segment_fallback)",
-    )
-    compose_document.add_argument("--sample-rate", type=int)
-    compose_document.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
-    compose_document.add_argument("--target-lufs", type=float)
-    compose_document.add_argument("--true-peak-ceiling-dbtp", type=float)
-    compose_document.add_argument("--peak-policy", choices=("reduce_gain", "error"))
-    compose_document.add_argument(
-        "--save-audiojob",
-        help="override the intermediate AudioJob bundle path (defaults inside the output variant)",
-    )
-    compose_document.add_argument(
-        "--force", action="store_true", help="recompose and replace an existing document output"
-    )
-    _add_json(compose_document)
-    _add_progress(compose_document)
+    bundle_compose.add_argument("--sample-rate", type=int)
+    bundle_compose.add_argument("--clip-policy", choices=("clamp", "warn", "error"))
+    bundle_compose.add_argument("--target-lufs", type=float)
+    bundle_compose.add_argument("--true-peak-ceiling-dbtp", type=float)
+    bundle_compose.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    bundle_compose.add_argument("--save-audiojobs")
+    bundle_compose.add_argument("--force", action="store_true")
+    bundle_compose.add_argument("--fail-fast", action="store_true")
+    _add_json(bundle_compose)
+    _add_progress(bundle_compose)
+
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -401,129 +345,77 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     progress_renderer: CliProgressRenderer | None = None
-    if args.command in {"compose", "compose-renderplan", "compose-book", "compose-document"}:
-        command = {"compose-renderplan": "renderplan", "compose-book": "book"}.get(
-            args.command, "compose"
-        )
+    if args.command in {"compose", "compose-renderplan"}:
+        command = "renderplan" if args.command == "compose-renderplan" else "compose"
         progress_renderer = CliProgressRenderer(
-            mode=args.progress,
-            json_mode=getattr(args, "json", False),
-            command=command,
+            mode=args.progress, json_mode=getattr(args, "json", False), command=command
         )
     try:
-        if args.command == "compose-book":
-            from .book import BookComposeOptions, compose_book
+        if args.command == "bundle" and args.bundle_command == "compose":
+            from .bundle import BundleComposeOptions, compose_bundle
+            from .bundle_contract import load_bundle_identity
 
-            if progress_renderer is not None:
-                progress_renderer.set_phase("preparing book")
-            book_progress_callback = (
-                progress_renderer.on_book_progress
-                if progress_renderer is not None and progress_renderer.enabled
-                else None
+            bundle_kind = load_bundle_identity(args.bundle).kind
+            progress_renderer = CliProgressRenderer(
+                mode=args.progress,
+                json_mode=args.json,
+                command="book" if bundle_kind == "book" else "compose",
             )
-            book_result = compose_book(
-                args.book,
-                variant=args.variant,
+            progress_renderer.set_phase("preparing bundle")
+            options = BundleComposeOptions(
                 chapters=args.chapters,
-                pause_policy=args.pauses,
-                options=BookComposeOptions(
-                    sample_rate=args.sample_rate,
-                    clip_policy=args.clip_policy,
-                    target_lufs=args.target_lufs,
-                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
-                    peak_policy=args.peak_policy,
-                ),
+                pauses=args.pauses,
                 renderplan_root=args.renderplan_root,
                 voicerender_root=args.voicerender_root,
                 output_root=args.output_root,
                 media_root=args.media_root,
+                emphasis_policy=args.emphasis_policy,
+                sample_rate=args.sample_rate,
+                clip_policy=args.clip_policy,
+                target_lufs=args.target_lufs,
+                true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+                peak_policy=args.peak_policy,
                 save_audiojobs=args.save_audiojobs,
                 force=args.force,
                 fail_fast=args.fail_fast,
-                emphasis_policy=args.emphasis_policy,
-                on_progress=book_progress_callback,
             )
+            callback = None
+            if progress_renderer.enabled:
+                callback = (
+                    progress_renderer.on_book_progress
+                    if bundle_kind == "book"
+                    else progress_renderer.on_composition_progress
+                )
+            identity_result = compose_bundle(
+                args.bundle, variant=args.variant, options=options, on_progress=callback
+            )
+            result = identity_result.value
             if progress_renderer is not None:
-                progress_renderer.finish(success=book_result.exit_code == 0)
+                progress_renderer.finish(success=identity_result.exit_code == 0)
             if args.json:
-                print(json.dumps(book_result.to_dict(), indent=2, sort_keys=True))
+                print(json.dumps(identity_result.to_dict(), indent=2, sort_keys=True))
             else:
-                print("AudioCompose book compose")
-                print(f"  workspace:   {book_result.workspace}")
-                print(f"  variant:     {book_result.variant}")
-                print(f"  renderplans: {book_result.renderplan_variant_dir}")
-                print(f"  speech:      {book_result.voicerender_variant_dir}")
-                print(f"  output:      {book_result.output_variant_dir}")
-                print(f"  report:      {book_result.report_path}")
-                print(f"  chapters:    {book_result.selector}")
-                print(f"  selected:    {book_result.requested}")
-                for item in book_result.outcomes:
-                    print(f"[{item.index}/{book_result.requested}] {item.id}: {item.status}")
-                    if item.status == "written":
-                        output_name = item.output.name if item.output is not None else ""
-                        duration = item.duration_seconds or 0.0
-                        print(f"       wrote {output_name} ({duration:.3f}s)")
-                    elif item.status == "failed":
-                        print(f"       {item.error_code}: {item.error_message}")
-                    if item.emphasis_warning:
-                        print(f"       warning: {item.emphasis_warning}")
-                print("AudioCompose summary")
-                print(f"  requested: {book_result.requested}")
-                print(f"  written:   {book_result.written}")
-                print(f"  reused:    {book_result.reused}")
-                print(f"  failed:    {book_result.failed}")
-                print(f"  skipped:   {book_result.skipped}")
-            return book_result.exit_code
-        elif args.command == "compose-document":
-            from .document import DocumentComposeOptions, compose_document
-
-            if progress_renderer is not None:
-                progress_renderer.set_phase("preparing document")
-            document_progress_callback = (
-                progress_renderer.on_composition_progress
-                if progress_renderer is not None and progress_renderer.enabled
-                else None
-            )
-            document_result = compose_document(
-                args.document,
-                variant=args.variant,
-                pause_policy=args.pauses,
-                options=DocumentComposeOptions(
-                    sample_rate=args.sample_rate,
-                    clip_policy=args.clip_policy,
-                    target_lufs=args.target_lufs,
-                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
-                    peak_policy=args.peak_policy,
-                ),
-                renderplan_root=args.renderplan_root,
-                voicerender_root=args.voicerender_root,
-                output_root=args.output_root,
-                media_root=args.media_root,
-                save_audiojob=args.save_audiojob,
-                force=args.force,
-                emphasis_policy=args.emphasis_policy,
-                on_progress=document_progress_callback,
-            )
-            if progress_renderer is not None:
-                progress_renderer.finish(success=document_result.exit_code == 0)
-            if args.json:
-                print(json.dumps(document_result.to_dict(), indent=2, sort_keys=True))
-            else:
-                context = document_result.request.context
-                print("AudioCompose document compose")
-                print(f"  workspace:   {document_result.workspace}")
-                print(f"  document:    {document_result.document_id}")
-                print(f"  variant:     {document_result.variant}")
-                print(f"  renderplan:  {context.renderplan_path}")
-                print(f"  speech:      {context.render_dir}")
-                print(f"  output:      {document_result.output}")
-                print(f"  audiojob:    {document_result.audiojob}")
-                print(f"  report:      {document_result.report_path}")
-                print(f"  status:      {document_result.status}")
-                print(f"  duration:    {document_result.duration_seconds:.3f}s")
-                for diagnostic in document_result.diagnostics:
-                    print(f"  warning:     {diagnostic['message']}")
-            return document_result.exit_code
+                print("AudioCompose bundle compose")
+                print(f"  kind:      {identity_result.kind}")
+                print(f"  workspace: {result.workspace}")
+                print(f"  variant:   {args.variant}")
+                if identity_result.kind == "book":
+                    print(f"  selected:  {result.requested}")
+                    print(f"  output:    {result.output_variant_dir}")
+                    for item in result.outcomes:
+                        print(f"[{item.index}/{result.requested}] {item.id}: {item.status}")
+                    print("AudioCompose summary")
+                    print(f"  requested: {result.requested}")
+                    print(f"  written:   {result.written}")
+                    print(f"  reused:    {result.reused}")
+                    print(f"  failed:    {result.failed}")
+                    print(f"  skipped:   {result.skipped}")
+                else:
+                    print("  selected:  1")
+                    print(f"  output:    {result.output}")
+                    print(f"  status:    {result.status}")
+                print(f"  report:      {result.report_path}")
+            return identity_result.exit_code
         elif args.command == "compose-renderplan":
             import audiocompose
 

@@ -44,68 +44,27 @@ audiocompose compose-renderplan PLAN --manifest MANIFEST \
 
 The manifest defaults to `<render-dir>/render-manifest.toml`. The command accepts the existing output-policy controls, writes the final WAV, and reports a RenderPlan-derived timeline; `--explain` prints ordered provenance. Use `--save-audiojob` for an optional intermediate bundle. The generic `validate`, `inspect`, `compose`, `timeline`, and save/load workflows are unchanged.
 
-## Native book composition
+## Unified SSMD bundle composition
 
-`audiocompose.book.compose_book` is the specialist orchestration facade for a completed `.ssmdbook` RenderPlan-set variant. It resolves the set-owned RenderProfile snapshot and chapter order, verifies each selected UtterPlan/RenderPlan/VoiceRender handoff through the public integration boundary, materializes the chapter as an ordinary AudioJob, and calls the same generic `Composer`. It does not change AudioJob, Composer, or DSP semantics.
-
-The dependency boundary remains asymmetric: `renderplan` is the shared base contract dependency; UtterPlan and VoiceRender are optional and are imported only when book or SSMDDoc document materialization runs. Generic package-root imports and generic AudioJob composition do not require the `[voicerender]` extra.
+The public `compose_bundle` facade dispatches by the authoritative `manifest.json` format to the existing book or document implementation. Its identity loader accepts only a real `.ssmd-bundle` workspace root, validates the JSON manifest and supported schema version, and rejects inner paths, symlink roots, and unknown formats before stage access.
 
 ```text
-.ssmdbook + RenderPlan-set variant
-          |                         RenderProfile snapshot
-          |                                  |
-          +---- UtterPlan + RenderManifest --+--> book pause policy
-                              |
-                   optional book adapter
-                              |
-                reproducible AudioJob bundle
-                              |
-                    generic Composer
-                              |
-             atomic chapter WAV + TOML report
+.ssmd-bundle root + manifest format
+              |
+       compose_bundle facade
+         /             \
+  book composer    document composer
+         \             /
+        generic AudioJob -> Composer
+              |
+       kind-specific report
 ```
 
-### VoiceRender v0.2 control ownership
+UtterPlan and VoiceRender remain optional integration dependencies, imported only when the selected kind's orchestration runs. Both implementations verify RenderPlan/VoiceRender provenance and lower completed media to generic AudioJobs before calling Composer. Their report schemas remain versioned and kind-specific; this release changes the outer workspace name and entry point, not internal stage layouts or report contracts.
 
-The book bridge is a producer-specific trust boundary; the generic RenderPlan materializer stays strict. A complete VoiceRender v0.2 manifest and its `render-diagnostics.json` sidecar are required. AudioCompose verifies producer/version, RenderPlan identity, diagnostic contents, and control occurrence/count correspondence before using the evidence. The diagnostics digest and the accepted ownership decision participate in AudioJob identity and book-output reuse.
+The shared CLI is `audiocompose bundle compose NAME.ssmd-bundle --variant VARIANT`. It supports chapter selection for books and only `all` for documents. The `--save-audiojobs` option is a root directory for both kinds: book composition writes one job per selected chapter, document composition writes one job below that root. Workspace-derived defaults resolve `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the supplied root.
 
-```text
-RenderPlan preserves intent.
-VoiceRender realizes producer-native controls.
-VoiceRender diagnostics declare remaining composition capabilities.
-AudioCompose realizes only declared capabilities it explicitly owns.
-Generic RenderPlan composition does not infer producer ownership.
-```
-
-For v0.3, the only accepted deferred capability is `audiocompose.emphasis.gain.v1`; unknown capabilities fail closed. Do not use this diagnostics trust path to relax direct generic `materialize_renderplan_job` validation. Pause-policy `role` overrides are keyed by RenderPlan `SpeechItem.role`. Source-pause validation checks known classes and table availability without treating logical voice references as policy keys; actual durations resolve against RenderPlan role and fail closed if no role/default value exists.
-
-For book composition, symbolic source pause intents resolve from the selected RenderProfile snapshot by default. A strict `audiocompose.pause-policy.v1` TOML override is accepted explicitly; unresolved intents fail closed. The policy identity and provenance are stored in AudioJob sources and the report. This policy conversion belongs to the book integration and is not applied by direct `compose-renderplan`, whose RenderPlan pauses remain literal durations.
-
-AudioJobs are persisted for every selected chapter before composition. Existing WAVs are reused only when the current variant, source/plan, RenderManifest identity and content hash, pause/output policy, persisted AudioJob ID/schema, AudioCompose version, and WAV hash/geometry all match the atomic report. Symlinked or unverified outputs are not reused; `--force` recomposes. Chapter failures are isolated by default, `--fail-fast` skips later selections, and ordered book/chapter progress callbacks report callback failures as `progress.callback_failed`. `compose-report.toml` is atomically published with per-chapter outcomes and report-relative stage paths.
-
-The CLI surface is `audiocompose compose-book BOOK --variant VARIANT`, with source-number selection, `--pauses`, output-policy controls, `--force`, `--fail-fast`, `--save-audiojobs`, and machine-clean `--json` output. The CLI calls `compose_book`; it does not implement another composition path.
-
-## SSMDDoc workspace composition
-
-The document facade composes one canonical SSMDDoc v1 workspace using only direct stage roots. `document_contract` is dependency-free and validates the root manifest and canonical source file. `resolve_document` then resolves `utterplan/document.utterplan.toml`, `renderplan/<variant>/renderprofile.toml`, `renderplan/<variant>/document.renderplan.toml`, and `voicerender/<variant>/document-0001/`; the final WAV, AudioJob, and report live beneath `audiocompose/<variant>/`. Each variant path is exact and its profile fingerprint, RenderPlan identity, and source-plan identity must agree.
-
-```text
-SSMDDoc manifest + UtterPlan source + RenderProfile + RenderPlan
-                              |
-                 VoiceRender document directory
-           complete manifest + diagnostics + speech WAVs
-                              |
-              AudioCompose document facade
-      validate handoff -> generic AudioJob -> Composer
-                              |
-      document WAV + AudioJob bundle + TOML report
-```
-
-UtterPlan owns semantic planning. VoiceRender owns speech synthesis, producer-native controls, and the complete render handoff. AudioCompose verifies the handoff through the shared VoiceRender materializer, derives symbolic pause durations from the RenderProfile snapshot (or a strict explicit override), applies only its explicitly deferred emphasis capability, and persists the materialized generic job. Composer remains unaware of SSMDDoc, UtterPlan, VoiceRender, and speech-control semantics. Existing-output reuse requires exact report, job, handoff, output-policy, hash, and WAV-geometry provenance; `--force` is the explicit replacement path.
-
-Producer dependencies remain optional. Neither importing `audiocompose` nor using generic AudioJob/Composer imports UtterPlan or VoiceRender. Resolving a document lazily imports UtterPlan to validate its source plan; invoking book/document composition also requires VoiceRender. The `[voicerender]` extra requires the released document-capable producer floors described in the README.
-
-## AudioJob
+Composition policies, output verification, provenance-based reuse, force behavior, failure handling, and progress callbacks are delegated to their existing kind-specific services. CLI JSON is wrapped in a neutral bundle result; persistent internal report formats are unchanged.
 
 An AudioJob is an ordered collection of `AudioClip` and `Silence` items. A clip references either an in-memory NumPy `AudioBufferSource` or a file-backed `AudioFileSource`, followed by ordered numeric operations allowed by its schema version. V1 contains the existing static operations; v2 adds the generic time-varying `RatePitchEnvelope`. Clip anchors and spans are generic timing metadata. Output policy contains the final sample rate, channel count, clipping behavior, and complete-output loudness policy.
 
@@ -132,9 +91,9 @@ Progress delivery and timing are not part of AudioJob serialization, job identit
 
 ### CLI progress boundary
 
-The progress-enabled commands (`compose`, `compose-renderplan`, and `compose-book`) share the private standard-library CLI renderer and accept `--progress auto|always|never`. `auto` is the default and renders only to a TTY stderr when `--json` is absent; `always` forces stderr updates, including with JSON, and `never` disables them. TTY refreshes are throttled and non-TTY forced output is newline-delimited. JSON stdout remains machine-clean, and no terminal dependency is introduced into Composer or the API layers. Unknown work totals show elapsed time and named lifecycle phases without invented percentages or ETAs; command completion is shown only after successful output handling. The flat `compose-document` command is intentionally outside this renderer and emits only its final human summary or JSON result.
+The generic `compose`, `compose-renderplan`, and `bundle compose` commands accept `--progress auto|always|never`. The CLI renderer writes only to stderr; JSON stdout stays machine-clean. Bundle progress routes to the selected kind's existing callback format, with no new persistent report or timing fields.
 
-The package-root `compose_renderplan` API forwards its optional `on_progress` callback to Composer. The book facade forwards those core events inside `BookComposeProgress.composition`; its `fraction` is a uniform chapter-slot measure, not a duration-weighted forecast. Book callback failures retain the existing `progress.callback_failed` behavior. Progress, fractions, and timing remain runtime-only across the progress-enabled integrations.
+The package-root `compose_renderplan` API forwards its optional `on_progress` callback to Composer. The bundle facade forwards callbacks to the selected existing composition implementation; progress remains runtime-only, and callback failures preserve the implementation's established error behavior.
 
 `AudioSpan` and `ComposedSpan` support optional IDs and JSON-safe metadata. The fields are producer-neutral and are preserved through AudioJob serialization and composition. `CompositionResult.loudness` provides typed before and after metrics, requested and applied gain, policy, target, ceiling, and warnings. `CompositionResult.diagnostics` contains generic diagnostic codes and numeric context.
 Timing transformations use generic operation hooks. Static `Tempo` maps offsets proportionally; `RatePitchEnvelope` maps source coordinates by inverting the integrated output-time rate curve, with the final rate held after its last point. Pitch-only envelopes preserve duration and coordinates. Operation mappings happen before the single source-to-output resampling map. Final loudness and true-peak/clipping policy are applied once to the complete waveform.
@@ -153,22 +112,21 @@ Silence keeps the public seconds-to-samples rule based on rounded `seconds * out
 
 ## Ownership matrix
 
-| Concern                                                                 | Owner                                 |
-| ----------------------------------------------------------------------- | ------------------------------------- |
-| Language analysis, segmentation, semantic intent, speech planning       | Upstream planner / producer           |
-| Voice/model choice, inference, calibration, native controls             | Speech producer / engine              |
-| RenderPlan and RenderManifest contracts and TOML loading                | RenderPlan package                    |
-| Speech artifact production                                              | Upstream renderer                     |
-| Manifest correspondence and speech artifact integrity                   | AudioCompose RenderPlan adapter       |
-| RenderPlan flow ordering and provenance lowering to AudioJob values     | AudioCompose RenderPlan adapter       |
-| Media-root policy, media resolver contract, and option lowering         | AudioCompose integration boundary     |
-| Native book orchestration and profile-derived pause policy              | AudioCompose optional book facade     |
-| Native SSMDDoc workspace orchestration and profile-derived pause policy | AudioCompose optional document facade |
-| AudioJob format, schema, persistence, and bundle validation             | AudioCompose core                     |
-| Numeric operation model and timing maps                                 | AudioCompose core                     |
-| Resampling, time-scale modification, and pitch-shift DSP                | AudioSig                              |
-| AudioJob order, silence placement, markers, and timeline assembly       | AudioCompose core                     |
-| Complete-output loudness, clipping policy, and final WAV                | AudioCompose core                     |
+| Concern                                                             | Owner                             |
+| ------------------------------------------------------------------- | --------------------------------- |
+| Language analysis, segmentation, semantic intent, speech planning   | Upstream planner / producer       |
+| Voice/model choice, inference, calibration, native controls         | Speech producer / engine          |
+| RenderPlan and RenderManifest contracts and TOML loading            | RenderPlan package                |
+| Speech artifact production                                          | Upstream renderer                 |
+| Manifest correspondence and speech artifact integrity               | AudioCompose RenderPlan adapter   |
+| RenderPlan flow ordering and provenance lowering to AudioJob values | AudioCompose RenderPlan adapter   |
+| Media-root policy, media resolver contract, and option lowering     | AudioCompose integration boundary |
+| SSMD bundle identity dispatch and orchestration                     | AudioCompose bundle facade        |
+| AudioJob format, schema, persistence, and bundle validation         | AudioCompose core                 |
+| Numeric operation model and timing maps                             | AudioCompose core                 |
+| Resampling, time-scale modification, and pitch-shift DSP            | AudioSig                          |
+| AudioJob order, silence placement, markers, and timeline assembly   | AudioCompose core                 |
+| Complete-output loudness, clipping policy, and final WAV            | AudioCompose core                 |
 
 ## Non-TTS guarantee
 

@@ -1,4 +1,4 @@
-"""Dependency-free reader for the canonical SSMDDoc v1 workspace contract."""
+"""Dependency-free reader for the canonical SSMD document bundle v1 workspace contract."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ COMPOSE_REPORT_FILENAME = "compose-report.toml"
 
 @dataclass(frozen=True, slots=True)
 class DocumentWorkspaceIndex:
-    """Validated identity and canonical document paths for one SSMDDoc workspace."""
+    """Validated identity and canonical document paths for one SSMD document bundle workspace."""
 
     root: Path
     manifest_path: Path
@@ -29,7 +29,7 @@ class DocumentWorkspaceIndex:
 
 
 class DocumentWorkspaceContractError(ValueError):
-    """An input does not satisfy the SSMDDoc v1 filesystem contract."""
+    """An input does not satisfy the SSMD document bundle v1 filesystem contract."""
 
 
 def _fail(label: str, message: str) -> DocumentWorkspaceContractError:
@@ -103,7 +103,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
             parse_constant=_reject_json_constant,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise _fail("workspace.invalid", f"cannot read SSMDDoc manifest {path}: {exc}") from exc
+        raise _fail(
+            "workspace.invalid", f"cannot read SSMD document bundle manifest {path}: {exc}"
+        ) from exc
     if not isinstance(manifest, dict):
         raise _fail("workspace.invalid", "manifest root must be a JSON object")
     if (
@@ -111,7 +113,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         or type(manifest.get("schema_version")) is not int
         or manifest.get("schema_version") != 1
     ):
-        raise _fail("workspace.invalid", "manifest is not a supported SSMDDoc v1 document")
+        raise _fail(
+            "workspace.invalid", "manifest is not a supported SSMD document bundle v1 manifest"
+        )
     # The current producer contract requires SSMD 0.9; tolerate other producer
     # metadata, but do not silently accept a different document format version.
     if manifest.get("ssmd_version") != "0.9":
@@ -144,11 +148,14 @@ def read_document_workspace(document: str | Path) -> DocumentWorkspaceIndex:
     """Read and validate a workspace root or its canonical document file.
 
     ZIP bundles are intentionally unsupported; AudioCompose consumes the
-    directory workspace produced by the current SSMDDoc contract.
+    directory workspace produced by the current SSMD document bundle contract.
     """
     supplied = Path(document).expanduser()
     if supplied.suffix.lower() == ".zip":
-        raise _fail("workspace.invalid", "ZIP input is not supported; provide an SSMDDoc directory")
+        raise _fail(
+            "workspace.invalid",
+            "ZIP input is not supported; provide an SSMD document bundle directory",
+        )
     if supplied.name == DOCUMENT_SOURCE_FILENAME:
         root_input = supplied.parent
         document_input = supplied
@@ -156,26 +163,26 @@ def read_document_workspace(document: str | Path) -> DocumentWorkspaceIndex:
         root_input = supplied
         document_input = None
 
-    root = _existing_directory(root_input, label="SSMDDoc workspace")
+    root = _existing_directory(root_input, label="SSMD document bundle workspace")
     manifest_path = _contained_regular_file(
         root,
         root / "manifest.json",
-        label="SSMDDoc manifest",
+        label="SSMD document bundle manifest",
     )
     manifest = _load_manifest(manifest_path)
     canonical_path = _contained_regular_file(
         root,
         root / manifest["document"]["path"],
-        label="canonical SSMDDoc document",
+        label="canonical SSMD document source",
     )
     if document_input is not None:
         supplied_document = _contained_regular_file(
             root,
             document_input,
-            label="canonical SSMDDoc input",
+            label="canonical SSMD document bundle input",
         )
         if supplied_document != canonical_path:
-            raise _fail("workspace.invalid", "input is not the canonical SSMDDoc document")
+            raise _fail("workspace.invalid", "input is not the canonical SSMD document source")
     return DocumentWorkspaceIndex(
         root=root,
         manifest_path=manifest_path,

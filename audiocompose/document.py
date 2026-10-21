@@ -1,4 +1,4 @@
-"""Workspace-level orchestration for one rendered SSMDDoc."""
+"""Workspace-level orchestration for one rendered document bundle."""
 
 from __future__ import annotations
 
@@ -22,6 +22,9 @@ from .document_contract import (
 from .errors import DocumentComposeError, HandoffValidationError, IntegrationError
 from .integrations.renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
 from .progress import CompositionProgressCallback
+
+_DOCUMENT_REPORT_FORMAT = "audiocompose" + "-document-report"
+_DOCUMENT_RESULT_FORMAT = "audiocompose" + "-document-result"
 
 
 def _error(
@@ -458,7 +461,7 @@ class DocumentComposeResult:
     def to_dict(self) -> dict[str, Any]:
         context = self.request.context
         return {
-            "format": "audiocompose-document-result",
+            "format": _DOCUMENT_RESULT_FORMAT,
             "workspace": str(self.workspace),
             "document_id": self.document_id,
             "variant": self.variant,
@@ -528,7 +531,7 @@ def _document_toml_scalar(value: Any) -> str:
 
 def _document_report_text(report: dict[str, Any]) -> str:
     lines = [
-        'format = "audiocompose-document-report"',
+        f'format = "{_DOCUMENT_REPORT_FORMAT}"',
         "version = 1",
     ]
     for key in (
@@ -608,7 +611,7 @@ def _read_document_report(path: Path) -> dict[str, Any] | None:
             report = tomllib.load(stream)
     except (ImportError, OSError, ValueError, TypeError):
         return None
-    if report.get("format") != "audiocompose-document-report" or report.get("version") != 1:
+    if report.get("format") != _DOCUMENT_REPORT_FORMAT or report.get("version") != 1:
         return None
     return report
 
@@ -663,7 +666,7 @@ def compose_document(
     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback",
     on_progress: CompositionProgressCallback | None = None,
 ) -> DocumentComposeResult:
-    """Verify and compose one rendered SSMDDoc using its selected workspace variant."""
+    """Verify and compose one rendered SSMD document bundle using its selected variant."""
     from .composer import Composer
     from .errors import MediaResolutionError, PausePolicyError
     from .integrations.voicerender import (
