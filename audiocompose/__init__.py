@@ -14,6 +14,14 @@ from .book import (
     resolve_book,
 )
 from .bundle import BundleComposeOptions, BundleComposeResult, compose_bundle
+from .bundle_batch import (
+    BatchAttemptStatus,
+    BatchVariantStatus,
+    BundleBatchComposeResult,
+    BundleBatchComposeSummary,
+    BundleVariantComposeOutcome,
+    compose_bundle_batch,
+)
 from .bundle_contract import BundleIdentity, load_bundle_identity
 from .composer import Composer, estimate_composition
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
@@ -64,6 +72,12 @@ __all__ = [
     "__version__",
     "BundleComposeOptions",
     "BundleComposeResult",
+    "BatchAttemptStatus",
+    "BatchVariantStatus",
+    "BundleBatchComposeResult",
+    "BundleBatchComposeSummary",
+    "BundleVariantComposeOutcome",
+    "compose_bundle_batch",
     "BundleIdentity",
     "compose_bundle",
     "load_bundle_identity",

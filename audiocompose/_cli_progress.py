@@ -45,6 +45,7 @@ class CliProgressRenderer:
         self._last_draw_at: float | None = None
         self._line_open = False
         self._command = command
+        self._context: str | None = None
         self._phase: str | None = None
         self._composition: CompositionProgress | None = None
         self._composition_timing: ProgressTiming | None = None
@@ -55,6 +56,26 @@ class CliProgressRenderer:
         self._book_chapter_id: str | None = None
         self._book_failed = False
         self._finished = False
+
+    def set_context(self, context: str | None) -> None:
+        """Set batch context and reset progress estimates for the next variant."""
+        if context == self._context:
+            return
+        self._context = context
+        now = self._now()
+        self._started_at = now
+        self._last_draw_at = None
+        self._phase = None
+        self._composition = None
+        self._composition_timing = None
+        self._estimator = ProgressEstimator(clock=self._clock)
+        self._book_event = None
+        self._book_timing = None
+        self._book_estimator = None
+        self._book_chapter_id = None
+        self._book_failed = False
+        if context is not None:
+            self._render(force=True)
 
     def set_phase(self, phase: str) -> None:
         if not self.enabled:
@@ -193,7 +214,7 @@ class CliProgressRenderer:
             phase = "complete"
         if self._phase == "failed":
             fraction = None
-        pieces: list[str] = []
+        pieces: list[str] = [f"[{self._context}]"] if self._context else []
         if fraction is not None:
             pieces.append(f"[{fraction * 100.0:5.1f}%]")
         pieces.append(phase)
@@ -230,7 +251,7 @@ class CliProgressRenderer:
             fraction = None
         elif self._phase == "failed" or terminal_failure:
             fraction = None
-        pieces: list[str] = []
+        pieces: list[str] = [f"[{self._context}]"] if self._context else []
         if fraction is not None:
             pieces.append(f"[{fraction * 100.0:5.1f}%]")
         if event.chapter_id is not None and event.requested_chapters:

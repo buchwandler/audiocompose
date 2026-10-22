@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -443,3 +444,131 @@ def test_bundle_variants_invalid_candidate_does_not_fail_discovery(tmp_path: Pat
     assert payload["count"] == 1
     assert payload["variants"][0]["plan_status"] == "invalid"
     assert payload["variants"][0]["state"] == "invalid"
+
+
+def test_bundle_compose_optional_variant_routes_batch_and_preserves_single_path(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    import audiocompose.bundle as bundle_module
+    import audiocompose.bundle_batch as batch_module
+    from audiocompose.bundle import BundleComposeResult
+    from audiocompose.bundle_batch import BundleBatchComposeResult, BundleBatchComposeSummary
+
+    root = tmp_path / "story.ssmd-bundle"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}), encoding="utf-8"
+    )
+    summary = BundleBatchComposeSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    batch_result = BundleBatchComposeResult(
+        bundle=root,
+        kind="book",
+        renderplan_root=root / "renderplan",
+        voicerender_root=root / "voicerender",
+        output_root=root / "audiocompose",
+        force=False,
+        variants=(),
+        summary=summary,
+        exit_code=0,
+    )
+    batch = Mock(return_value=batch_result)
+    single_result = BundleComposeResult(
+        kind="book",
+        value=SimpleNamespace(exit_code=0, to_dict=lambda: {"single": True}),
+    )
+    single = Mock(return_value=single_result)
+    monkeypatch.setattr(batch_module, "compose_bundle_batch", batch)
+    monkeypatch.setattr(bundle_module, "compose_bundle", single)
+
+    assert main(["bundle", "compose", str(root), "--json", "--progress", "always"]) == 0
+    batch_output = capsys.readouterr()
+    assert json.loads(batch_output.out)["format"] == "audiocompose-bundle-batch-result"
+    assert batch_output.out.count("{") >= 1
+    assert batch_output.err
+    batch.assert_called_once()
+    single.assert_not_called()
+    assert batch.call_args.kwargs["on_progress"] is not None
+
+    assert (
+        main(
+            ["bundle", "compose", str(root), "--variant", "target", "--json", "--progress", "never"]
+        )
+        == 0
+    )
+    single_output = capsys.readouterr()
+    assert json.loads(single_output.out)["format"] == "audiocompose-bundle-result"
+    assert single.call_args.kwargs["variant"] == "target"
+    batch.assert_called_once()
+
+
+def test_bundle_compose_batch_root_error_is_json_on_stdout(tmp_path: Path, capsys) -> None:
+    invalid = tmp_path / "not-a-bundle"
+    invalid.mkdir()
+
+    assert main(["bundle", "compose", str(invalid), "--json"]) == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["format"] == "audiocompose-bundle-batch-result"
+    assert payload["error_code"] == "bundle.invalid"
+    assert payload["exit_code"] == 2
+    assert captured.err == ""
+
+
+def test_bundle_compose_batch_human_no_variant_message(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "empty.ssmd-bundle"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}), encoding="utf-8"
+    )
+
+    assert main(["bundle", "compose", str(root)]) == 0
+
+    output = capsys.readouterr().out
+    assert "mode:          batch" in output
+    assert "discovered:" in output
+    assert "scheduled:" in output
+    assert "No variants found; nothing to do." in output
+
+
+def test_batch_progress_adapter_labels_variants_and_resets_estimators() -> None:
+    from audiocompose.cli import _BundleProgressAdapter
+
+    clock = FakeClock()
+    stream = io.StringIO()
+    renderer = CliProgressRenderer(mode="always", stream=stream, clock=clock)
+    adapter = _BundleProgressAdapter(renderer, "document")
+
+    adapter.set_context("1/2 profile-a")
+    adapter(_composition_event("compose_started", 0.0))
+    clock.advance(2.0)
+    adapter(_composition_event("item_completed", 20.0, completed_items=1))
+    assert renderer._composition_timing is not None
+
+    adapter.set_context("2/2 profile-b")
+    assert renderer._composition is None
+    assert renderer._composition_timing is None
+    assert renderer._phase is None
+    adapter(_composition_event("compose_started", 0.0))
+
+    output = stream.getvalue()
+    assert "[1/2 profile-a]" in output
+    assert "[2/2 profile-b]" in output
+    assert "elapsed 00:00" in output
+
+
+def test_batch_progress_adapter_routes_book_events_to_book_renderer() -> None:
+    from audiocompose.cli import _BundleProgressAdapter
+
+    renderer = Mock()
+    adapter = _BundleProgressAdapter(renderer, "book")
+    event = object()
+
+    adapter.set_context("1/1 variant-a")
+    adapter(event)
+
+    renderer.set_context.assert_called_once_with("1/1 variant-a")
+    renderer.on_book_progress.assert_called_once_with(event)
+    renderer.on_composition_progress.assert_not_called()

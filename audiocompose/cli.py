@@ -106,7 +106,14 @@ def _parser() -> argparse.ArgumentParser:
         "compose", help="Compose a rendered SSMD bundle variant"
     )
     bundle_compose.add_argument("bundle", help=".ssmd-bundle workspace root")
-    bundle_compose.add_argument("--variant", required=True)
+    bundle_compose.add_argument(
+        "--variant",
+        default=None,
+        help=(
+            "exact variant to compose alone; omit for state-aware batch composition of "
+            "compose-ready variants with open work (batch --force includes complete variants)"
+        ),
+    )
     bundle_compose.add_argument("--chapters", default="all")
     bundle_compose.add_argument("--pauses")
     bundle_compose.add_argument("--renderplan-root")
@@ -121,7 +128,10 @@ def _parser() -> argparse.ArgumentParser:
     bundle_compose.add_argument("--target-lufs", type=float)
     bundle_compose.add_argument("--true-peak-ceiling-dbtp", type=float)
     bundle_compose.add_argument("--peak-policy", choices=("reduce_gain", "error"))
-    bundle_compose.add_argument("--save-audiojobs")
+    bundle_compose.add_argument(
+        "--save-audiojobs",
+        help="save intermediate AudioJobs (batch mode namespaces this root by variant)",
+    )
     bundle_compose.add_argument("--force", action="store_true")
     bundle_compose.add_argument("--fail-fast", action="store_true")
     _add_json(bundle_compose)
@@ -390,9 +400,93 @@ def _print_bundle_variants(result: Any) -> None:
                 print(f"    error: {error}")
 
 
+class _BundleProgressAdapter:
+    """Route unchanged progress events and expose batch variant context."""
+
+    def __init__(self, renderer: CliProgressRenderer, kind: str) -> None:
+        self.renderer = renderer
+        self.kind = kind
+
+    def set_context(self, context: str | None) -> None:
+        self.renderer.set_context(context)
+
+    def __call__(self, event: Any) -> None:
+        if self.kind == "book":
+            self.renderer.on_book_progress(event)
+        else:
+            self.renderer.on_composition_progress(event)
+
+
+def _print_bundle_batch_result(result: Any) -> None:
+    summary = result.summary
+    print("AudioCompose bundle compose")
+    print("  mode:          batch")
+    print(f"  bundle:        {result.bundle}")
+    print(f"  kind:          {result.kind or 'unknown'}")
+    if result.renderplan_root is not None:
+        print(f"  renderplans:   {result.renderplan_root}")
+    if result.voicerender_root is not None:
+        print(f"  voicerender:   {result.voicerender_root}")
+    if result.output_root is not None:
+        print(f"  output:        {result.output_root}")
+    print(f"  discovered:    {summary.discovered}")
+    print(f"  compose-ready: {summary.compose_ready}")
+    print(f"  scheduled:     {summary.scheduled}")
+    print(f"  attempted:     {summary.attempted}")
+    print(f"  skipped:       {summary.skipped_complete} complete")
+    print(f"  blocked:       {summary.skipped_not_ready} not ready")
+
+    if summary.discovered == 0 and result.error_message is None:
+        print("No variants found; nothing to do.")
+    elif (
+        summary.scheduled == 0
+        and summary.compose_ready > 0
+        and summary.skipped_complete == summary.compose_ready
+        and summary.invalid == 0
+    ):
+        print("All compose-ready variants are already complete; nothing to do.")
+    elif summary.compose_ready == 0 and summary.discovered > 0 and summary.invalid == 0:
+        print("No variants are currently ready to compose; nothing to do.")
+
+    selected_index = 0
+    for outcome in result.variants:
+        if outcome.selected:
+            selected_index += 1
+            prefix = f"[{selected_index}/{summary.scheduled}]"
+        else:
+            prefix = "[--]"
+        print(f"\n{prefix} {outcome.name} ({outcome.initial_state})")
+        print(f"  status: {outcome.status}")
+        if outcome.attempt_status is not None:
+            print(f"  attempt: {outcome.attempt_status}")
+        if outcome.final_state is not None:
+            print(f"  final: {outcome.final_state}")
+        if outcome.error_message:
+            print(f"  error: {outcome.error_message}")
+        elif outcome.validation_error:
+            print(f"  error: {outcome.validation_error}")
+        if outcome.result is not None and result.kind == "book":
+            value = outcome.result.value
+            print(f"  written: {getattr(value, 'written', 0)}")
+            print(f"  reused:  {getattr(value, 'reused', 0)}")
+
+    if result.error_message:
+        print(f"\nBatch error ({result.error_code or 'compose.error'}): {result.error_message}")
+    print("\nAudioCompose batch summary")
+    print(f"  completed:        {summary.completed}")
+    print(f"  partial:          {summary.partial}")
+    print(f"  failed:           {summary.failed}")
+    print(f"  skipped complete: {summary.skipped_complete}")
+    print(f"  not ready:        {summary.skipped_not_ready}")
+    print(f"  invalid:          {summary.invalid}")
+    print(f"  not attempted:    {summary.not_attempted}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     progress_renderer: CliProgressRenderer | None = None
+    batch_mode = False
+    callback: Any = None
     if args.command in {"compose", "compose-renderplan"}:
         command = "renderplan" if args.command == "compose-renderplan" else "compose"
         progress_renderer = CliProgressRenderer(
@@ -415,7 +509,52 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         elif args.command == "bundle" and args.bundle_command == "compose":
             from .bundle import BundleComposeOptions, compose_bundle
+            from .bundle_batch import compose_bundle_batch
             from .bundle_contract import load_bundle_identity
+
+            if args.variant is None:
+                batch_mode = True
+                bundle_kind = None
+                try:
+                    bundle_kind = load_bundle_identity(args.bundle).kind
+                except (AudioComposeError, ValueError, OSError):
+                    pass
+                callback = None
+                if bundle_kind is not None:
+                    progress_renderer = CliProgressRenderer(
+                        mode=args.progress,
+                        json_mode=args.json,
+                        command="book" if bundle_kind == "book" else "compose",
+                    )
+                    progress_renderer.set_phase("preparing bundle")
+                    if progress_renderer.enabled:
+                        callback = _BundleProgressAdapter(progress_renderer, bundle_kind)
+                batch_result = compose_bundle_batch(
+                    args.bundle,
+                    chapters=args.chapters,
+                    pauses=args.pauses,
+                    renderplan_root=args.renderplan_root,
+                    voicerender_root=args.voicerender_root,
+                    output_root=args.output_root,
+                    media_root=args.media_root,
+                    emphasis_policy=args.emphasis_policy,
+                    sample_rate=args.sample_rate,
+                    clip_policy=args.clip_policy,
+                    target_lufs=args.target_lufs,
+                    true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
+                    peak_policy=args.peak_policy,
+                    save_audiojobs=args.save_audiojobs,
+                    force=args.force,
+                    fail_fast=args.fail_fast,
+                    on_progress=callback,
+                )
+                if progress_renderer is not None:
+                    progress_renderer.finish(success=batch_result.exit_code == 0)
+                if args.json:
+                    print(json.dumps(batch_result.to_dict(), indent=2, sort_keys=True))
+                else:
+                    _print_bundle_batch_result(batch_result)
+                return batch_result.exit_code
 
             bundle_kind = load_bundle_identity(args.bundle).kind
             progress_renderer = CliProgressRenderer(
@@ -642,6 +781,41 @@ def main(argv: list[str] | None = None) -> int:
             and getattr(args, "bundle_command", None) == "variants"
             and getattr(args, "json", False)
         )
+        if batch_mode and getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "format": "audiocompose-bundle-batch-result",
+                        "version": 1,
+                        "kind": None,
+                        "bundle": str(Path(args.bundle).expanduser()),
+                        "renderplan_root": None,
+                        "voicerender_root": None,
+                        "output_root": None,
+                        "force": args.force,
+                        "summary": {
+                            "discovered": 0,
+                            "compose_ready": 0,
+                            "scheduled": 0,
+                            "attempted": 0,
+                            "completed": 0,
+                            "partial": 0,
+                            "failed": 0,
+                            "skipped_complete": 0,
+                            "skipped_not_ready": 0,
+                            "invalid": 0,
+                            "not_attempted": 0,
+                        },
+                        "variants": [],
+                        "error_code": getattr(exc, "code", "bundle.invalid"),
+                        "error_message": str(exc),
+                        "exit_code": 2,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
         if is_variants_json:
             print(
                 json.dumps(

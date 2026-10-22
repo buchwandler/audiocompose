@@ -187,6 +187,8 @@ From inside a bundle, `.` is a valid spelling for the canonical workspace root:
 ```bash
 cd project.ssmd-bundle
 audiocompose bundle variants .
+audiocompose bundle compose .
+audiocompose bundle compose . --force
 audiocompose bundle compose . --variant narration--<fingerprint>
 ```
 
@@ -196,11 +198,20 @@ Explicit paths also work:
 audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint>
 ```
 
-A book manifest composes selected chapters (`--chapters all|N|N-M|...`); a document manifest composes its single document and accepts only `--chapters all`. Both use the same options, including `--pauses`, stage/output root overrides, output policy controls, `--save-audiojobs DIR`, `--force`, `--fail-fast`, `--json`, and `--progress`. ZIP archives and inner chapter/document paths are not command inputs. The bundle's manifest format is authoritative.
+A book manifest composes selected chapters (`--chapters all|N|N-M|...`); a document manifest composes its single document and accepts only `--chapters all`. Omit `--variant` to compose every valid, compose-ready variant with open composition work. Variants without a complete VoiceRender handoff are skipped, complete variants are skipped by default, and invalid candidates are reported. Batch `--force` includes complete compose-ready variants and forwards overwrite permission to the existing composer; stale or unverified outputs still obey the single-variant provenance checks. `--fail-fast` also stops later selected variants after a failure. In batch mode an explicit `--save-audiojobs DIR` is namespaced beneath `DIR/<variant>` to prevent collisions. Target one variant with `--variant NAME`. ZIP archives and inner chapter/document paths are not command inputs; the bundle manifest remains authoritative.
 
-Defaults are `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the workspace. Book workspaces save one AudioJob per selected chapter below the `--save-audiojobs` root; document workspaces save their single AudioJob below that root. Book and document composition retain their existing kind-specific reports and verification/reuse policies.
+Defaults are `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the workspace. Book workspaces save one AudioJob per selected chapter below the `--save-audiojobs` root; document workspaces save their single AudioJob below that root. Batch output and status are re-inspected from persisted artifacts after composition; the batch layer only selects and orchestrates calls to the existing `compose_bundle()` facade, so kind-specific reports, verification, and reuse policies remain unchanged.
 
-The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose the same manifest-based dispatch to Python callers. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`. `audiocompose.list_bundle_variants(bundle)` returns typed `BundleVariantsResult` and `BundleVariant` values for orchestration clients.
+The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose single-variant manifest-based dispatch. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`. `audiocompose.list_bundle_variants(bundle)` returns typed `BundleVariantsResult` and `BundleVariant` values; the read-only listing is the state source for the public `compose_bundle_batch(bundle, ...)` API. Batch results expose per-variant initial/final state, attempt status, errors, and aggregate counts.
+
+```python
+from audiocompose import compose_bundle_batch
+
+result = compose_bundle_batch("story.ssmd-bundle")
+for variant in result.variants:
+    print(variant.name, variant.status)
+raise SystemExit(result.exit_code)
+```
 
 ## Debugging and analysis
 

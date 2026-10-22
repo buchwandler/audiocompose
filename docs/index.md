@@ -30,18 +30,32 @@ audiocompose bundle variants project.ssmd-bundle --json
 # The canonical bundle root may also be addressed from inside the workspace.
 cd project.ssmd-bundle
 audiocompose bundle variants .
+voicerender bundle render .
+audiocompose bundle compose .
+audiocompose bundle compose . --force
 audiocompose bundle compose . --variant narration--<fingerprint>
 ```
 
 The overall states include `not_rendered`, `render_partial`, `ready`, `complete`, and `stale`, plus error states `invalid`, `render_failed`, `compose_partial`, `compose_failed`, and `unknown`. The JSON `ready_to_compose` field also accounts for required VoiceRender diagnostics.
 
-`audiocompose bundle compose NAME.ssmd-bundle --variant VARIANT` composes either supported SSMD bundle kind. AudioCompose reads `manifest.json` and dispatches on its `format`: a book bundle composes selected chapters, while a document bundle composes its single document (and accepts only `--chapters all`). Explicit paths and `.` from inside the canonical `.ssmd-bundle` are accepted; inner source paths and ZIP files are not. Existing book/document report contracts remain kind-specific. See the unified [bundle composition guide](https://github.com/buchwandler/audiocompose#bundle-composition-for-rendered-variants).
+`audiocompose bundle compose NAME.ssmd-bundle` composes all valid variants with a complete, validated VoiceRender handoff and open composition work. Upstream-not-ready variants are skipped, complete variants are skipped by default, and invalid variants are reported. Batch `--force` includes complete compose-ready variants and forwards overwrite permission without bypassing output ownership or provenance checks. `--fail-fast` stops later variants after an attempted failure; batch `--save-audiojobs DIR` writes each variant beneath `DIR/<variant>`. Add `--variant VARIANT` for targeted single-variant composition; its existing result/report behavior is unchanged. AudioCompose dispatches books and documents from the authoritative `manifest.json`; see the unified [bundle composition guide](https://github.com/buchwandler/audiocompose#bundle-composition-for-rendered-variants).
 
 ```bash
 audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint> --json
 ```
 
 Production composition requires complete VoiceRender handoffs. Default RenderPlan, VoiceRender, and AudioCompose roots are resolved beneath the bundle root. The package-root `audiocompose.list_bundle_variants(bundle)` API returns typed `BundleVariantsResult` and `BundleVariant` values.
+
+The package-root `audiocompose.compose_bundle_batch(bundle)` API applies the same readiness and selection rules as the CLI and returns typed per-variant outcomes:
+
+```python
+from audiocompose import compose_bundle_batch
+
+result = compose_bundle_batch("story.ssmd-bundle")
+for variant in result.variants:
+    print(variant.name, variant.status)
+raise SystemExit(result.exit_code)
+```
 
 ## Architecture
 

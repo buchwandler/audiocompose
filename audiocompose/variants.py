@@ -957,4 +957,13 @@ def list_bundle_variants(
     )
 
 
-__all__ = ["BundleVariant", "BundleVariantsResult", "list_bundle_variants"]
+__all__ = [
+    "BundleVariant",
+    "BundleVariantsResult",
+    "ComposeStatus",
+    "PlanStatus",
+    "RenderStatus",
+    "UnitKind",
+    "VariantState",
+    "list_bundle_variants",
+]
