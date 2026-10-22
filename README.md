@@ -171,7 +171,26 @@ The manifest path is optional and uses the same default as the CLI. The result i
 
 ## Bundle composition for rendered variants
 
-AudioCompose consumes completed VoiceRender artifacts; it does not synthesize speech. The unified command accepts only the editable `.ssmd-bundle` workspace root and dispatches by `manifest.json` format:
+AudioCompose consumes completed VoiceRender artifacts; it does not synthesize speech. The bundle commands accept the editable `.ssmd-bundle` workspace root and dispatch by `manifest.json` format. Discover planned variants before composing:
+
+```bash
+audiocompose bundle variants project.ssmd-bundle
+audiocompose bundle variants project.ssmd-bundle --json
+```
+
+`bundle variants` is read-only: it lists direct RenderPlan variant directories and reports plan validity, VoiceRender availability, AudioCompose composition status, and whether the handoff is ready. It supports book and document bundles, isolates malformed candidates, accepts `--renderplan-root`, `--voicerender-root`, and `--output-root` overrides, and does not render, compose, create output directories, or require a TTS engine.
+
+The overall state is `not_rendered` when no VoiceRender output is present, `render_partial` when rendering is incomplete, `ready` when the render handoff is complete and there is no current composition, `complete` when AudioCompose output is current, and `stale` when composition provenance no longer matches upstream artifacts. `invalid`, `render_failed`, `compose_partial`, `compose_failed`, and `unknown` identify invalid or contradictory stage results. Check `ready_to_compose` in JSON when a complete manifest may still be missing required diagnostics.
+
+From inside a bundle, `.` is a valid spelling for the canonical workspace root:
+
+```bash
+cd project.ssmd-bundle
+audiocompose bundle variants .
+audiocompose bundle compose . --variant narration--<fingerprint>
+```
+
+Explicit paths also work:
 
 ```bash
 audiocompose bundle compose project.ssmd-bundle --variant narration--<fingerprint>
@@ -181,7 +200,7 @@ A book manifest composes selected chapters (`--chapters all|N|N-M|...`); a docum
 
 Defaults are `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the workspace. Book workspaces save one AudioJob per selected chapter below the `--save-audiojobs` root; document workspaces save their single AudioJob below that root. Book and document composition retain their existing kind-specific reports and verification/reuse policies.
 
-The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose the same manifest-based dispatch to Python callers. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`.
+The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose the same manifest-based dispatch to Python callers. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`. `audiocompose.list_bundle_variants(bundle)` returns typed `BundleVariantsResult` and `BundleVariant` values for orchestration clients.
 
 ## Debugging and analysis
 

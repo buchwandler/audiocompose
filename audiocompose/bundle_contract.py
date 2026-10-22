@@ -32,14 +32,6 @@ class BundleIdentity:
 def load_bundle_identity(bundle: str | Path) -> BundleIdentity:
     """Safely load an SSMD bundle identity; only a real workspace root is valid."""
     path = Path(bundle).expanduser()
-    if path.name.endswith(".ssmd.md") or path.name == "chapters":
-        raise BundleComposeError(
-            "bundle.invalid", "invalid SSMD bundle: input must be a .ssmd-bundle workspace root"
-        )
-    if not path.name.endswith(".ssmd-bundle"):
-        raise BundleComposeError(
-            "bundle.invalid", "invalid SSMD bundle: workspace root must end in .ssmd-bundle"
-        )
     current = Path(path.anchor) if path.is_absolute() else Path.cwd()
     for part in path.parts:
         if part in {path.anchor, "", "."}:
@@ -54,7 +46,15 @@ def load_bundle_identity(bundle: str | Path) -> BundleIdentity:
                 "bundle.invalid", f"invalid SSMD bundle: symlink in workspace path: {current}"
             )
     root = Path(os.path.abspath(path))
-    if not stat.S_ISDIR(root.lstat().st_mode):
+    if root.name.endswith(".ssmd.md") or root.name == "chapters":
+        raise BundleComposeError(
+            "bundle.invalid", "invalid SSMD bundle: input must be a .ssmd-bundle workspace root"
+        )
+    if not root.name.endswith(".ssmd-bundle"):
+        raise BundleComposeError(
+            "bundle.invalid", "invalid SSMD bundle: workspace root must end in .ssmd-bundle"
+        )
+    if not root.is_dir():
         raise BundleComposeError(
             "bundle.invalid", "invalid SSMD bundle: workspace root is not a directory"
         )

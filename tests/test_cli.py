@@ -317,3 +317,129 @@ def test_compose_output_failure_does_not_finish_progress_successfully(
     assert captured.out == ""
     assert "failed" in captured.err
     assert not any("100.0%" in line and "complete" in line for line in captured.err.splitlines())
+
+
+def test_bundle_variants_help_and_empty_json_from_dot(tmp_path: Path, monkeypatch, capsys) -> None:
+    import pytest
+
+    from audiocompose.cli import _parser
+
+    with pytest.raises(SystemExit) as exc:
+        _parser().parse_args(["bundle", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "compose" in help_text
+    assert "variants" in help_text
+
+    with pytest.raises(SystemExit) as exc:
+        _parser().parse_args(["bundle", "variants", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    for option in ("--renderplan-root", "--voicerender-root", "--output-root", "--json"):
+        assert option in help_text
+
+    bundle = tmp_path / "empty.ssmd-bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}), encoding="utf-8"
+    )
+    monkeypatch.chdir(bundle)
+    assert main(["bundle", "variants", ".", "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["format"] == "audiocompose-bundle-variants"
+    assert payload["version"] == 1
+    assert payload["count"] == 0
+    assert captured.err == ""
+
+
+def test_bundle_variants_human_table_and_custom_root_dispatch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import audiocompose.variants as variants_module
+    from audiocompose import BundleVariant, BundleVariantsResult
+
+    root = tmp_path / "story.ssmd-bundle"
+    plans = tmp_path / "plans"
+    voices = tmp_path / "voices"
+    outputs = tmp_path / "outputs"
+    variant = BundleVariant(
+        name="narration--abcdef123456",
+        profile_id="sha256:" + "a" * 64,
+        plan_status="valid",
+        render_status="complete",
+        compose_status="not_composed",
+        state="ready",
+        unit_kind="chapters",
+        total_units=3,
+        rendered_units=3,
+        composed_units=0,
+        planned_speech=12,
+        available_speech=12,
+        ready_to_compose=True,
+    )
+    result = BundleVariantsResult(root, "book", plans, voices, outputs, (variant,))
+    captured_args = {}
+
+    def fake_list(bundle, **kwargs):
+        captured_args.update(bundle=bundle, **kwargs)
+        return result
+
+    monkeypatch.setattr(variants_module, "list_bundle_variants", fake_list)
+    assert (
+        main(
+            [
+                "bundle",
+                "variants",
+                str(root),
+                "--renderplan-root",
+                str(plans),
+                "--voicerender-root",
+                str(voices),
+                "--output-root",
+                str(outputs),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "VARIANT" in output
+    assert "narration--abcdef123456" in output
+    assert "complete" in output and "ready" in output
+    assert "render 3/3 chapters" in output
+    assert captured_args == {
+        "bundle": str(root),
+        "renderplan_root": str(plans),
+        "voicerender_root": str(voices),
+        "output_root": str(outputs),
+    }
+
+
+def test_bundle_variants_json_root_error_is_deterministic_on_stdout(tmp_path: Path, capsys) -> None:
+    invalid = tmp_path / "not-a-bundle"
+    invalid.mkdir()
+
+    assert main(["bundle", "variants", str(invalid), "--json"]) == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["format"] == "audiocompose-bundle-variants"
+    assert payload["version"] == 1
+    assert payload["error_code"] == "bundle.invalid"
+    assert payload["exit_code"] == 2
+    assert "error" in payload
+    assert captured.err == ""
+
+
+def test_bundle_variants_invalid_candidate_does_not_fail_discovery(tmp_path: Path, capsys) -> None:
+    bundle = tmp_path / "broken-candidate.ssmd-bundle"
+    (bundle / "renderplan" / "broken--123456789012").mkdir(parents=True)
+    (bundle / "manifest.json").parent.mkdir(parents=True, exist_ok=True)
+    (bundle / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}), encoding="utf-8"
+    )
+
+    assert main(["bundle", "variants", str(bundle), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["variants"][0]["plan_status"] == "invalid"
+    assert payload["variants"][0]["state"] == "invalid"

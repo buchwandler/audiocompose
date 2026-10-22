@@ -58,6 +58,7 @@ from .renderplan import (
 )
 from .schema import audiojob_schema
 from .sources import AudioBufferSource, AudioFileSource
+from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
 
 __all__ = [
     "__version__",
@@ -66,6 +67,9 @@ __all__ = [
     "BundleIdentity",
     "compose_bundle",
     "load_bundle_identity",
+    "BundleVariant",
+    "BundleVariantsResult",
+    "list_bundle_variants",
     "AudioAnchor",
     "AudioBufferSource",
     "AudioClip",

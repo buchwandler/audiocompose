@@ -127,6 +127,18 @@ def _parser() -> argparse.ArgumentParser:
     _add_json(bundle_compose)
     _add_progress(bundle_compose)
 
+    bundle_variants = bundle_commands.add_parser(
+        "variants",
+        help="Discover existing bundle variants and their render/composition state",
+        description=(
+            "List RenderPlan variant directories without rendering, composing, or modifying the bundle."
+        ),
+    )
+    bundle_variants.add_argument("bundle", help=".ssmd-bundle workspace root")
+    bundle_variants.add_argument("--renderplan-root", help="override RenderPlan variants root")
+    bundle_variants.add_argument("--voicerender-root", help="override VoiceRender output root")
+    bundle_variants.add_argument("--output-root", help="override AudioCompose output root")
+    _add_json(bundle_variants)
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("input")
     _add_analysis_options(analyze)
@@ -342,6 +354,42 @@ def _svg_report(audio: Any, report: ActivityReport, job: AudioJob | None) -> str
     )
 
 
+def _print_bundle_variants(result: Any) -> None:
+    print("AudioCompose bundle variants")
+    print(f"  bundle:       {result.bundle}")
+    print(f"  kind:         {result.kind}")
+    print(f"  renderplans:  {result.renderplan_root}")
+    print(f"  voicerender:  {result.voicerender_root}")
+    print(f"  output:       {result.output_root}")
+    print(f"  variants:     {len(result.variants)}")
+    if not result.variants:
+        print("No RenderPlan variants found.")
+        return
+
+    name_width = max(32, max(len(variant.name) for variant in result.variants))
+    print()
+    print(f"{'VARIANT':<{name_width}}  {'PLAN':<7}  {'RENDER':<12}  {'COMPOSE':<13}  STATE")
+    for variant in result.variants:
+        print(
+            f"{variant.name:<{name_width}}  {variant.plan_status:<7}  "
+            f"{variant.render_status:<12}  {variant.compose_status:<13}  {variant.state}"
+        )
+        if variant.total_units:
+            print(
+                f"  {variant.name}: render {variant.rendered_units}/{variant.total_units} "
+                f"{variant.unit_kind}; compose {variant.composed_units}/{variant.total_units} "
+                f"{variant.unit_kind}"
+            )
+        for label, error in (
+            ("Invalid variant", variant.validation_error),
+            ("Render status", variant.render_error),
+            ("Composition status", variant.compose_error),
+        ):
+            if error:
+                print(f"  {label}: {variant.name}")
+                print(f"    error: {error}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     progress_renderer: CliProgressRenderer | None = None
@@ -351,7 +399,21 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.progress, json_mode=getattr(args, "json", False), command=command
         )
     try:
-        if args.command == "bundle" and args.bundle_command == "compose":
+        if args.command == "bundle" and args.bundle_command == "variants":
+            from .variants import list_bundle_variants
+
+            variants_result = list_bundle_variants(
+                args.bundle,
+                renderplan_root=args.renderplan_root,
+                voicerender_root=args.voicerender_root,
+                output_root=args.output_root,
+            )
+            if args.json:
+                print(json.dumps(variants_result.to_dict(), indent=2, sort_keys=True))
+            else:
+                _print_bundle_variants(variants_result)
+            return 0
+        elif args.command == "bundle" and args.bundle_command == "compose":
             from .bundle import BundleComposeOptions, compose_bundle
             from .bundle_contract import load_bundle_identity
 
@@ -575,7 +637,26 @@ def main(argv: list[str] | None = None) -> int:
     except (AudioComposeError, ValueError, OSError) as exc:
         if progress_renderer is not None:
             progress_renderer.finish(success=False)
-        if getattr(args, "json", False):
+        is_variants_json = (
+            args.command == "bundle"
+            and getattr(args, "bundle_command", None) == "variants"
+            and getattr(args, "json", False)
+        )
+        if is_variants_json:
+            print(
+                json.dumps(
+                    {
+                        "format": "audiocompose-bundle-variants",
+                        "version": 1,
+                        "error": str(exc),
+                        "error_code": getattr(exc, "code", "bundle.invalid"),
+                        "exit_code": 2,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        elif getattr(args, "json", False):
             print(
                 json.dumps(
                     {
