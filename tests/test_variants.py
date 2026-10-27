@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _bundle_fixtures import two_chapter_book
 from renderplan import (
     PauseItem,
     Producer,
@@ -19,7 +20,12 @@ from renderplan import (
     save_renderplan_set,
 )
 
-from audiocompose.variants import BundleVariantsResult, _derive_state, list_bundle_variants
+from audiocompose.variants import (
+    BundleVariantsResult,
+    _derive_state,
+    _inspect_bundle_variants,
+    list_bundle_variants,
+)
 
 
 def _bundle(root: Path, kind: str = "book") -> Path:
@@ -205,6 +211,22 @@ def _write_document_compose_report(
     report_path = output_dir / "compose-report.toml"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path
+
+
+def test_selection_scoped_inspection_keeps_global_variant_listing_whole(tmp_path: Path) -> None:
+    workspace, _ = two_chapter_book(tmp_path)
+
+    scoped = _inspect_bundle_variants(workspace, chapter_selector="5").variants[0]
+    global_variant = list_bundle_variants(workspace).variants[0]
+
+    assert scoped.total_units == 1
+    assert scoped.rendered_units == 1
+    assert scoped.render_status == "complete"
+    assert scoped.ready_to_compose
+    assert global_variant.total_units == 2
+    assert global_variant.rendered_units == 1
+    assert global_variant.render_status == "partial"
+    assert global_variant.state == "render_partial"
 
 
 def test_book_and_document_missing_renderplan_roots_are_empty(tmp_path: Path) -> None:

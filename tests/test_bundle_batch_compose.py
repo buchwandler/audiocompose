@@ -5,11 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from _bundle_fixtures import two_chapter_book
 
 import audiocompose.bundle_batch as bundle_batch
 from audiocompose.bundle import BundleComposeResult
 from audiocompose.bundle_batch import compose_bundle_batch
-from audiocompose.variants import BundleVariant, BundleVariantsResult
+from audiocompose.variants import (
+    BundleVariant,
+    BundleVariantsResult,
+    _inspect_bundle_variants,
+    list_bundle_variants,
+)
 
 
 def _variant(
@@ -75,7 +81,7 @@ def _result(exit_code: int = 0, *, value=None, kind: str = "book") -> BundleComp
 
 def _install_listing(monkeypatch, *listings):
     listing = Mock(side_effect=listings)
-    monkeypatch.setattr(bundle_batch, "list_bundle_variants", listing)
+    monkeypatch.setattr(bundle_batch, "_inspect_bundle_variants", listing)
     return listing
 
 
@@ -381,7 +387,7 @@ def test_batch_json_dict_has_stable_envelope_and_invalid_root_is_exit_two(
 ) -> None:
     monkeypatch.setattr(
         bundle_batch,
-        "list_bundle_variants",
+        "_inspect_bundle_variants",
         Mock(side_effect=ValueError("not a bundle")),
     )
 
@@ -422,3 +428,188 @@ def test_batch_sets_and_clears_variant_progress_context(tmp_path: Path, monkeypa
     compose_bundle_batch(initial.bundle, on_progress=callback)
 
     assert callback.set_context.call_args_list == [call("1/2 a"), call("2/2 b"), call(None)]
+
+
+def test_real_selection_composes_one_rendered_chapter_and_keeps_global_state(
+    tmp_path: Path,
+) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    scoped = _inspect_bundle_variants(workspace, chapter_selector="5").variants[0]
+    assert scoped.total_units == 1
+    assert scoped.rendered_units == 1
+    assert scoped.render_status == "complete"
+    assert scoped.ready_to_compose
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.exit_code == 0
+    assert result.summary.discovered == 1
+    assert result.summary.compose_ready == 1
+    assert result.summary.scheduled == 1
+    assert result.summary.attempted == 1
+    assert result.summary.completed == 1
+    assert result.summary.skipped_not_ready == 0
+    outcome = result.variants[0]
+    assert outcome.status == "complete"
+    assert outcome.final_state == "complete"
+    assert (workspace / "audiocompose" / variant / "chapter-0005.wav").is_file()
+    assert not (workspace / "audiocompose" / variant / "chapter-0006.wav").exists()
+
+    global_variant = list_bundle_variants(workspace).variants[0]
+    assert global_variant.render_status == "partial"
+    assert global_variant.state == "render_partial"
+
+
+def test_real_multiselection_waits_for_every_requested_chapter(tmp_path: Path) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+
+    result = compose_bundle_batch(workspace, chapters="5-6")
+
+    assert result.exit_code == 0
+    assert result.summary.scheduled == 0
+    assert result.summary.attempted == 0
+    assert result.summary.skipped_not_ready == 1
+    assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
+
+
+@pytest.mark.parametrize("chapters", ["all", "all-default"])
+def test_real_whole_variant_selection_still_waits_for_missing_chapter(
+    tmp_path: Path, chapters: str
+) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+
+    result = compose_bundle_batch(
+        workspace, **({} if chapters == "all-default" else {"chapters": chapters})
+    )
+
+    assert result.summary.scheduled == 0
+    assert result.summary.skipped_not_ready == 1
+    assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
+
+
+def test_real_selection_ignores_malformed_unselected_render_and_plan(tmp_path: Path) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    plan6 = workspace / "renderplan" / variant / "chapter-0006.renderplan.toml"
+    plan6.write_text("malformed = [", encoding="utf-8")
+    sibling_render = workspace / "voicerender" / variant / "chapter-0006"
+    sibling_render.mkdir()
+    (sibling_render / "render-manifest.toml").write_text("malformed = [", encoding="utf-8")
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.exit_code == 0
+    assert result.summary.completed == 1
+    assert result.variants[0].status == "complete"
+    assert (workspace / "audiocompose" / variant / "chapter-0005.wav").is_file()
+
+
+@pytest.mark.parametrize("artifact", ["diagnostics", "manifest"])
+def test_real_selection_still_requires_valid_selected_render_handoff(
+    tmp_path: Path, artifact: str
+) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    render_dir = workspace / "voicerender" / variant / "chapter-0005"
+    artifact_path = render_dir / (
+        "render-diagnostics.json" if artifact == "diagnostics" else "render-manifest.toml"
+    )
+    if artifact == "diagnostics":
+        artifact_path.unlink()
+    else:
+        artifact_path.write_text("malformed = [", encoding="utf-8")
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.summary.scheduled == 0
+    assert result.summary.skipped_not_ready == 1
+    assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
+
+
+def test_real_selected_current_report_ignores_unselected_failure_and_force_stays_scoped(
+    tmp_path: Path,
+) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    output_dir = workspace / "audiocompose" / variant
+    first = compose_bundle_batch(workspace, chapters="5")
+    assert first.summary.completed == 1
+    report = output_dir / "compose-report.toml"
+    report.write_text(
+        report.read_text(encoding="utf-8").replace(
+            "failed = 0", 'failed = 1\nprogress_error = "old sibling failure"'
+        )
+        + '\n[[item]]\nid = "chapter-0006"\nstatus = "failed"\n',
+        encoding="utf-8",
+    )
+
+    skipped = compose_bundle_batch(workspace, chapters="5")
+    assert skipped.summary.scheduled == 0
+    assert skipped.summary.skipped_complete == 1
+    assert skipped.variants[0].final_compose_status == "complete"
+
+    forced = compose_bundle_batch(workspace, chapters="5", force=True)
+    assert forced.summary.scheduled == 1
+    assert forced.summary.attempted == 1
+    assert forced.summary.completed == 1
+    assert forced.variants[0].status == "complete"
+    assert (output_dir / "chapter-0005.wav").is_file()
+    assert not (output_dir / "chapter-0006.wav").exists()
+
+
+def test_real_invalid_selector_is_not_hidden_by_global_partial_readiness(tmp_path: Path) -> None:
+    workspace, _ = two_chapter_book(tmp_path)
+
+    result = compose_bundle_batch(workspace, chapters="999")
+
+    assert result.exit_code == 2
+    assert result.error_code == "selection.invalid"
+    assert "unknown selected chapter number: 999" in (result.error_message or "")
+
+
+def test_real_selected_renderplan_failure_blocks_selection(tmp_path: Path) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    (workspace / "renderplan" / variant / "chapter-0005.renderplan.toml").write_text(
+        "malformed = [", encoding="utf-8"
+    )
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.summary.scheduled == 0
+    assert result.summary.invalid == 1
+    assert result.variants[0].status == "invalid"
+    assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
+
+
+def test_real_scoped_render_readiness_ignores_voice_report_for_another_run(
+    tmp_path: Path,
+) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    report = workspace / "voicerender" / variant / "voicerender-report.toml"
+    report.write_text('status = "failed"\nfailed = 1\n', encoding="utf-8")
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.exit_code == 0
+    assert result.summary.completed == 1
+    assert result.variants[0].status == "complete"
+
+
+def test_real_scoped_compose_status_ignores_unselected_stale_item(tmp_path: Path) -> None:
+    workspace, variant = two_chapter_book(tmp_path)
+    first = compose_bundle_batch(workspace, chapters="5")
+    assert first.summary.completed == 1
+    report = workspace / "audiocompose" / variant / "compose-report.toml"
+    report.write_text(
+        report.read_text(encoding="utf-8").replace(
+            "failed = 0", 'failed = 0\nprogress_error = "older report issue"'
+        )
+        + '\n[[item]]\nid = "chapter-0006"\nstatus = "written"\n'
+        + 'output = "chapter-0006.wav"\nrender_plan_id = "sha256:'
+        + "0" * 64
+        + '"\n',
+        encoding="utf-8",
+    )
+
+    result = compose_bundle_batch(workspace, chapters="5")
+
+    assert result.summary.skipped_complete == 1
+    assert result.variants[0].final_compose_status == "complete"
+    assert result.variants[0].status == "skipped_complete"

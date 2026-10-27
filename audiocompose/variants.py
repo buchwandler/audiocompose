@@ -25,6 +25,7 @@ from renderplan import (
     validate_set_chapter_plan,
 )
 
+from .book import parse_chapter_selector
 from .bundle_contract import BundleComposeError, BundleIdentity, BundleKind, load_bundle_identity
 from .document_contract import (
     COMPOSE_REPORT_FILENAME,
@@ -35,6 +36,7 @@ from .document_contract import (
     DocumentWorkspaceContractError,
     read_document_workspace,
 )
+from .errors import BookComposeError
 from .integrations.voicerender import (
     _validate_render_diagnostics,
     _validate_voicerender_producer,
@@ -161,8 +163,10 @@ class _PlanUnit:
 class _ValidatedPlan:
     profile_id: str
     units: tuple[_PlanUnit, ...]
+    known_unit_ids: frozenset[str]
     unit_kind: UnitKind
     planned_speech: int
+    selection_scoped: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +302,12 @@ def _safe_relative_file(root: Path, base: Path, reference: Any, *, label: str) -
     )
 
 
-def _validate_book_candidate(candidate: Path, renderplan_root: Path) -> _ValidatedPlan:
+def _validate_book_candidate(
+    candidate: Path,
+    renderplan_root: Path,
+    *,
+    chapter_selector: str | None = None,
+) -> _ValidatedPlan:
     set_path = _contained_file(
         renderplan_root,
         candidate / SET_FILENAME,
@@ -323,8 +332,11 @@ def _validate_book_candidate(candidate: Path, renderplan_root: Path) -> _Validat
         )
     except Exception as exc:
         raise _VariantInspectionError(f"invalid RenderProfile snapshot: {exc}") from exc
+    selected_chapters = renderplan_set.chapters
+    if chapter_selector is not None:
+        selected_chapters = parse_chapter_selector(chapter_selector, renderplan_set.chapters)
     units: list[_PlanUnit] = []
-    for chapter in renderplan_set.chapters:
+    for chapter in selected_chapters:
         plan_path = _safe_relative_file(
             renderplan_root, candidate, chapter.renderplan, label=f"RenderPlan for {chapter.id}"
         )
@@ -345,8 +357,10 @@ def _validate_book_candidate(candidate: Path, renderplan_root: Path) -> _Validat
     return _ValidatedPlan(
         profile_id=renderplan_set.profile_id,
         units=tuple(units),
+        known_unit_ids=frozenset(chapter.id for chapter in renderplan_set.chapters),
         unit_kind="chapters",
         planned_speech=sum(len(unit.plan.speech) for unit in units),
+        selection_scoped=chapter_selector is not None,
     )
 
 
@@ -392,6 +406,7 @@ def _validate_document_candidate(candidate: Path) -> _ValidatedPlan:
     return _ValidatedPlan(
         profile_id=profile_id,
         units=(unit,),
+        known_unit_ids=frozenset({unit.id}),
         unit_kind="documents",
         planned_speech=len(plan.speech),
     )
@@ -541,11 +556,12 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             return _RenderInspection(
                 "unknown", 0, 0, False, None, "VoiceRender variant is unsafe", {}
             )
-        report_path, failed_report, claimed_complete, report_error = _inspect_voice_report(
-            voice_variant, voice_root
-        )
-        if report_error is not None:
-            return _RenderInspection("unknown", 0, 0, False, report_path, report_error, {})
+        if not plan.selection_scoped:
+            report_path, failed_report, claimed_complete, report_error = _inspect_voice_report(
+                voice_variant, voice_root
+            )
+            if report_error is not None:
+                return _RenderInspection("unknown", 0, 0, False, report_path, report_error, {})
     identities: dict[str, dict[str, str | None]] = {}
     rendered_units = 0
     complete_units = 0
@@ -709,7 +725,7 @@ def _inspect_book_compose(
         failed = report.get("failed", 0)
         if isinstance(failed, bool) or not isinstance(failed, int) or failed < 0:
             raise _VariantInspectionError("AudioCompose book report failed count is invalid")
-        if (
+        if not plan.selection_scoped and (
             failed > 0
             or report.get("progress_error") is not None
             or any(item.get("status") == "failed" for item in items)
@@ -725,23 +741,26 @@ def _inspect_book_compose(
                     "AudioCompose book report has invalid or duplicate item ids"
                 )
             by_id[item_id] = item
-        expected_ids = {unit.id for unit in plan.units}
-        if not set(by_id).issubset(expected_ids):
+        if not set(by_id).issubset(plan.known_unit_ids):
             raise _VariantInspectionError("AudioCompose book report contains an unknown unit")
+        selected_ids = {unit.id for unit in plan.units}
+        selected_items = {unit_id: by_id[unit_id] for unit_id in selected_ids if unit_id in by_id}
         if any(
             item.get("status") not in {"written", "reused", "failed", "skipped"}
-            for item in by_id.values()
+            for item in selected_items.values()
         ):
             raise _VariantInspectionError(
-                "AudioCompose book report contains an unsupported item status"
+                "AudioCompose book report contains an unsupported selected item status"
+            )
+        if any(item.get("status") == "failed" for item in selected_items.values()):
+            return _ComposeInspection(
+                "failed", 0, report_path, "AudioCompose report records failed selected work"
             )
         completed = 0
         stale_reasons: list[str] = []
         for unit in plan.units:
-            item = by_id.get(unit.id)
-            if item is None:
-                continue
-            if item.get("status") not in {"written", "reused"}:
+            item = selected_items.get(unit.id)
+            if item is None or item.get("status") not in {"written", "reused"}:
                 continue
             _output_file(output_root, variant_dir, unit.id, item.get("output"))
             current = render.identities.get(unit.id)
@@ -762,7 +781,13 @@ def _inspect_book_compose(
             completed += 1
         if stale_reasons:
             return _ComposeInspection("stale", completed, report_path, "; ".join(stale_reasons))
-        if completed == len(plan.units) and len(by_id) == len(expected_ids):
+        if plan.selection_scoped:
+            if completed == len(plan.units):
+                return _ComposeInspection("complete", completed, report_path, None)
+            if completed == 0:
+                return _ComposeInspection("not_composed", 0, report_path, None)
+            return _ComposeInspection("partial", completed, report_path, None)
+        if completed == len(plan.units) and len(by_id) == len(plan.known_unit_ids):
             return _ComposeInspection("complete", completed, report_path, None)
         return _ComposeInspection("partial", completed, report_path, None)
     except Exception as exc:
@@ -882,6 +907,8 @@ def _inspect_candidate(
     renderplan_root: Path,
     voicerender_root: Path,
     output_root: Path,
+    *,
+    chapter_selector: str | None = None,
 ) -> BundleVariant:
     unit_kind: UnitKind = "chapters" if identity.kind == "book" else "documents"
     try:
@@ -892,10 +919,14 @@ def _inspect_candidate(
         if not candidate_real.is_relative_to(renderplan_root):
             raise _VariantInspectionError("variant candidate escapes the RenderPlan root")
         plan = (
-            _validate_book_candidate(candidate, renderplan_root)
+            _validate_book_candidate(candidate, renderplan_root, chapter_selector=chapter_selector)
             if identity.kind == "book"
             else _validate_document_candidate(candidate)
         )
+    except BookComposeError as exc:
+        if exc.code == "selection.invalid":
+            raise BundleComposeError(exc.code, str(exc)) from exc
+        return _invalid_variant(candidate.name, unit_kind, str(exc))
     except Exception as exc:
         return _invalid_variant(candidate.name, unit_kind, str(exc))
     render = _inspect_render(candidate.name, plan, voicerender_root)
@@ -925,14 +956,14 @@ def _inspect_candidate(
     )
 
 
-def list_bundle_variants(
+def _inspect_bundle_variants(
     bundle: str | Path,
     *,
+    chapter_selector: str | None = None,
     renderplan_root: str | Path | None = None,
     voicerender_root: str | Path | None = None,
     output_root: str | Path | None = None,
 ) -> BundleVariantsResult:
-    """List RenderPlan variants and inspect their downstream artifact status without writes."""
     identity = load_bundle_identity(bundle)
     plan_root = _stage_root(identity.root, renderplan_root, "renderplan", "RenderPlan root")
     if identity.kind == "document":
@@ -943,8 +974,18 @@ def list_bundle_variants(
     voice_root = _stage_root(identity.root, voicerender_root, "voicerender", "VoiceRender root")
     audio_root = _stage_root(identity.root, output_root, "audiocompose", "AudioCompose output root")
     candidates = _enumerate_candidates(plan_root)
+    scoped_selector = chapter_selector
+    if identity.kind != "book" or chapter_selector is None or chapter_selector.strip() == "all":
+        scoped_selector = None
     variants = tuple(
-        _inspect_candidate(candidate, identity, plan_root, voice_root, audio_root)
+        _inspect_candidate(
+            candidate,
+            identity,
+            plan_root,
+            voice_root,
+            audio_root,
+            chapter_selector=scoped_selector,
+        )
         for candidate in candidates
     )
     return BundleVariantsResult(
@@ -954,6 +995,22 @@ def list_bundle_variants(
         voicerender_root=voice_root,
         output_root=audio_root,
         variants=variants,
+    )
+
+
+def list_bundle_variants(
+    bundle: str | Path,
+    *,
+    renderplan_root: str | Path | None = None,
+    voicerender_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+) -> BundleVariantsResult:
+    """List RenderPlan variants and inspect their downstream artifact status without writes."""
+    return _inspect_bundle_variants(
+        bundle,
+        renderplan_root=renderplan_root,
+        voicerender_root=voicerender_root,
+        output_root=output_root,
     )
 
 

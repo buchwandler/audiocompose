@@ -455,6 +455,19 @@ def test_resolve_book_validates_set_profile_and_chapter_plan_identity(tmp_path):
     assert plan.plan_id == selected.render_plan_id
 
 
+def test_composing_subset_does_not_require_unselected_renderplan(tmp_path: Path) -> None:
+    from audiocompose import compose_book
+
+    workspace, variant, plan_variant, _ = _fixture_book(tmp_path, source_numbers=(5, 6))
+    (plan_variant / "chapter-0006.renderplan.toml").write_text("malformed = [", encoding="utf-8")
+
+    result = compose_book(workspace, variant=variant, chapters="5")
+
+    assert [outcome.id for outcome in result.outcomes] == ["chapter-0005"]
+    assert (workspace / "audiocompose" / variant / "chapter-0005.wav").is_file()
+    assert not (workspace / "audiocompose" / variant / "chapter-0006.wav").exists()
+
+
 def test_renderplan_set_chapter_identity_mismatch_is_rejected(tmp_path):
     workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
     context = resolve_book(workspace, variant)

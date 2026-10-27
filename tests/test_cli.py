@@ -517,6 +517,21 @@ def test_bundle_compose_batch_root_error_is_json_on_stdout(tmp_path: Path, capsy
     assert captured.err == ""
 
 
+def test_batch_cli_reports_invalid_selector_even_when_global_variant_is_partial(
+    tmp_path: Path, capsys
+) -> None:
+    from _bundle_fixtures import two_chapter_book
+
+    workspace, _ = two_chapter_book(tmp_path)
+
+    assert main(["bundle", "compose", str(workspace), "--chapters", "999", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_code"] == "selection.invalid"
+    assert "unknown selected chapter number: 999" in payload["error_message"]
+    assert payload["summary"]["scheduled"] == 0
+
+
 def test_bundle_compose_batch_human_no_variant_message(tmp_path: Path, capsys) -> None:
     root = tmp_path / "empty.ssmd-bundle"
     root.mkdir()

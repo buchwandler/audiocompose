@@ -22,7 +22,7 @@ from .variants import (
     PlanStatus,
     RenderStatus,
     VariantState,
-    list_bundle_variants,
+    _inspect_bundle_variants,
 )
 
 BatchVariantStatus = Literal[
@@ -314,11 +314,12 @@ def compose_bundle_batch(
     """Compose valid, compose-ready variants with outstanding composition work."""
     bundle_path = Path(bundle).expanduser()
     try:
-        listing = list_bundle_variants(
+        listing = _inspect_bundle_variants(
             bundle,
             renderplan_root=renderplan_root,
             voicerender_root=voicerender_root,
             output_root=output_root,
+            chapter_selector=chapters,
         )
     except Exception as exc:
         code, message = _exception_details(exc)
@@ -432,11 +433,12 @@ def compose_bundle_batch(
         context_setter(None)
 
     try:
-        final_listing = list_bundle_variants(
+        final_listing = _inspect_bundle_variants(
             bundle,
             renderplan_root=renderplan_root,
             voicerender_root=voicerender_root,
             output_root=output_root,
+            chapter_selector=chapters,
         )
     except Exception as exc:
         code, message = _exception_details(exc)
