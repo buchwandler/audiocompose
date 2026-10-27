@@ -1,0 +1,37 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 529,
+      "deletions": 32,
+      "patch_file": "c24c593.patch",
+      "patch_sha256": "73563fa196b509f3df274859772c0dc6dfff0091427196305cb752e0ee34586b",
+      "paths": [
+        ".ledger/releaseledger/data/ledgers/main/events/events.jsonl",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.4/entries/entry-0002.md",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.4/release.md",
+        "README.md",
+        "audiocompose/bundle_batch.py",
+        "audiocompose/variants.py",
+        "docs/architecture.md",
+        "docs/changelog.md",
+        "tests/_bundle_fixtures.py",
+        "tests/test_bundle_batch_compose.py",
+        "tests/test_cli.py",
+        "tests/test_compose_book.py",
+        "tests/test_variants.py"
+      ],
+      "sha": "c24c5930bbf8ae340b33610ea34c998223ea3a1f",
+      "short_sha": "c24c593",
+      "source_ref": "git:c24c5930bbf8ae340b33610ea34c998223ea3a1f"
+    }
+  ],
+  "git_base_ref": "f0aff392da45319db13adf9b532ee13141c7139b",
+  "git_base_sha": "f0aff392da45319db13adf9b532ee13141c7139b",
+  "git_head_ref": "c24c5930bbf8ae340b33610ea34c998223ea3a1f",
+  "git_head_sha": "c24c5930bbf8ae340b33610ea34c998223ea3a1f",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.5",
+  "schema_version": 1
+}

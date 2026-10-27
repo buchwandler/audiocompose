@@ -1,0 +1,56 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 2
+release_version: v0.3.5
+git_base_ref: v0.3.4
+git_base_sha: f0aff392da45319db13adf9b532ee13141c7139b
+git_head_ref: HEAD
+git_head_sha: c24c5930bbf8ae340b33610ea34c998223ea3a1f
+git_range: f0aff392da45319db13adf9b532ee13141c7139b..c24c5930bbf8ae340b33610ea34c998223ea3a1f
+commit_count: 1
+rows:
+  - sha: c24c5930bbf8ae340b33610ea34c998223ea3a1f
+    source_ref: git:c24c5930bbf8ae340b33610ea34c998223ea3a1f
+    short_sha: c24c593
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.4/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.4/release.md
+      - README.md
+      - audiocompose/bundle_batch.py
+      - audiocompose/variants.py
+      - docs/architecture.md
+      - docs/changelog.md
+      - tests/_bundle_fixtures.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_variants.py
+    stats:
+      files_changed: 13
+      insertions: 529
+      deletions: 32
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/bundle_batch.py
+      - audiocompose/variants.py
+      - docs/architecture.md
+      - tests/_bundle_fixtures.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_cli.py
+      - tests/test_compose_book.py
+      - tests/test_variants.py
+    observed_behavior:
+      Book batch composition now scopes readiness, completion, validation,
+      and final status to the requested chapter selection while preserving whole-variant
+      behavior for all chapters; regression tests cover selected and unselected artifacts.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix book composition"
+    target_entry_key: v0.3.5/entry-0002
+    target_entry_id: entry-0002
+    notes: Reviewed the implementation, documentation, and regression coverage.
