@@ -384,6 +384,8 @@ def _print_bundle_variants(result: Any) -> None:
             f"{variant.name:<{name_width}}  {variant.plan_status:<7}  "
             f"{variant.render_status:<12}  {variant.compose_status:<13}  {variant.state}"
         )
+        if variant.render_warning:
+            print(f"  render warning: {variant.render_warning}")
         if variant.total_units:
             print(
                 f"  {variant.name}: render {variant.rendered_units}/{variant.total_units} "
@@ -488,6 +490,8 @@ def _print_bundle_batch_result(result: Any) -> None:
             print(f"  validation error: {outcome.validation_error}")
         if outcome.render_error:
             print(f"  render error: {outcome.render_error}")
+        if getattr(outcome, "render_warning", None):
+            print(f"  render warning: {outcome.render_warning}")
         if outcome.compose_error:
             print(f"  compose error: {outcome.compose_error}")
         if outcome.result is not None and result.kind == "book":

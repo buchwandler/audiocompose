@@ -646,3 +646,93 @@ def test_real_scoped_compose_status_ignores_unselected_stale_item(tmp_path: Path
     assert result.summary.skipped_complete == 1
     assert result.variants[0].final_compose_status == "complete"
     assert result.variants[0].status == "skipped_complete"
+
+
+
+def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+    import json
+
+    import numpy as np
+    from renderplan import (
+        Producer,
+        RenderManifest,
+        SpeechArtifact,
+        load_plan,
+        load_renderplan_set,
+        save_manifest,
+    )
+
+    from audiocompose.variants import MAX_METADATA_BYTES
+    from audiocompose.wav import write_wav
+
+    workspace, variant = two_chapter_book(tmp_path)
+    variant_dir = workspace / "renderplan" / variant
+    plan_set = load_renderplan_set(variant_dir / "renderplan-set.toml")
+    chapter = next(item for item in plan_set.chapters if item.id == "chapter-0006")
+    plan = load_plan(variant_dir / chapter.renderplan)
+    render_dir = workspace / "voicerender" / variant / chapter.id
+    render_dir.mkdir(parents=True)
+    speech_artifacts = []
+    for speech in plan.speech:
+        wav_path = render_dir / speech.wav
+        write_wav(wav_path, np.zeros(32, dtype=np.float32), 16_000)
+        speech_artifacts.append(
+            SpeechArtifact(
+                segment_number=speech.number,
+                segment_id=speech.segment_id or speech.computed_id(),
+                wav=speech.wav,
+                sha256="sha256:" + hashlib.sha256(wav_path.read_bytes()).hexdigest(),
+                frames=32,
+                sample_rate=16_000,
+                channels=1,
+            )
+        )
+    manifest = RenderManifest(
+        render_plan_id=plan.plan_id or plan.computed_id(),
+        speech=tuple(speech_artifacts),
+        complete=True,
+        producer=Producer(name="voicerender", version="0.2.0"),
+    ).with_identity()
+    save_manifest(manifest, render_dir / "render-manifest.toml")
+    (render_dir / "render-diagnostics.json").write_text(
+        json.dumps(
+            {
+                "schema": "voicerender.render-diagnostics.v1",
+                "render_plan_id": plan.plan_id or plan.computed_id(),
+                "emphasis_policy": "reject",
+                "pending_composition": False,
+                "deferred_controls": [],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = compose_bundle_batch(workspace, chapters="5")
+    assert first.summary.completed == 1
+    report = workspace / "voicerender" / variant / "voicerender-report.toml"
+    report.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+
+    resumed = compose_bundle_batch(workspace)
+
+    assert resumed.exit_code == 0
+    assert resumed.summary.completed == 1
+    assert resumed.variants[0].status == "complete"
+    assert resumed.variants[0].initial_render_status == "complete"
+    assert resumed.variants[0].render_error is None
+    assert resumed.variants[0].render_warning is not None
+    assert "ignored because all selected RenderManifests and diagnostics" in (
+        resumed.variants[0].render_warning or ""
+    )
+    compose_report = workspace / "audiocompose" / variant / "compose-report.toml"
+    import tomllib
+
+    report_items = {
+        item["id"]: item for item in tomllib.loads(compose_report.read_text()).get("item", [])
+    }
+    assert report_items["chapter-0005"]["status"] == "reused"
+    assert report_items["chapter-0006"]["status"] == "written"
+    assert (workspace / "audiocompose" / variant / "chapter-0006.wav").is_file()

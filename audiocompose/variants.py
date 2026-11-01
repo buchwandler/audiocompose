@@ -87,6 +87,7 @@ class BundleVariant:
     ready_to_compose: bool
     validation_error: str | None = None
     render_error: str | None = None
+    render_warning: str | None = None
     compose_error: str | None = None
     voicerender_report_path: Path | None = None
     compose_report_path: Path | None = None
@@ -108,6 +109,7 @@ class BundleVariant:
             "ready_to_compose": self.ready_to_compose,
             "validation_error": self.validation_error,
             "render_error": self.render_error,
+            "render_warning": self.render_warning,
             "compose_error": self.compose_error,
             "voicerender_report_path": (
                 str(self.voicerender_report_path)
@@ -178,6 +180,8 @@ class _RenderInspection:
     report_path: Path | None
     error: str | None
     identities: dict[str, dict[str, str | None]]
+    warning: str | None = None
+    inspected_unit_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,19 +554,19 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
     report_path: Path | None = None
     failed_report = False
     claimed_complete = False
-    report_error: str | None = None
+    report_warning: str | None = None
     if voice_variant.exists() or voice_variant.is_symlink():
         if voice_variant.is_symlink() or not voice_variant.is_dir():
             return _RenderInspection(
                 "unknown", 0, 0, False, None, "VoiceRender variant is unsafe", {}
             )
         if not plan.selection_scoped:
-            report_path, failed_report, claimed_complete, report_error = _inspect_voice_report(
+            report_path, failed_report, claimed_complete, report_warning = _inspect_voice_report(
                 voice_variant, voice_root
             )
-            if report_error is not None:
-                return _RenderInspection("unknown", 0, 0, False, report_path, report_error, {})
+
     identities: dict[str, dict[str, str | None]] = {}
+    inspected_unit_ids: set[str] = set()
     rendered_units = 0
     complete_units = 0
     available_speech = 0
@@ -570,6 +574,7 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
     observed_any = False
     try:
         for unit in plan.units:
+            inspected_unit_ids.add(unit.id)
             render_dir = _safe_unit_directory(voice_root, variant, unit.id)
             if render_dir is None:
                 continue
@@ -618,8 +623,18 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
                 complete_units += 1
     except Exception as exc:
         return _RenderInspection(
-            "unknown", rendered_units, available_speech, False, report_path, str(exc), identities
+            "unknown",
+            rendered_units,
+            available_speech,
+            False,
+            report_path,
+            str(exc),
+            identities,
+            warning=report_warning,
+            inspected_unit_ids=frozenset(inspected_unit_ids),
         )
+
+    inspected = frozenset(inspected_unit_ids)
     if failed_report:
         return _RenderInspection(
             "failed",
@@ -629,6 +644,8 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             report_path,
             "VoiceRender report records a failed run",
             identities,
+            warning=report_warning,
+            inspected_unit_ids=inspected,
         )
     if claimed_complete and (
         not observed_any or rendered_units != len(plan.units) or complete_units != len(plan.units)
@@ -641,12 +658,39 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             report_path,
             "VoiceRender report claims completion but complete manifests are missing",
             identities,
+            warning=report_warning,
+            inspected_unit_ids=inspected,
         )
-    if not observed_any:
-        return _RenderInspection("not_rendered", 0, 0, False, report_path, None, identities)
-    if rendered_units == 0:
-        return _RenderInspection("not_rendered", 0, 0, False, report_path, None, identities)
+    if not observed_any or rendered_units == 0:
+        if report_warning is not None:
+            return _RenderInspection(
+                "unknown",
+                rendered_units,
+                available_speech,
+                False,
+                report_path,
+                report_warning,
+                identities,
+                warning=report_warning,
+                inspected_unit_ids=inspected,
+            )
+        return _RenderInspection(
+            "not_rendered",
+            0,
+            0,
+            False,
+            report_path,
+            None,
+            identities,
+            inspected_unit_ids=inspected,
+        )
     if rendered_units == len(plan.units) and complete_units == len(plan.units):
+        warning = report_warning
+        if warning is not None and diagnostics_ready:
+            warning = (
+                f"{warning}; ignored because all selected RenderManifests and diagnostics "
+                "validated successfully"
+            )
         return _RenderInspection(
             "complete",
             rendered_units,
@@ -655,9 +699,19 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             report_path,
             None,
             identities,
+            warning=warning,
+            inspected_unit_ids=inspected,
         )
     return _RenderInspection(
-        "partial", rendered_units, available_speech, False, report_path, None, identities
+        "partial",
+        rendered_units,
+        available_speech,
+        False,
+        report_path,
+        None,
+        identities,
+        warning=report_warning,
+        inspected_unit_ids=inspected,
     )
 
 
@@ -765,7 +819,12 @@ def _inspect_book_compose(
             _output_file(output_root, variant_dir, unit.id, item.get("output"))
             current = render.identities.get(unit.id)
             if current is None:
-                stale_reasons.append(f"{unit.id} no longer has a valid VoiceRender manifest")
+                if unit.id not in render.inspected_unit_ids:
+                    stale_reasons.append(f"{unit.id} VoiceRender handoff was not inspected")
+                else:
+                    stale_reasons.append(
+                        f"{unit.id} no longer has a valid VoiceRender manifest"
+                    )
                 continue
             checks = {
                 "render_plan_id": current["render_plan_id"],
@@ -833,9 +892,11 @@ def _inspect_document_compose(
         _output_file(output_root, variant_dir, unit.id, report.get("output"))
         current = render.identities.get(unit.id)
         if current is None:
-            return _ComposeInspection(
-                "stale", 0, report_path, "document no longer has a valid VoiceRender manifest"
-            )
+            if unit.id not in render.inspected_unit_ids:
+                reason = "document VoiceRender handoff was not inspected"
+            else:
+                reason = "document no longer has a valid VoiceRender manifest"
+            return _ComposeInspection("stale", 0, report_path, reason)
         checks = {
             "source_plan_id": current["source_plan_id"],
             "render_profile_id": current["render_profile_id"],
@@ -950,6 +1011,7 @@ def _inspect_candidate(
         available_speech=render.available_speech,
         ready_to_compose=render.status == "complete" and render.ready,
         render_error=render.error,
+        render_warning=render.warning,
         compose_error=composition.error,
         voicerender_report_path=render.report_path,
         compose_report_path=composition.report_path,

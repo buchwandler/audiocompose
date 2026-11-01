@@ -375,6 +375,60 @@ def test_complete_manifest_without_diagnostics_is_not_ready(tmp_path: Path) -> N
     assert not discovered.ready_to_compose
 
 
+
+
+def test_oversized_report_does_not_bypass_invalid_diagnostics(tmp_path: Path) -> None:
+    from audiocompose.variants import MAX_METADATA_BYTES
+
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, _, plan = _book_variant(root)
+    _, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    (render_dir / "render-diagnostics.json").write_text("not json", encoding="utf-8")
+    report = root / "voicerender" / variant / "voicerender-report.toml"
+    report.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+
+    discovered = list_bundle_variants(root).variants[0]
+
+    assert discovered.render_status == "unknown"
+    assert not discovered.ready_to_compose
+    assert "VoiceRender diagnostics" in (discovered.render_error or "")
+    assert discovered.render_warning is not None
+
+def test_oversized_optional_report_does_not_block_complete_handoffs(tmp_path: Path) -> None:
+    from audiocompose.variants import MAX_METADATA_BYTES
+
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, _, plan = _book_variant(root)
+    _write_render(root, variant, "chapter-0001", plan)
+    report = root / "voicerender" / variant / "voicerender-report.toml"
+    report.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+
+    discovered = list_bundle_variants(root).variants[0]
+
+    assert discovered.render_status == "complete"
+    assert discovered.ready_to_compose
+    assert discovered.render_error is None
+    assert discovered.render_warning is not None
+    assert "ignored because all selected RenderManifests and diagnostics" in discovered.render_warning
+    assert discovered.to_dict()["render_warning"] == discovered.render_warning
+
+
+def test_oversized_optional_report_does_not_infer_complete_from_partial_handoffs(
+    tmp_path: Path,
+) -> None:
+    from audiocompose.variants import MAX_METADATA_BYTES
+
+    root, variant = two_chapter_book(tmp_path)
+    report = root / "voicerender" / variant / "voicerender-report.toml"
+    report.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+
+    discovered = list_bundle_variants(root).variants[0]
+
+    assert discovered.render_status == "partial"
+    assert discovered.rendered_units == 1
+    assert not discovered.ready_to_compose
+
+
 def test_incomplete_manifest_is_partial_and_failed_report_is_reported(tmp_path: Path) -> None:
     root = _bundle(tmp_path / "book.ssmd-bundle")
     variant, _, plan = _book_variant(root)
@@ -390,6 +444,40 @@ def test_incomplete_manifest_is_partial_and_failed_report_is_reported(tmp_path: 
     failed = list_bundle_variants(root).variants[0]
     assert failed.render_status == "failed"
     assert failed.state == "render_failed"
+
+def test_compose_stale_diagnostic_distinguishes_uninspected_handoff(tmp_path: Path) -> None:
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, profile_id, plan = _book_variant(root)
+    manifest, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    _write_book_compose_report(
+        root,
+        variant,
+        profile_id,
+        plan,
+        manifest,
+        render_dir / "render-manifest.toml",
+        render_dir / "render-diagnostics.json",
+    )
+
+    voice_variant = root / "voicerender" / variant
+    voice_variant.rename(voice_variant.with_name(f"{variant}-original"))
+    external = tmp_path / "external-voice-root"
+    external.mkdir()
+    try:
+        voice_variant.symlink_to(external, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    discovered = list_bundle_variants(root).variants[0]
+
+    assert discovered.compose_status == "stale"
+    assert "chapter-0001 VoiceRender handoff was not inspected" in (
+        discovered.compose_error or ""
+    )
+    assert "no longer has a valid VoiceRender manifest" not in (
+        discovered.compose_error or ""
+    )
+
 
 
 def test_malformed_render_manifest_is_unknown_without_hiding_sibling(tmp_path: Path) -> None:

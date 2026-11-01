@@ -378,6 +378,7 @@ def test_bundle_variants_human_table_and_custom_root_dispatch(
         planned_speech=12,
         available_speech=12,
         ready_to_compose=True,
+        render_warning="VoiceRender summary report ignored after chapter validation",
     )
     result = BundleVariantsResult(root, "book", plans, voices, outputs, (variant,))
     captured_args = {}
@@ -408,6 +409,7 @@ def test_bundle_variants_human_table_and_custom_root_dispatch(
     assert "narration--abcdef123456" in output
     assert "complete" in output and "ready" in output
     assert "render 3/3 chapters" in output
+    assert "render warning: VoiceRender summary report ignored" in output
     assert captured_args == {
         "bundle": str(root),
         "renderplan_root": str(plans),
@@ -565,6 +567,7 @@ def test_bundle_compose_batch_human_reports_all_blocker_details(capsys) -> None:
         validation_error: str | None = None,
         render_error: str | None = None,
         compose_error: str | None = None,
+        render_warning: str | None = None,
     ):
         return SimpleNamespace(
             name=name,
@@ -581,6 +584,7 @@ def test_bundle_compose_batch_human_reports_all_blocker_details(capsys) -> None:
             error_message=error_message,
             validation_error=validation_error,
             render_error=render_error,
+            render_warning=render_warning,
             compose_error=compose_error,
             result=None,
         )
@@ -614,6 +618,7 @@ def test_bundle_compose_batch_human_reports_all_blocker_details(capsys) -> None:
                 initial_compose_status="partial",
                 ready=False,
                 render_error="bad diagnostics",
+                render_warning="optional report was ignored",
             ),
             outcome(
                 "compose-blocked",
@@ -649,6 +654,7 @@ def test_bundle_compose_batch_human_reports_all_blocker_details(capsys) -> None:
     output = capsys.readouterr().out
 
     for diagnostic in (
+        "render warning: optional report was ignored",
         "render error: bad diagnostics",
         "compose error: stale composition state",
         "validation error: invalid manifest",

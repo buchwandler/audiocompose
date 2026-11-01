@@ -58,6 +58,7 @@ class BundleVariantComposeOutcome:
     error_message: str | None = None
     validation_error: str | None = None
     render_error: str | None = None
+    render_warning: str | None = None
     compose_error: str | None = None
     result: BundleComposeResult | None = None
 
@@ -80,6 +81,7 @@ class BundleVariantComposeOutcome:
             "error_message": self.error_message,
             "validation_error": self.validation_error,
             "render_error": self.render_error,
+            "render_warning": self.render_warning,
             "compose_error": self.compose_error,
             "result": self.result.to_dict() if self.result is not None else None,
         }
@@ -217,6 +219,7 @@ def _initial_outcome(variant: BundleVariant, *, force: bool) -> BundleVariantCom
         status=status,
         validation_error=variant.validation_error,
         render_error=variant.render_error,
+        render_warning=variant.render_warning,
         compose_error=variant.compose_error,
     )
 
