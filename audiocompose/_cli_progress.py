@@ -3,9 +3,11 @@ from __future__ import annotations
 import math
 import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Literal, TextIO
+from functools import wraps
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 from .progress import CompositionProgress, ProgressEstimator, ProgressTiming
 
@@ -14,6 +16,24 @@ if TYPE_CHECKING:
 
 
 ProgressMode = Literal["auto", "always", "never"]
+
+
+def _split_context(context: str | None) -> tuple[str | None, str | None]:
+    if not context:
+        return None, None
+    slot, separator, label = context.partition(" ")
+    if not separator:
+        return context, None
+    return slot, label or None
+
+
+def _synchronized(method: Callable[..., None]) -> Callable[..., None]:
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class CliProgressRenderer:
@@ -29,9 +49,15 @@ class CliProgressRenderer:
         command: str = "compose",
         stream: TextIO | None = None,
         clock: Callable[[], float] = time.monotonic,
+        heartbeat_interval: float | None = 1.0,
     ) -> None:
         if mode not in ("auto", "always", "never"):
             raise ValueError("progress mode must be 'auto', 'always', or 'never'")
+        if heartbeat_interval is not None and (
+            not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0
+        ):
+            raise ValueError("heartbeat interval must be a positive finite number or None")
+        self._lock = threading.RLock()
         self._stream = stream if stream is not None else sys.stderr
         try:
             is_tty = bool(self._stream.isatty())
@@ -40,6 +66,7 @@ class CliProgressRenderer:
         self.enabled = mode == "always" or (mode == "auto" and is_tty and not json_mode)
         self._tty = self.enabled and is_tty
         self._clock = clock
+        self._heartbeat_interval = heartbeat_interval
         now = self._now()
         self._started_at = now
         self._last_draw_at: float | None = None
@@ -56,7 +83,10 @@ class CliProgressRenderer:
         self._book_chapter_id: str | None = None
         self._book_failed = False
         self._finished = False
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
+    @_synchronized
     def set_context(self, context: str | None) -> None:
         """Set batch context and reset progress estimates for the next variant."""
         if context == self._context:
@@ -77,6 +107,7 @@ class CliProgressRenderer:
         if context is not None:
             self._render(force=True)
 
+    @_synchronized
     def set_phase(self, phase: str) -> None:
         if not self.enabled:
             return
@@ -85,6 +116,7 @@ class CliProgressRenderer:
         if changed:
             self._render(force=True)
 
+    @_synchronized
     def on_composition_progress(self, event: CompositionProgress) -> None:
         if not self.enabled:
             return
@@ -100,6 +132,7 @@ class CliProgressRenderer:
             self._phase = "writing output"
         self._render(force=changed or event.kind in {"compose_started", "compose_completed"})
 
+    @_synchronized
     def on_book_progress(self, event: BookComposeProgress) -> None:
         if not self.enabled:
             return
@@ -158,19 +191,26 @@ class CliProgressRenderer:
         )
 
     def finish(self, *, success: bool) -> None:
-        if not self.enabled or self._finished:
-            return
-        self._finished = True
-        if success:
-            self._phase = "complete"
-        else:
-            self._phase = "failed"
-            self._book_failed = True
-        self._render(force=True)
-        if self._tty and self._line_open:
-            self._stream.write("\n")
-            self._stream.flush()
-            self._line_open = False
+        thread: threading.Thread | None = None
+        with self._lock:
+            if not self.enabled or self._finished:
+                return
+            self._finished = True
+            self._heartbeat_stop.set()
+            if success:
+                self._phase = "complete"
+            else:
+                self._phase = "failed"
+                self._book_failed = True
+            self._render(force=True)
+            if self._tty and self._line_open:
+                self._stream.write("\n")
+                self._stream.flush()
+                self._line_open = False
+            thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            timeout = (self._heartbeat_interval or 0.0) + 0.1
+            thread.join(timeout=timeout)
 
     def _now(self) -> float:
         try:
@@ -179,6 +219,35 @@ class CliProgressRenderer:
             return 0.0
         return value if math.isfinite(value) else 0.0
 
+    def _ensure_heartbeat(self) -> None:
+        if (
+            not self._tty
+            or self._finished
+            or self._heartbeat_interval is None
+            or self._heartbeat_thread is not None
+        ):
+            return
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="audiocompose-progress-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        interval = self._heartbeat_interval
+        if interval is None:
+            return
+        while not self._heartbeat_stop.wait(interval):
+            self._heartbeat_redraw()
+
+    @_synchronized
+    def _heartbeat_redraw(self) -> None:
+        if not self._tty or self._finished:
+            return
+        self._render(force=True)
+
+    @_synchronized
     def _render(self, *, force: bool = False) -> None:
         if not self.enabled:
             return
@@ -189,16 +258,18 @@ class CliProgressRenderer:
             and now - self._last_draw_at < self._MIN_REFRESH_SECONDS
         ):
             return
-        line = self._format_line(now)
         if self._tty:
             width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns - 1)
+            line = self._format_interactive_line(now, width)
             line = line[:width].ljust(width)
             self._stream.write("\r" + line)
             self._line_open = True
         else:
+            line = self._format_line(now)
             self._stream.write(line + "\n")
         self._stream.flush()
         self._last_draw_at = now
+        self._ensure_heartbeat()
 
     def _format_line(self, now: float) -> str:
         elapsed = max(0.0, now - self._started_at)
@@ -272,6 +343,119 @@ class CliProgressRenderer:
         ):
             pieces.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
         return " · ".join(pieces)
+
+    def _format_interactive_line(self, now: float, width: int) -> str:
+        elapsed = max(0.0, now - self._started_at)
+        slot, variant = _split_context(self._context)
+        if self._command == "book" and self._book_event is not None:
+            return self._format_interactive_book_line(elapsed, width, slot, variant)
+
+        composition = self._composition
+        fraction = composition.fraction if composition is not None else None
+        phase = self._phase or "preparing"
+        if phase == "writing output" and fraction is not None:
+            phase = "composition · writing output"
+        if self._phase == "complete":
+            phase = "complete"
+        if self._phase == "failed":
+            fraction = None
+        primary = [f"[{slot}]"] if slot else []
+        if fraction is not None:
+            primary.append(f"{fraction * 100.0:.1f}%")
+        primary.extend((phase, self._format_duration(elapsed)))
+
+        secondary: list[str] = []
+        timing = self._composition_timing
+        if (
+            timing is not None
+            and timing.status == "estimated"
+            and timing.estimated_remaining_seconds is not None
+            and self._phase not in {"writing output", "complete", "failed"}
+        ):
+            secondary.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
+        if composition is not None and composition.total_items:
+            secondary.append(f"{composition.completed_items}/{composition.total_items} items")
+            if composition.item_id:
+                secondary.append(composition.item_id)
+        return self._fit_interactive_fields(primary, secondary, variant, width)
+
+    def _format_interactive_book_line(
+        self, elapsed: float, width: int, slot: str | None, variant: str | None
+    ) -> str:
+        event = self._book_event
+        assert event is not None
+        fraction = event.fraction
+        phase = self._phase or "preparing book"
+        outcome = event.outcome
+        terminal_failure = outcome is not None and outcome.status in ("failed", "skipped")
+        if self._phase == "complete" and not self._book_failed:
+            fraction = 1.0 if event.requested_chapters > 0 else None
+        elif event.kind == "book_completed":
+            fraction = None
+            phase = "completed with failures" if self._book_failed else "finalizing report"
+        elif event.composition is not None and event.composition.kind == "compose_completed":
+            fraction = None
+        elif outcome is not None and event.completed_chapters >= event.requested_chapters:
+            fraction = None
+        elif self._phase == "failed" or terminal_failure:
+            fraction = None
+
+        primary = [f"[{slot}]"] if slot else []
+        if fraction is not None:
+            primary.append(f"{fraction * 100.0:.1f}%")
+        primary.extend((phase, self._format_duration(elapsed)))
+        secondary: list[str] = []
+        timing = self._book_timing
+        if (
+            timing is not None
+            and timing.status == "estimated"
+            and timing.estimated_remaining_seconds is not None
+            and phase == "composing"
+        ):
+            secondary.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
+
+        composition = event.composition
+        if event.chapter_id is not None and event.requested_chapters > 1:
+            chapter_number = event.completed_chapters + (0 if outcome is not None else 1)
+            chapter_number = min(max(chapter_number, 1), event.requested_chapters)
+            secondary.append(f"ch {chapter_number}/{event.requested_chapters}")
+            if composition is not None and composition.fraction is not None:
+                secondary.append(f"ch {composition.fraction * 100.0:.1f}%")
+        if composition is not None and composition.total_items:
+            secondary.append(f"{composition.completed_items}/{composition.total_items} items")
+            if composition.item_id:
+                secondary.append(composition.item_id)
+        return self._fit_interactive_fields(primary, secondary, variant, width)
+
+    @staticmethod
+    def _fit_interactive_fields(
+        primary: list[str], secondary: list[str], variant: str | None, width: int
+    ) -> str:
+        line = " · ".join(primary)
+        for field in secondary:
+            candidate = f"{line} · {field}" if line else field
+            if len(candidate) <= width:
+                line = candidate
+        if variant:
+            available = width - len(line) - 3
+            label = CliProgressRenderer._elide_variant(variant, available)
+            if label:
+                line = f"{line} · {label}" if line else label
+        return line
+
+    @staticmethod
+    def _elide_variant(label: str, available: int) -> str | None:
+        if available <= 0:
+            return None
+        if len(label) <= available:
+            return label
+        if available < 8:
+            return None
+        suffix_length = min(12, max(4, (available - 3) // 2))
+        prefix_length = available - suffix_length - 3
+        if prefix_length < 1:
+            return None
+        return f"{label[:prefix_length]}...{label[-suffix_length:]}"
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

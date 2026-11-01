@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -19,6 +20,7 @@ from audiocompose import (
 )
 from audiocompose._cli_progress import CliProgressRenderer
 from audiocompose.cli import main
+from audiocompose.progress import ProgressEventKind
 from audiocompose.wav import write_wav
 
 
@@ -109,7 +111,7 @@ class TTYStream(io.StringIO):
 
 
 def _composition_event(
-    kind: str,
+    kind: ProgressEventKind,
     completed_work: float,
     *,
     completed_items: int = 0,
@@ -151,6 +153,209 @@ def test_progress_renderer_tty_detection_eta_and_monotonic_output() -> None:
     json_tty = CliProgressRenderer(mode="auto", json_mode=True, stream=TTYStream())
     assert not json_tty.enabled
     assert not CliProgressRenderer(mode="auto", stream=io.StringIO()).enabled
+
+
+def test_progress_renderer_keeps_primary_fields_on_narrow_tty(monkeypatch) -> None:
+    import audiocompose._cli_progress as cli_progress
+
+    monkeypatch.setattr(
+        cli_progress.shutil,
+        "get_terminal_size",
+        lambda *, fallback: os.terminal_size((50, 24)),
+    )
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=FakeClock())
+    renderer.set_context("1/1 eval2--pt-engaging-v1--b8a526d23fd")
+    renderer.on_composition_progress(_composition_event("compose_started", 30.0))
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1].strip()
+    assert "[1/1]" in frame
+    assert "30.0%" in frame
+    assert "composing" in frame
+    assert "00:00" in frame
+
+
+def test_book_progress_keeps_overall_fields_on_narrow_tty(monkeypatch) -> None:
+    import audiocompose._cli_progress as cli_progress
+
+    monkeypatch.setattr(
+        cli_progress.shutil,
+        "get_terminal_size",
+        lambda *, fallback: os.terminal_size((60, 24)),
+    )
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", command="book", stream=stream, clock=FakeClock())
+    renderer.set_context("1/1 eval2--pt-engaging-v1--b8a526d23fd")
+    renderer.on_book_progress(
+        BookComposeProgress(
+            0,
+            2,
+            kind="chapter_compose_progress",
+            chapter_id="chapter-0001",
+            composition=_composition_event("item_completed", 42.6),
+            fraction=0.213,
+        )
+    )
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1].strip()
+    assert "[1/1]" in frame
+    assert "21.3%" in frame
+    assert "composing" in frame
+    assert "00:00" in frame
+
+
+def test_progress_renderer_preserves_variant_identity_on_wide_tty(monkeypatch) -> None:
+    import audiocompose._cli_progress as cli_progress
+
+    monkeypatch.setattr(
+        cli_progress.shutil,
+        "get_terminal_size",
+        lambda *, fallback: os.terminal_size((160, 24)),
+    )
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=FakeClock())
+    renderer.set_context("1/1 eval2--pt-engaging-v1--b8a526d23fd")
+    renderer.on_composition_progress(_composition_event("compose_started", 30.0))
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1].strip()
+    assert "[1/1]" in frame
+    assert "30.0%" in frame
+    assert "composing" in frame
+    assert "eval2--pt-engaging-v1--b8a526d23fd" in frame
+
+
+def test_progress_heartbeat_refreshes_elapsed_without_advancing_work() -> None:
+    clock = FakeClock()
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=clock, heartbeat_interval=None)
+    renderer.on_composition_progress(_composition_event("compose_started", 25.0))
+    timing = renderer._composition_timing
+    estimator = renderer._estimator
+
+    clock.advance(65.0)
+    renderer._heartbeat_redraw()
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "25.0%" in frame
+    assert "01:05" in frame
+    assert renderer._composition is not None
+    assert renderer._composition.fraction == 0.25
+    assert renderer._composition_timing is timing
+    assert renderer._estimator is estimator
+
+    renderer.finish(success=True)
+    finished_output = stream.getvalue()
+    clock.advance(10.0)
+    renderer._heartbeat_redraw()
+    assert stream.getvalue() == finished_output
+    assert renderer._heartbeat_stop.is_set()
+
+
+def test_progress_heartbeat_thread_stops_on_finish() -> None:
+    renderer = CliProgressRenderer(mode="auto", stream=TTYStream(), clock=FakeClock())
+    renderer.on_composition_progress(_composition_event("compose_started", 0.0))
+    thread = renderer._heartbeat_thread
+    assert thread is not None and thread.is_alive()
+
+    renderer.finish(success=True)
+
+    assert renderer._heartbeat_stop.is_set()
+    assert not thread.is_alive()
+
+
+def test_progress_heartbeat_is_disabled_for_non_tty() -> None:
+    clock = FakeClock()
+    stream = io.StringIO()
+    renderer = CliProgressRenderer(
+        mode="always", stream=stream, clock=clock, heartbeat_interval=0.01
+    )
+    renderer.on_composition_progress(_composition_event("compose_started", 10.0))
+    output = stream.getvalue()
+
+    clock.advance(10.0)
+    renderer._heartbeat_redraw()
+
+    assert stream.getvalue() == output
+    assert renderer._heartbeat_thread is None
+
+
+def test_progress_renderer_shows_eta_when_narrow_terminal_has_room(monkeypatch) -> None:
+    import audiocompose._cli_progress as cli_progress
+
+    monkeypatch.setattr(
+        cli_progress.shutil,
+        "get_terminal_size",
+        lambda *, fallback: os.terminal_size((60, 24)),
+    )
+    clock = FakeClock()
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=clock, heartbeat_interval=None)
+    renderer.set_context("1/1 eval2--pt-engaging-v1--b8a526d23fd")
+    renderer.on_composition_progress(_composition_event("compose_started", 0.0))
+    clock.advance(2.0)
+    renderer.on_composition_progress(_composition_event("item_completed", 20.0, completed_items=1))
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "[1/1]" in frame
+    assert "20.0%" in frame
+    assert "ETA 00:08" in frame
+
+
+def test_progress_renderer_keeps_unknown_work_indeterminate() -> None:
+    stream = TTYStream()
+    renderer = CliProgressRenderer(
+        mode="auto", stream=stream, clock=FakeClock(), heartbeat_interval=None
+    )
+    renderer.on_composition_progress(
+        CompositionProgress(kind="compose_started", completed_items=0, total_items=0)
+    )
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "composing" in frame
+    assert "00:00" in frame
+    assert "%" not in frame
+
+
+def test_book_progress_retains_chapter_context_when_wide(monkeypatch) -> None:
+    import audiocompose._cli_progress as cli_progress
+
+    monkeypatch.setattr(
+        cli_progress.shutil,
+        "get_terminal_size",
+        lambda *, fallback: os.terminal_size((160, 24)),
+    )
+    stream = TTYStream()
+    renderer = CliProgressRenderer(
+        mode="auto", command="book", stream=stream, clock=FakeClock(), heartbeat_interval=None
+    )
+    renderer.set_context("1/1 eval2--pt-engaging-v1--b8a526d23fd")
+    renderer.on_book_progress(
+        BookComposeProgress(
+            0,
+            10,
+            kind="chapter_compose_progress",
+            chapter_id="chapter-0001",
+            composition=_composition_event("item_completed", 73.8, completed_items=684),
+            fraction=0.374,
+        )
+    )
+
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "[1/1]" in frame
+    assert "37.4%" in frame
+    assert "ch 1/10" in frame
+    assert "ch 73.8%" in frame
+    assert "eval2--pt-engaging-v1--b8a526d23fd" in frame
+
+
+def test_variant_label_middle_elision_preserves_prefix_and_fingerprint() -> None:
+    label = "eval2--pt-engaging-v1--b8a526d23fd"
+
+    elided = CliProgressRenderer._elide_variant(label, 28)
+
+    assert elided is not None
+    assert len(elided) == 28
+    assert elided.startswith("eval2--pt-eng")
+    assert elided.endswith("b8a526d23fd")
 
 
 def test_generic_compose_progress_modes_and_json_stdout(tmp_path: Path, capsys) -> None:

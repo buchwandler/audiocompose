@@ -648,7 +648,6 @@ def test_real_scoped_compose_status_ignores_unselected_stale_item(tmp_path: Path
     assert result.variants[0].status == "skipped_complete"
 
 
-
 def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
     tmp_path: Path,
 ) -> None:

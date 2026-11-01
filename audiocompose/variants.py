@@ -822,9 +822,7 @@ def _inspect_book_compose(
                 if unit.id not in render.inspected_unit_ids:
                     stale_reasons.append(f"{unit.id} VoiceRender handoff was not inspected")
                 else:
-                    stale_reasons.append(
-                        f"{unit.id} no longer has a valid VoiceRender manifest"
-                    )
+                    stale_reasons.append(f"{unit.id} no longer has a valid VoiceRender manifest")
                 continue
             checks = {
                 "render_plan_id": current["render_plan_id"],

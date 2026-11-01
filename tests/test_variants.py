@@ -375,8 +375,6 @@ def test_complete_manifest_without_diagnostics_is_not_ready(tmp_path: Path) -> N
     assert not discovered.ready_to_compose
 
 
-
-
 def test_oversized_report_does_not_bypass_invalid_diagnostics(tmp_path: Path) -> None:
     from audiocompose.variants import MAX_METADATA_BYTES
 
@@ -394,6 +392,7 @@ def test_oversized_report_does_not_bypass_invalid_diagnostics(tmp_path: Path) ->
     assert "VoiceRender diagnostics" in (discovered.render_error or "")
     assert discovered.render_warning is not None
 
+
 def test_oversized_optional_report_does_not_block_complete_handoffs(tmp_path: Path) -> None:
     from audiocompose.variants import MAX_METADATA_BYTES
 
@@ -409,7 +408,9 @@ def test_oversized_optional_report_does_not_block_complete_handoffs(tmp_path: Pa
     assert discovered.ready_to_compose
     assert discovered.render_error is None
     assert discovered.render_warning is not None
-    assert "ignored because all selected RenderManifests and diagnostics" in discovered.render_warning
+    assert (
+        "ignored because all selected RenderManifests and diagnostics" in discovered.render_warning
+    )
     assert discovered.to_dict()["render_warning"] == discovered.render_warning
 
 
@@ -445,6 +446,7 @@ def test_incomplete_manifest_is_partial_and_failed_report_is_reported(tmp_path: 
     assert failed.render_status == "failed"
     assert failed.state == "render_failed"
 
+
 def test_compose_stale_diagnostic_distinguishes_uninspected_handoff(tmp_path: Path) -> None:
     root = _bundle(tmp_path / "book.ssmd-bundle")
     variant, profile_id, plan = _book_variant(root)
@@ -471,13 +473,8 @@ def test_compose_stale_diagnostic_distinguishes_uninspected_handoff(tmp_path: Pa
     discovered = list_bundle_variants(root).variants[0]
 
     assert discovered.compose_status == "stale"
-    assert "chapter-0001 VoiceRender handoff was not inspected" in (
-        discovered.compose_error or ""
-    )
-    assert "no longer has a valid VoiceRender manifest" not in (
-        discovered.compose_error or ""
-    )
-
+    assert "chapter-0001 VoiceRender handoff was not inspected" in (discovered.compose_error or "")
+    assert "no longer has a valid VoiceRender manifest" not in (discovered.compose_error or "")
 
 
 def test_malformed_render_manifest_is_unknown_without_hiding_sibling(tmp_path: Path) -> None:
