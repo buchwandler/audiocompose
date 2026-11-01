@@ -18,7 +18,7 @@ from audiocompose import (
     OutputPolicy,
 )
 from audiocompose.cli import main
-from audiocompose.wav import prepare_output, read_wav
+from audiocompose.wav import prepare_output, read_wav, write_wav
 
 
 def _output_policy(clip_policy: str = "clamp") -> OutputPolicy:
@@ -80,6 +80,85 @@ def test_prepare_output_policies_and_caller_storage() -> None:
         prepare_output(audio, clip_policy="error")
     with pytest.raises(AudioValidationError, match="unknown clip policy"):
         prepare_output(audio, clip_policy="ignore")  # type: ignore[arg-type]
+
+
+def test_prepare_output_clamp_keeps_an_isolated_waveform() -> None:
+    audio = np.asarray([0.25, -0.5], dtype=np.float32)
+    prepared = prepare_output(audio, clip_policy="clamp")
+
+    assert not np.shares_memory(prepared, audio)
+    np.testing.assert_array_equal(prepared, audio)
+
+
+@pytest.mark.parametrize(
+    ("clip_policy", "expected_clip_calls"),
+    [("clamp", 1), ("warn", 1), ("error", 0)],
+)
+def test_write_wav_clips_only_when_required(
+    tmp_path: Path, monkeypatch, clip_policy: str, expected_clip_calls: int
+) -> None:
+    import audiocompose.wav as wav_module
+
+    audio = np.asarray([-1.5, 1.5], dtype=np.float32)
+    output = tmp_path / f"{clip_policy}.wav"
+    original_clip = wav_module.np.clip
+    clip_calls = []
+
+    def counted_clip(*args, **kwargs):
+        clip_calls.append(True)
+        return original_clip(*args, **kwargs)
+
+    monkeypatch.setattr(wav_module.np, "clip", counted_clip)
+    if clip_policy == "error":
+        with pytest.raises(AudioValidationError, match="outside the PCM range"):
+            write_wav(output, audio, 8_000, clip_policy=clip_policy)  # type: ignore[arg-type]
+        assert not output.exists()
+    else:
+        write_wav(output, audio, 8_000, clip_policy=clip_policy)  # type: ignore[arg-type]
+        written, sample_rate = read_wav(output)
+        assert sample_rate == 8_000
+        np.testing.assert_array_equal(written, [-32767 / 32768, 32767 / 32768])
+
+    assert len(clip_calls) == expected_clip_calls
+
+
+def test_composer_to_wav_does_not_repeat_output_preparation(tmp_path: Path, monkeypatch) -> None:
+    import audiocompose.composer as composer_module
+    import audiocompose.wav as wav_module
+
+    composition_preparations = []
+    writer_preparations = []
+    original_composition_prepare = composer_module._prepare_output
+    original_writer_prepare = wav_module.prepare_output
+
+    def counted_composition_prepare(*args, **kwargs):
+        composition_preparations.append(True)
+        return original_composition_prepare(*args, **kwargs)
+
+    def counted_writer_prepare(*args, **kwargs):
+        writer_preparations.append(True)
+        return original_writer_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(composer_module, "_prepare_output", counted_composition_prepare)
+    monkeypatch.setattr(wav_module, "prepare_output", counted_writer_prepare)
+    job = AudioJob(
+        (AudioClip("clip", AudioBufferSource(np.asarray([0.1, 0.2], dtype=np.float32), 8)),),
+        output=OutputPolicy(
+            sample_rate=8,
+            loudness=LoudnessPolicy(
+                target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=False
+            ),
+        ),
+    )
+
+    output = tmp_path / "prepared.wav"
+    Composer().to_wav(job, output)
+
+    assert composition_preparations == [True]
+    assert writer_preparations == []
+    written, sample_rate = read_wav(output)
+    assert sample_rate == 8
+    np.testing.assert_allclose(written, [0.1, 0.2], atol=1 / 32767)
 
 
 @pytest.mark.parametrize("sample_rate", [0, -1, True, 24_000.0])

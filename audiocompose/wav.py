@@ -49,7 +49,9 @@ def _as_finite_mono_float32(
     return np.ascontiguousarray(values, dtype=np.float32)
 
 
-def prepare_output(audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp") -> np.ndarray:
+def _prepare_output(
+    audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp"
+) -> tuple[np.ndarray, bool]:
     if clip_policy not in ("clamp", "warn", "error"):
         raise AudioValidationError(f"unknown clip policy: {clip_policy!r}")
     samples = _as_finite_mono_float32(audio)
@@ -57,7 +59,12 @@ def prepare_output(audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp") -> n
     if over_range and clip_policy == "error":
         raise AudioValidationError("audio contains samples outside the PCM range [-1, 1]")
     if clip_policy == "clamp":
-        return np.ascontiguousarray(np.clip(samples, -1.0, 1.0), dtype=np.float32)
+        samples = np.ascontiguousarray(np.clip(samples, -1.0, 1.0), dtype=np.float32)
+    return samples, over_range
+
+
+def prepare_output(audio: np.ndarray, *, clip_policy: ClipPolicy = "clamp") -> np.ndarray:
+    samples, _ = _prepare_output(audio, clip_policy=clip_policy)
     return samples
 
 
@@ -136,20 +143,77 @@ def write_intermediate_wav(path: str | Path, audio: np.ndarray, sample_rate: int
     return _write_pcm(path, audio, sample_rate, 4)
 
 
-def write_wav(
-    path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy = "clamp"
+def _write_pcm16_file(
+    destination: Path, audio: np.ndarray, sample_rate: int, clip_policy: ClipPolicy
 ) -> Path:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _validate_sample_rate(sample_rate)
-    clipped = np.clip(prepare_output(audio, clip_policy=clip_policy), -1.0, 1.0)
-    pcm = np.round(clipped * 32767.0).astype("<i2")
+    if clip_policy not in ("clamp", "warn", "error"):
+        raise AudioValidationError(f"unknown clip policy: {clip_policy!r}")
+    pcm_samples = np.clip(audio, -1.0, 1.0) if clip_policy == "warn" else audio
+    pcm = np.round(pcm_samples * 32767.0).astype("<i2")
     with wave.open(str(destination), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(pcm.tobytes())
     return destination
+
+
+def _write_prepared_wav(
+    path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy
+) -> Path:
+    """Write a Composer-prepared waveform without repeating waveform validation."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_sample_rate(sample_rate)
+    return _write_pcm16_file(destination, audio, sample_rate, clip_policy)
+
+
+def write_wav(
+    path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy = "clamp"
+) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_sample_rate(sample_rate)
+    prepared = prepare_output(audio, clip_policy=clip_policy)
+    return _write_pcm16_file(destination, prepared, sample_rate, clip_policy)
+
+
+def _atomic_write_wav(
+    path: str | Path,
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    clip_policy: ClipPolicy,
+    prepared: bool,
+) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.tmp-", suffix=".wav", dir=destination.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        if prepared:
+            _write_prepared_wav(temporary, audio, sample_rate, clip_policy=clip_policy)
+        else:
+            write_wav(temporary, audio, sample_rate, clip_policy=clip_policy)
+        info = wav_info(temporary)
+        if info.sample_rate != sample_rate or info.channels != 1:
+            raise AudioValidationError("temporary WAV failed output geometry verification")
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _atomic_write_prepared_wav(
+    path: str | Path, audio: np.ndarray, sample_rate: int, *, clip_policy: ClipPolicy
+) -> Path:
+    """Atomically write a Composer-prepared waveform without revalidation."""
+    return _atomic_write_wav(path, audio, sample_rate, clip_policy=clip_policy, prepared=True)
 
 
 def atomic_write_wav(
@@ -160,21 +224,4 @@ def atomic_write_wav(
     clip_policy: ClipPolicy = "clamp",
 ) -> Path:
     """Write a WAV beside its destination and atomically replace the final path."""
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.tmp-", suffix=".wav", dir=destination.parent
-        )
-        os.close(descriptor)
-        temporary = Path(temporary_name)
-        write_wav(temporary, audio, sample_rate, clip_policy=clip_policy)
-        info = wav_info(temporary)
-        if info.sample_rate != sample_rate or info.channels != 1:
-            raise AudioValidationError("temporary WAV failed output geometry verification")
-        os.replace(temporary, destination)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return destination
+    return _atomic_write_wav(path, audio, sample_rate, clip_policy=clip_policy, prepared=False)

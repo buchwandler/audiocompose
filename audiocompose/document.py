@@ -5,7 +5,8 @@ from __future__ import annotations
 import importlib
 import os
 import stat
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
@@ -430,6 +431,8 @@ class DocumentComposeResult:
     duration_seconds: float
     diagnostics: tuple[dict[str, Any], ...] = ()
 
+    runtime: dict[str, float] = field(default_factory=dict, compare=False)
+
     @property
     def workspace(self) -> Path:
         return self.request.context.workspace
@@ -482,6 +485,7 @@ class DocumentComposeResult:
             "duration_seconds": self.duration_seconds,
             "sha256": self.sha256,
             "diagnostics": [dict(item) for item in self.diagnostics],
+            "runtime": dict(self.runtime),
         }
 
 
@@ -503,7 +507,6 @@ def _document_policy_dict(policy: Any) -> dict[str, Any]:
         "target_lufs": loudness.target_lufs,
         "true_peak_ceiling_dbtp": loudness.true_peak_ceiling_dbtp,
         "peak_policy": loudness.peak_policy,
-        "collect_metrics": loudness.collect_metrics,
     }
 
 
@@ -562,6 +565,12 @@ def _document_report_text(report: dict[str, Any]) -> str:
     lines.extend(("", "[output_geometry]"))
     for key in ("sha256", "sample_rate", "channels", "frames", "duration_seconds"):
         lines.append(f"{key} = {_document_toml_scalar(report[key])}")
+    runtime = report.get("runtime")
+    if isinstance(runtime, dict):
+        lines.extend(("", "[runtime]"))
+        for key, value in runtime.items():
+            if value is not None:
+                lines.append(f"{key} = {_document_toml_scalar(value)}")
     return "\n".join(lines) + "\n"
 
 
@@ -674,9 +683,9 @@ def compose_document(
         load_pause_policy,
         materialize_voicerender_job,
     )
-    from .job import load_job
+    from .job import _save_job_bundle
     from .model import OutputPolicy
-    from .wav import atomic_write_wav
+    from .wav import _atomic_write_prepared_wav
 
     if output_policy is not None and options is not None:
         raise ValueError("pass either output_policy or options, not both")
@@ -717,6 +726,8 @@ def compose_document(
         emphasis_policy=emphasis_policy,
     )
 
+    runtime: dict[str, float] = {}
+    materialization_started = time.perf_counter()
     try:
         job = materialize_voicerender_job(
             context.utterplan_path,
@@ -730,6 +741,7 @@ def compose_document(
             media_root=context.media_root,
             emphasis_policy=emphasis_policy,
         )
+        runtime["materialization_seconds"] = time.perf_counter() - materialization_started
     except PausePolicyError as exc:
         raise _error("pause_policy.invalid", str(exc), variant=variant) from exc
     except MediaResolutionError as exc:
@@ -744,7 +756,9 @@ def compose_document(
     from .integrations.renderplan_metadata import VOICERENDER_DIAGNOSTICS_SHA256
     from .wav import sha256_file
 
+    manifest_hash_started = time.perf_counter()
     manifest_sha256 = "sha256:" + sha256_file(context.manifest_path)
+    runtime["render_manifest_hash_seconds"] = time.perf_counter() - manifest_hash_started
     diagnostics_sha256 = str(job.source[VOICERENDER_DIAGNOSTICS_SHA256])
     manifest_id = str(job.source["render_manifest.manifest_id"])
     policy_dict = _document_policy_dict(policy)
@@ -754,21 +768,24 @@ def compose_document(
         context.audiojob_path.parent.mkdir(parents=True, exist_ok=True)
         if context.audiojob_path.is_symlink():
             raise OSError(f"refusing symlink AudioJob bundle: {context.audiojob_path}")
-        job.save(context.audiojob_path)
-        persisted_job = load_job(context.audiojob_path)
+        audiojob_save_started = time.perf_counter()
+        saved_bundle = _save_job_bundle(job, context.audiojob_path)
+        runtime["audiojob_save_seconds"] = time.perf_counter() - audiojob_save_started
     except Exception as exc:
         raise _error(
-            "output.write_failed", f"cannot save or verify AudioJob: {exc}", variant=variant
+            "output.write_failed", f"cannot save AudioJob: {exc}", variant=variant
         ) from exc
-    job_id = persisted_job.job_id
-    schema_version = persisted_job.schema_version
+    job_id = saved_bundle.job_id
+    schema_version = saved_bundle.schema_version
     if not isinstance(job_id, str) or not job_id:
         raise _error(
             "output.write_failed", "persisted AudioJob has no stable identity", variant=variant
         )
 
     prior = _read_document_report(context.report_path)
+    output_verification_started = time.perf_counter()
     prior_output = _document_wav_data(context.output_path)
+    runtime["final_hash_seconds"] = time.perf_counter() - output_verification_started
     current_identity = {
         "document_id": context.document_id,
         "variant": context.variant,
@@ -818,18 +835,25 @@ def compose_document(
             context.output_variant_dir.mkdir(parents=True, exist_ok=True)
             if context.output_variant_dir.is_symlink():
                 raise OSError(f"refusing symlink output directory: {context.output_variant_dir}")
+            composition_started = time.perf_counter()
             composition = Composer().compose(job, on_progress=on_progress)
-            atomic_write_wav(
+            runtime.update(composition.runtime)
+            runtime["composition_seconds"] = time.perf_counter() - composition_started
+            write_started = time.perf_counter()
+            _atomic_write_prepared_wav(
                 context.output_path,
                 composition.audio,
                 composition.sample_rate,
                 clip_policy=job.output.clip_policy,
             )
+            runtime["write_seconds"] = time.perf_counter() - write_started
         except Exception as exc:
             raise _error(
                 "output.write_failed", f"cannot write document WAV: {exc}", variant=variant
             ) from exc
+        output_verification_started = time.perf_counter()
         output_data = _document_wav_data(context.output_path)
+        runtime["final_hash_seconds"] = time.perf_counter() - output_verification_started
         if output_data is None:
             raise _error(
                 "output.write_failed", "written document WAV failed verification", variant=variant
@@ -847,6 +871,7 @@ def compose_document(
         "render_manifest": _report_relative(context.manifest_path, context.report_path),
         "render_diagnostics": _report_relative(context.diagnostics_path, context.report_path),
         "audiojob": _report_relative(context.audiojob_path, context.report_path),
+        "runtime": dict(runtime),
         **output_data,
     }
     try:
@@ -869,6 +894,7 @@ def compose_document(
         channels=output_data["channels"],
         frames=output_data["frames"],
         duration_seconds=output_data["duration_seconds"],
+        runtime=dict(runtime),
         diagnostics=diagnostics,
     )
 

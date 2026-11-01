@@ -228,6 +228,10 @@ def test_renderprofile_pause_policy_is_derived_recorded_and_persisted(tmp_path):
     from audiocompose import Silence, compose_book
     from audiocompose.job import load_job
 
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - Python 3.10
+        import tomli as tomllib
     workspace, variant, _, _ = _fixture_book(
         tmp_path,
         source_numbers=(5,),
@@ -241,6 +245,13 @@ def test_renderprofile_pause_policy_is_derived_recorded_and_persisted(tmp_path):
     assert result.to_dict()["pause_policy_id"].startswith("sha256:")
     assert item.audiojob == "chapter-0005.audiojob"
 
+    assert result.runtime["materialization_seconds"] >= 0.0
+    assert item.runtime is not None
+    assert item.runtime["composition_seconds"] >= 0.0
+    with result.report_path.open("rb") as stream:
+        report = tomllib.load(stream)
+    assert report["runtime"]["audiojob_save_seconds"] >= 0.0
+    assert report["runtime"]["write_seconds"] >= 0.0
     job = load_job(workspace / "audiocompose" / variant / item.audiojob)
     assert job.source["audiocompose.pause_policy_id"] == result.to_dict()["pause_policy_id"]
     assert job.source["audiocompose.pause_policy_provenance"] == "renderprofile"
@@ -570,13 +581,18 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
         import tomli as tomllib
 
     from audiocompose import BookComposeResult, compose_book
+    from audiocompose.book import BookComposeOptions
     from audiocompose.cli import main
 
     api_workspace, api_variant, _, _ = _fixture_book(tmp_path / "api", source_numbers=(7, 6, 5, 8))
     cli_workspace, cli_variant, _, _ = _fixture_book(tmp_path / "cli", source_numbers=(7, 6, 5, 8))
     progress = []
     api_result = compose_book(
-        api_workspace, variant=api_variant, chapters="5,8", on_progress=progress.append
+        api_workspace,
+        variant=api_variant,
+        chapters="5,8",
+        options=BookComposeOptions(collect_metrics=False),
+        on_progress=progress.append,
     )
     assert isinstance(api_result, BookComposeResult)
     assert [item.source_number for item in api_result.outcomes] == [5, 8]
@@ -660,7 +676,11 @@ def test_public_book_api_and_cli_have_matching_outputs_and_reuse(tmp_path, capsy
 
     reuse_progress = []
     api_reused = compose_book(
-        api_workspace, variant=api_variant, chapters="5,8", on_progress=reuse_progress.append
+        api_workspace,
+        variant=api_variant,
+        chapters="5,8",
+        options=BookComposeOptions(collect_metrics=False),
+        on_progress=reuse_progress.append,
     )
     assert main(cli_command) == 0
     cli_reused = _bundle_cli_data(capsys)

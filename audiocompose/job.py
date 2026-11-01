@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -439,8 +440,15 @@ def validate_job(
             validate_clip_geometry(item, audio)
 
 
-def save_job(job: AudioJob, path: str | Path) -> Path:
-    """Save an AudioJob bundle directory and return its manifest path."""
+@dataclass(frozen=True, slots=True)
+class SavedAudioJobBundle:
+    manifest_path: Path
+    job_id: str
+    schema_version: int
+
+
+def _save_job_bundle(job: AudioJob, path: str | Path) -> SavedAudioJobBundle:
+    """Save an AudioJob bundle and return its canonical persisted identity."""
     job.validate(verify_sources=False)
     bundle = Path(path).resolve()
     bundle.mkdir(parents=True, exist_ok=True)
@@ -492,7 +500,8 @@ def save_job(job: AudioJob, path: str | Path) -> Path:
             job.schema_version,
         )
         serialized = job_to_dict(saved_job, base_dir=str(stage), verify_sources=False)
-        serialized["job_id"] = _job_id(serialized)
+        saved_job_id = _job_id(serialized)
+        serialized["job_id"] = saved_job_id
         staged_manifest = stage / "audiojob.json"
         staged_manifest.write_text(
             json.dumps(serialized, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -516,7 +525,16 @@ def save_job(job: AudioJob, path: str | Path) -> Path:
                 os.replace(previous_parts, parts)
             raise
 
-    return manifest
+    return SavedAudioJobBundle(
+        manifest_path=manifest,
+        job_id=saved_job_id,
+        schema_version=saved_job.schema_version,
+    )
+
+
+def save_job(job: AudioJob, path: str | Path) -> Path:
+    """Save an AudioJob bundle directory and return its manifest path."""
+    return _save_job_bundle(job, path).manifest_path
 
 
 def load_job(path: str | Path, *, verify_sources: bool = True) -> AudioJob:

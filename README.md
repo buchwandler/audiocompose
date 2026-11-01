@@ -24,11 +24,11 @@ Composer().to_wav(job, "final.wav")
 
 ## DSP behavior and reproducibility
 
-AudioCompose delegates band-limited resampling, static WSOLA time/pitch processing, and `RatePitchEnvelope` DSP to AudioSig. The envelope API requires `audiosig>=0.1.6,<0.2`. Contiguous static `Tempo` and `PitchShift` operations remain fused unless a `Gain` or fade separates them. Each envelope is one complete AudioSig call. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
+AudioCompose delegates band-limited resampling, static WSOLA time/pitch processing, and `RatePitchEnvelope` DSP to AudioSig. The envelope API requires `audiosig>=0.1.9,<0.2`. Contiguous static `Tempo` and `PitchShift` operations remain fused unless a `Gain` or fade separates them. Each envelope is one complete AudioSig call. Numeric operation semantics and timeline mapping are the compatibility contract; exact PCM samples may change between AudioCompose or AudioSig versions.
 
 ## Composition estimates and progress
 
-`estimate_composition(job, sample_rate=None)` returns a deterministic `CompositionEstimate` before processing audio. It reports per-item and total output frames, duration, and an approximate frame-pass `total_work_units`; `unknown_items` contains zero-based item indexes whose source geometry is unavailable. If any item geometry is unknown, total frames, duration, and work remain unknown rather than being guessed. Work units account for source loading/integrity verification, grouped operations, resampling, item output, assembly, optional complete-output loudness, and final output preparation. They are a planning metric—not seconds or a promise of CPU time—and the model may evolve.
+`estimate_composition(job, sample_rate=None)` returns a deterministic `CompositionEstimate` before processing audio. It reports per-item and total output frames, duration, and an approximate frame-pass `total_work_units`; `unknown_items` contains zero-based item indexes whose source geometry is unavailable. If any item geometry is unknown, total frames, duration, and work remain unknown rather than being guessed. Work units account for source loading/integrity verification, grouped operations, resampling, fused item placement, optional complete-output loudness, and final output preparation. They are a planning metric—not seconds or a promise of CPU time—and the model may evolve.
 
 `Composer.compose()` accepts an optional synchronous `on_progress` callback. It receives typed `CompositionProgress` events for item loading, operations, resampling, assembly, complete-output loudness, and completion. When the estimate is known, events include monotonic `completed_work_units`, `total_work_units`, and `fraction`; otherwise the fraction and total stay `None`. Events carry generic item metadata and never print, alter the AudioJob, or affect composition identity.
 
@@ -202,6 +202,8 @@ A book manifest composes selected chapters (`--chapters all|N|N-M|...`); a docum
 
 Defaults are `renderplan/<variant>`, `voicerender/<variant>`, and `audiocompose/<variant>` beneath the workspace. Book workspaces save one AudioJob per selected chapter below the `--save-audiojobs` root; document workspaces save their single AudioJob below that root. Batch output and status are re-inspected from persisted artifacts after composition; the batch layer only selects and orchestrates calls to the existing `compose_bundle()` facade, so kind-specific reports, verification, and reuse policies remain unchanged.
 
+Bundle production skips optional loudness diagnostics by default while retaining the default -1 dBTP true-peak ceiling. Use `--collect-metrics` to request integrated LUFS and sample-peak diagnostics, or `--no-collect-metrics` to skip them explicitly. A requested `--target-lufs` still requires integrated loudness for gain calculation even with metrics disabled. Diagnostic collection does not affect book/document output-policy identity.
+
 The public `compose_bundle(bundle, *, variant, options=...)` facade and `BundleComposeOptions` expose single-variant manifest-based dispatch. `BundleComposeResult` wraps the kind-specific result and exposes `kind`, `value`, `exit_code`, and neutral JSON via `to_dict()`. `audiocompose.list_bundle_variants(bundle)` returns typed `BundleVariantsResult` and `BundleVariant` values; the read-only listing is the state source for the public `compose_bundle_batch(bundle, ...)` API. Batch results expose per-variant initial/final state, attempt status, errors, and aggregate counts.
 
 ```python
@@ -212,6 +214,18 @@ for variant in result.variants:
     print(variant.name, variant.status)
 raise SystemExit(result.exit_code)
 ```
+
+## Runtime diagnostics and performance benchmark
+
+`CompositionResult.runtime` exposes composition, output-preparation, and AudioSig loudness-stage durations. Book and document reports include an optional `[runtime]` section for materialization, AudioJob persistence, composition, WAV writing, and output hashing. These measurements are diagnostic only and are excluded from job IDs, output-policy IDs, and stable provenance.
+
+Run the short synthetic benchmark from the repository root:
+
+```bash
+python benchmarks/benchmark_bundle_compose.py --smoke
+```
+
+Omitting `--smoke` runs the representative 24 kHz mono chapter (400 speech clips and 400 pauses, about 20 minutes). The JSON compares four metric/target/true-peak policies and reports source load/hash, persistence/identity, item placement, assembly, loudness, output preparation, WAV write, final hash, total time, and process peak RSS. RenderManifest verification is marked not measured because the benchmark starts from synthetic AudioJob inputs. Timings are observations only; there are no wall-clock assertions.
 
 ## Debugging and analysis
 
@@ -237,7 +251,7 @@ See [the v0.2 migration guide](docs/migration-v0.2.md) for breaking import, pers
 
 `AudioSpan` and `ComposedSpan` carry optional producer-defined IDs and JSON-safe metadata. AudioCompose preserves these opaque values while mapping sample coordinates through operations and resampling; it never interprets the metadata.
 
-Composition completes in this order: load clips, apply operations, map anchors and spans, resample, concatenate clips and explicit silence, then measure and apply complete-output loudness once. Loudness changes waveform amplitude only, so item ranges, markers, and spans remain stable.
+Composition completes in this order: load clips, apply operations, map anchors and spans, resample, place clips and explicit silence into a preallocated known-geometry output (falling back to concatenation when geometry is unknown), then measure and apply complete-output loudness once. Loudness changes waveform amplitude only, so item ranges, markers, and spans remain stable.
 
 For producer frame parity, quantize a duration to producer frames before constructing a job: `frames = int(seconds * producer_rate)` and `seconds = frames / producer_rate`. AudioCompose keeps its public rounded seconds-to-samples rule and does not add engine-specific silence types.
 

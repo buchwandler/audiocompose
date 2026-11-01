@@ -334,6 +334,9 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     assert first.output.is_file()
     assert load_job(first.audiojob).job_id
     assert first.to_dict()["format"] == "audiocompose" + "-document-result"
+    assert first.runtime["materialization_seconds"] >= 0.0
+    assert first.runtime["audiojob_save_seconds"] >= 0.0
+    assert first.to_dict()["runtime"] == first.runtime
     with first.report_path.open("rb") as stream:
         report = tomllib.load(stream)
     assert report["format"] == "audiocompose" + "-document-report"
@@ -341,6 +344,9 @@ def test_compose_document_writes_job_report_and_reuses_verified_output(tmp_path:
     assert report["pause_policy_provenance"] == "renderprofile"
     assert report["output_geometry"]["sha256"] == first.sha256
 
+    assert report["runtime"]["composition_seconds"] >= 0.0
+    assert report["runtime"]["write_seconds"] >= 0.0
+    assert report["runtime"]["final_hash_seconds"] >= 0.0
     output_before_reuse = first.output.stat()
     reuse_events = []
     reused = compose_document(workspace, variant=variant, on_progress=reuse_events.append)
@@ -522,6 +528,32 @@ def test_document_package_root_exports_stable_api() -> None:
     assert DocumentComposeRequest is not None
     assert DocumentComposeResult is not None
 
+    from audiocompose.book import (
+        BookComposeOptions,
+        _output_policy_dict,
+        default_book_output_policy,
+    )
+    from audiocompose.document import (
+        DocumentComposeOptions,
+        _document_policy_dict,
+        _document_policy_id,
+        default_document_output_policy,
+    )
+
+    book_on = default_book_output_policy(BookComposeOptions(collect_metrics=True))
+    book_off = default_book_output_policy(BookComposeOptions(collect_metrics=False))
+    assert book_on.loudness.collect_metrics is True
+    assert book_off.loudness.collect_metrics is False
+    assert _output_policy_dict(book_on) == _output_policy_dict(book_off)
+
+    document_on = default_document_output_policy(DocumentComposeOptions(collect_metrics=True))
+    document_off = default_document_output_policy(DocumentComposeOptions(collect_metrics=False))
+    assert document_on.loudness.collect_metrics is True
+    assert document_off.loudness.collect_metrics is False
+    assert _document_policy_id(_document_policy_dict(document_on)) == _document_policy_id(
+        _document_policy_dict(document_off)
+    )
+
 
 def test_bundle_compose_document_cli_json_human_overrides_and_errors(
     tmp_path: Path, capsys
@@ -569,6 +601,9 @@ def test_bundle_compose_document_cli_json_human_overrides_and_errors(
     assert result["output"] == str(custom_output / variant / f"{DOCUMENT_ID}.wav")
     assert result["audiojob"] == str(audiojobs_root / f"{DOCUMENT_ID}.audiojob")
     assert (audiojobs_root / f"{DOCUMENT_ID}.audiojob").is_dir()
+    from audiocompose.job import load_job
+
+    assert load_job(result["audiojob"]).output.loudness.collect_metrics is False
     assert result["renderplan_root"] == str(custom_renderplan / variant)
     assert result["voicerender_root"] == str(custom_voicerender / variant)
 

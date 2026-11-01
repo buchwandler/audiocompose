@@ -19,6 +19,7 @@ ProgressEventKind = Literal[
     "assembly_started",
     "assembly_completed",
     "loudness_started",
+    "loudness_progress",
     "loudness_completed",
     "compose_completed",
 ]

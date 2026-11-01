@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -12,7 +13,7 @@ from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .integrations.renderplan import load_and_materialize_renderplan_job
 from .model import AudioJob, CompositionResult, OutputPolicy
 from .progress import CompositionProgressCallback
-from .wav import atomic_write_wav
+from .wav import _atomic_write_prepared_wav
 
 EmphasisPolicy = Literal["segment_fallback", "strict"]
 
@@ -52,6 +53,8 @@ class RenderPlanComposeResult:
     timeline: tuple[Mapping[str, Any], ...]
     diagnostics: tuple[CompositionDiagnostic, ...]
     audiojob: Path | None = None
+
+    runtime: Mapping[str, float] = field(default_factory=dict, compare=False)
 
 
 def _timeline(job: AudioJob, composition: CompositionResult) -> tuple[Mapping[str, Any], ...]:
@@ -192,6 +195,8 @@ def compose_renderplan(
     if resolved_media_root is None:
         resolved_media_root = request.plan.absolute().parent
 
+    runtime: dict[str, float] = {}
+    materialization_started = time.perf_counter()
     job = load_and_materialize_renderplan_job(
         request.plan,
         request.manifest,
@@ -200,14 +205,25 @@ def compose_renderplan(
         media_root=resolved_media_root,
         emphasis_policy=request.emphasis_policy,
     )
-    audiojob_path = job.save(request.save_audiojob) if request.save_audiojob is not None else None
+    runtime["materialization_seconds"] = time.perf_counter() - materialization_started
+    if request.save_audiojob is not None:
+        save_started = time.perf_counter()
+        audiojob_path = job.save(request.save_audiojob)
+        runtime["audiojob_save_seconds"] = time.perf_counter() - save_started
+    else:
+        audiojob_path = None
+    composition_started = time.perf_counter()
     composition = Composer().compose(job, on_progress=on_progress)
-    output_path = atomic_write_wav(
+    runtime.update(composition.runtime)
+    runtime["composition_seconds"] = time.perf_counter() - composition_started
+    write_started = time.perf_counter()
+    output_path = _atomic_write_prepared_wav(
         request.output,
         composition.audio,
         composition.sample_rate,
         clip_policy=job.output.clip_policy,
     )
+    runtime["write_seconds"] = time.perf_counter() - write_started
     return RenderPlanComposeResult(
         output=output_path,
         plan_id=str(job.source["renderplan.plan_id"]),
@@ -217,6 +233,7 @@ def compose_renderplan(
         duration_seconds=composition.duration_seconds,
         timeline=_timeline(job, composition),
         diagnostics=_emphasis_diagnostics(job),
+        runtime=runtime,
         audiojob=Path(audiojob_path) if audiojob_path is not None else None,
     )
 

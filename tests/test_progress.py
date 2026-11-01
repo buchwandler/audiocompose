@@ -78,9 +78,22 @@ def test_lifecycle_sequence_for_clip_without_operations() -> None:
         "assembly_started",
         "assembly_completed",
         "loudness_started",
+        "loudness_progress",
+        "loudness_progress",
         "loudness_completed",
         "compose_completed",
     ]
+    loudness_progress = [event for event in events if event.kind == "loudness_progress"]
+    assert [event.details["phase"] for event in loudness_progress] == [
+        "integrated_loudness",
+        "true_peak",
+    ]
+    assert [event.details["phase_fraction"] for event in loudness_progress] == [1.0, 1.0]
+    loudness_started = next(event for event in events if event.kind == "loudness_started")
+    loudness_completed = next(event for event in events if event.kind == "loudness_completed")
+    assert loudness_completed.completed_work_units == (
+        loudness_started.completed_work_units + 2 * loudness_started.input_frames
+    )
     assert events[0].item_index is None
     assert events[1].item_index == 0
     assert events[1].completed_items == 0
@@ -387,9 +400,134 @@ def test_estimate_composition_reports_known_geometry_and_frame_pass_work() -> No
     assert estimate.item_output_frames == (10,)
     assert estimate.total_output_frames == 10
     assert estimate.total_audio_seconds == pytest.approx(1.0)
-    # source load + item availability + assembly + final output preparation
+    # source load + item availability + loudness phases + final output preparation
     assert estimate.total_work_units == 50.0
     assert estimate.unknown_items == ()
+
+
+def test_estimate_composition_counts_selected_loudness_phases() -> None:
+    clip = AudioClip("clip", AudioBufferSource(np.ones(10, dtype=np.float32), 10))
+    policies = (
+        (
+            LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=False),
+            30.0,
+        ),
+        (
+            LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=-1.0, collect_metrics=False),
+            40.0,
+        ),
+        (
+            LoudnessPolicy(target_lufs=-18.0, true_peak_ceiling_dbtp=None, collect_metrics=False),
+            40.0,
+        ),
+        (LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=True), 50.0),
+    )
+
+    for policy, expected_work in policies:
+        job = AudioJob((clip,), output=OutputPolicy(sample_rate=10, loudness=policy))
+        assert estimate_composition(job).total_work_units == expected_work
+
+    low_rate_policy = LoudnessPolicy(
+        target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=True
+    )
+    low_rate_job = AudioJob(
+        (AudioClip("low-rate", AudioBufferSource(np.ones(4, dtype=np.float32), 4)),),
+        output=OutputPolicy(sample_rate=4, loudness=low_rate_policy),
+    )
+    low_rate_events = []
+    Composer().compose(low_rate_job, on_progress=low_rate_events.append)
+    assert estimate_composition(low_rate_job).total_work_units == 16.0
+    assert [
+        event.details["phase"] for event in low_rate_events if event.kind == "loudness_progress"
+    ] == ["true_peak"]
+
+
+def test_composer_preallocates_known_geometry_and_frees_temporary_arrays(
+    tmp_path, monkeypatch
+) -> None:
+    import weakref
+
+    import audiocompose.composer as composer_module
+    from audiocompose.alignment import AudioAnchor, AudioSpan
+    from audiocompose.sources import AudioBufferSource
+
+    no_loudness = LoudnessPolicy(
+        target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=False
+    )
+    output = OutputPolicy(sample_rate=4, loudness=no_loudness)
+    first_source = AudioBufferSource(np.array([0.125, 0.25], dtype=np.float32), 4)
+    second_source = AudioBufferSource(np.array([-0.125, -0.25], dtype=np.float32), 4)
+    known_job = AudioJob(
+        (
+            AudioClip(
+                "first",
+                first_source,
+                anchors=(AudioAnchor("first-mark", 1),),
+                spans=(AudioSpan(0, 2, 0, 2, id="first-span"),),
+            ),
+            AudioClip(
+                "second",
+                second_source,
+                anchors=(AudioAnchor("second-mark", 0),),
+                spans=(AudioSpan(0, 2, 0, 2, id="second-span"),),
+            ),
+        ),
+        output=output,
+    )
+    unknown_path = tmp_path / "unknown.wav"
+    write_wav(unknown_path, np.array([0.125, -0.25], dtype=np.float32), 4)
+    unknown_job = AudioJob((AudioClip("unknown", AudioFileSource(unknown_path)),), output=output)
+
+    original_concatenate = composer_module.np.concatenate
+    concatenate_calls = []
+
+    def counted_concatenate(arrays, *args, **kwargs):
+        concatenate_calls.append(len(arrays))
+        return original_concatenate(arrays, *args, **kwargs)
+
+    buffer_refs = []
+    original_buffer_load = AudioBufferSource.load
+
+    def counted_buffer_load(self):
+        audio, rate = original_buffer_load(self)
+        buffer_refs.append(weakref.ref(audio))
+        return audio, rate
+
+    file_refs = []
+    original_file_load = AudioFileSource.load
+
+    def counted_file_load(self):
+        audio, rate = original_file_load(self)
+        file_refs.append(weakref.ref(audio))
+        return audio, rate
+
+    monkeypatch.setattr(composer_module.np, "concatenate", counted_concatenate)
+    monkeypatch.setattr(AudioBufferSource, "load", counted_buffer_load)
+    monkeypatch.setattr(AudioFileSource, "load", counted_file_load)
+
+    known_result = Composer().compose(known_job)
+    assert concatenate_calls == []
+    assert [(item.item_id, item.start_sample, item.end_sample) for item in known_result.items] == [
+        ("first", 0, 2),
+        ("second", 2, 4),
+    ]
+    assert [(marker.id, marker.sample_offset) for marker in known_result.markers] == [
+        ("first-mark", 1),
+        ("second-mark", 2),
+    ]
+    assert [(span.id, span.sample_start, span.sample_end) for span in known_result.spans] == [
+        ("first-span", 0, 2),
+        ("second-span", 2, 4),
+    ]
+    np.testing.assert_array_equal(
+        known_result.audio, np.array([0.125, 0.25, -0.125, -0.25], dtype=np.float32)
+    )
+    assert all(reference() is None for reference in buffer_refs)
+
+    unknown_result = Composer().compose(unknown_job)
+    assert concatenate_calls == [1]
+    np.testing.assert_array_equal(unknown_result.audio, np.array([0.125, -0.25], dtype=np.float32))
+    assert all(reference() is None for reference in file_refs)
 
 
 def test_work_fraction_is_monotonic_and_completes_at_one() -> None:
@@ -406,6 +544,9 @@ def test_work_fraction_is_monotonic_and_completes_at_one() -> None:
     assert fractions == sorted(fractions)
     assert fractions[-1] == 1.0
     assert all(event.total_work_units == 50.0 for event in events)
+    assembly_started = next(event for event in events if event.kind == "assembly_started")
+    assembly_completed = next(event for event in events if event.kind == "assembly_completed")
+    assert assembly_started.completed_work_units == assembly_completed.completed_work_units
 
 
 def test_unknown_geometry_keeps_work_total_and_fraction_unknown(tmp_path) -> None:
@@ -437,7 +578,7 @@ def test_fused_temporal_operations_count_one_processing_group() -> None:
     estimate = estimate_composition(job)
 
     output_frames = round(100 / 0.5)
-    # source + one fused DSP call, item availability, assembly, loudness, finalization
+    # Source + fused DSP, item availability, two loudness phases, finalization.
     assert estimate.total_work_units == 100 + 100 + 4 * output_frames
 
 

@@ -47,6 +47,7 @@ class BundleComposeOptions:
     target_lufs: float | None = None
     true_peak_ceiling_dbtp: float | None = None
     peak_policy: PeakPolicy | None = None
+    collect_metrics: bool | None = None
     save_audiojobs: str | Path | None = None
     force: bool = False
     fail_fast: bool = False
@@ -82,6 +83,7 @@ def compose_bundle(
     """Dispatch a root workspace to its existing composition implementation."""
     identity = load_bundle_identity(bundle)
     selected = options or BundleComposeOptions()
+    collect_metrics = selected.collect_metrics if selected.collect_metrics is not None else False
     value: Any
     if identity.kind == "book":
         from .book import BookComposeError, BookComposeOptions, compose_book
@@ -98,6 +100,7 @@ def compose_bundle(
                     target_lufs=selected.target_lufs,
                     true_peak_ceiling_dbtp=selected.true_peak_ceiling_dbtp,
                     peak_policy=selected.peak_policy,
+                    collect_metrics=collect_metrics,
                 ),
                 renderplan_root=selected.renderplan_root,
                 voicerender_root=selected.voicerender_root,
@@ -138,6 +141,7 @@ def compose_bundle(
                     target_lufs=selected.target_lufs,
                     true_peak_ceiling_dbtp=selected.true_peak_ceiling_dbtp,
                     peak_policy=selected.peak_policy,
+                    collect_metrics=collect_metrics,
                 ),
                 renderplan_root=selected.renderplan_root,
                 voicerender_root=selected.voicerender_root,

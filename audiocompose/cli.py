@@ -14,7 +14,7 @@ from .composer import Composer
 from .errors import AudioComposeError
 from .job import validate_clip_geometry
 from .model import AudioClip, AudioJob, CompositionResult, OutputPolicy, Silence
-from .wav import read_wav, wav_info, write_wav
+from .wav import _write_prepared_wav, read_wav, wav_info
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
@@ -28,6 +28,23 @@ def _add_progress(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="render progress to stderr (default: auto)",
     )
+
+
+def _add_collect_metrics(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--collect-metrics",
+        dest="collect_metrics",
+        action="store_true",
+        help="collect optional loudness diagnostics",
+    )
+    group.add_argument(
+        "--no-collect-metrics",
+        dest="collect_metrics",
+        action="store_false",
+        help="skip optional loudness diagnostics",
+    )
+    parser.set_defaults(collect_metrics=None)
 
 
 def _add_analysis_options(parser: argparse.ArgumentParser) -> None:
@@ -94,6 +111,7 @@ def _parser() -> argparse.ArgumentParser:
     compose_renderplan.add_argument("--target-lufs", type=float)
     compose_renderplan.add_argument("--true-peak-ceiling-dbtp", type=float)
     compose_renderplan.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    _add_collect_metrics(compose_renderplan)
     compose_renderplan.add_argument(
         "--explain", action="store_true", help="print ordered RenderPlan provenance"
     )
@@ -128,6 +146,7 @@ def _parser() -> argparse.ArgumentParser:
     bundle_compose.add_argument("--target-lufs", type=float)
     bundle_compose.add_argument("--true-peak-ceiling-dbtp", type=float)
     bundle_compose.add_argument("--peak-policy", choices=("reduce_gain", "error"))
+    _add_collect_metrics(bundle_compose)
     bundle_compose.add_argument(
         "--save-audiojobs",
         help="save intermediate AudioJobs (batch mode namespaces this root by variant)",
@@ -285,6 +304,7 @@ def _output_policy_from_args(args: argparse.Namespace) -> OutputPolicy:
             target_lufs=args.target_lufs,
             true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
             peak_policy=args.peak_policy,
+            collect_metrics=args.collect_metrics,
         )
     )
 
@@ -572,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                     target_lufs=args.target_lufs,
                     true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
                     peak_policy=args.peak_policy,
+                    collect_metrics=args.collect_metrics,
                     save_audiojobs=args.save_audiojobs,
                     force=args.force,
                     fail_fast=args.fail_fast,
@@ -605,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_lufs=args.target_lufs,
                 true_peak_ceiling_dbtp=args.true_peak_ceiling_dbtp,
                 peak_policy=args.peak_policy,
+                collect_metrics=args.collect_metrics,
                 save_audiojobs=args.save_audiojobs,
                 force=args.force,
                 fail_fast=args.fail_fast,
@@ -689,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                 "duration_seconds": api_result.duration_seconds,
                 "timeline": timeline,
                 "emphasis_policy": args.emphasis_policy,
+                "runtime": dict(getattr(api_result, "runtime", {})),
                 "diagnostics": diagnostics,
             }
             if api_result.audiojob is not None:
@@ -730,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
             composition = Composer().compose(job, on_progress=compose_progress_callback)
             if progress_renderer is not None:
                 progress_renderer.set_phase("writing output")
-            output_path = write_wav(
+            output_path = _write_prepared_wav(
                 args.output,
                 composition.audio,
                 composition.sample_rate,
@@ -751,6 +774,7 @@ def main(argv: list[str] | None = None) -> int:
                 "sample_rate": sample_rate,
                 "frames": frames,
                 "duration_seconds": frames / sample_rate,
+                "runtime": dict(composition.runtime),
             }
             if args.json:
                 print(json.dumps(result, indent=2, sort_keys=True))

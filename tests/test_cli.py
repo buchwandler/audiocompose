@@ -115,6 +115,7 @@ def _composition_event(
     completed_work: float,
     *,
     completed_items: int = 0,
+    details: dict[str, object] | None = None,
 ) -> CompositionProgress:
     return CompositionProgress(
         kind=kind,
@@ -124,6 +125,7 @@ def _composition_event(
         completed_work_units=completed_work,
         total_work_units=100.0,
         fraction=completed_work / 100.0,
+        details=details or {},
     )
 
 
@@ -153,6 +155,47 @@ def test_progress_renderer_tty_detection_eta_and_monotonic_output() -> None:
     json_tty = CliProgressRenderer(mode="auto", json_mode=True, stream=TTYStream())
     assert not json_tty.enabled
     assert not CliProgressRenderer(mode="auto", stream=io.StringIO()).enabled
+
+
+def test_progress_renderer_suppresses_eta_during_loudness() -> None:
+    clock = FakeClock()
+    stream = TTYStream()
+    renderer = CliProgressRenderer(mode="auto", stream=stream, clock=clock)
+    renderer.on_composition_progress(_composition_event("compose_started", 0.0))
+    clock.advance(2.0)
+    renderer.on_composition_progress(_composition_event("item_completed", 20.0))
+    assert "ETA" in stream.getvalue()
+
+    clock.advance(0.5)
+    renderer.on_composition_progress(
+        _composition_event(
+            "loudness_started",
+            30.0,
+            details={
+                "target_lufs": -23.0,
+                "collect_metrics": False,
+                "true_peak_ceiling_dbtp": -1.0,
+            },
+        )
+    )
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "analyzing loudness" in frame
+    assert "ETA" not in frame
+
+    clock.advance(0.5)
+    renderer.on_composition_progress(
+        _composition_event("loudness_progress", 40.0, details={"phase": "true_peak"})
+    )
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "checking true peak" in frame
+    assert "ETA" not in frame
+
+    clock.advance(0.5)
+    renderer.on_composition_progress(_composition_event("loudness_completed", 50.0))
+    frame = stream.getvalue().rsplit("\r", 1)[-1]
+    assert "composing" in frame
+    assert "ETA" in frame
+    renderer.finish(success=True)
 
 
 def test_progress_renderer_keeps_primary_fields_on_narrow_tty(monkeypatch) -> None:
@@ -371,6 +414,7 @@ def test_generic_compose_progress_modes_and_json_stdout(tmp_path: Path, capsys) 
     forced_stderr = captured.err
     assert "composing" in forced_stderr
     assert "writing output" in forced_stderr
+    assert "finalizing waveform" in forced_stderr
     assert "verifying output" in forced_stderr
     assert "elapsed" in forced_stderr
     assert "\r" not in forced_stderr
@@ -393,8 +437,10 @@ def test_renderplan_cli_progress_stays_on_stderr_with_json(
     import audiocompose
 
     output = tmp_path / "renderplan.wav"
+    compose_kwargs = {}
 
     def fake_compose(plan, **kwargs):
+        compose_kwargs.update(kwargs)
         callback = kwargs["on_progress"]
         callback(_composition_event("compose_started", 0.0))
         callback(_composition_event("compose_completed", 100.0, completed_items=1))
@@ -421,6 +467,7 @@ def test_renderplan_cli_progress_stays_on_stderr_with_json(
                 str(tmp_path),
                 "--output",
                 str(output),
+                "--collect-metrics",
                 "--json",
                 "--progress",
                 "always",
@@ -430,6 +477,7 @@ def test_renderplan_cli_progress_stays_on_stderr_with_json(
     )
     captured = capsys.readouterr()
     result = json.loads(captured.out)
+    assert compose_kwargs["output_policy"].loudness.collect_metrics is True
     assert result["output"] == str(output)
     progress = captured.err
     assert "preparing handoff" in progress
@@ -689,24 +737,41 @@ def test_bundle_compose_optional_variant_routes_batch_and_preserves_single_path(
     monkeypatch.setattr(batch_module, "compose_bundle_batch", batch)
     monkeypatch.setattr(bundle_module, "compose_bundle", single)
 
-    assert main(["bundle", "compose", str(root), "--json", "--progress", "always"]) == 0
+    assert (
+        main(
+            ["bundle", "compose", str(root), "--collect-metrics", "--json", "--progress", "always"]
+        )
+        == 0
+    )
     batch_output = capsys.readouterr()
     assert json.loads(batch_output.out)["format"] == "audiocompose-bundle-batch-result"
     assert batch_output.out.count("{") >= 1
     assert batch_output.err
     batch.assert_called_once()
+    assert batch.call_args.kwargs["collect_metrics"] is True
     single.assert_not_called()
     assert batch.call_args.kwargs["on_progress"] is not None
 
     assert (
         main(
-            ["bundle", "compose", str(root), "--variant", "target", "--json", "--progress", "never"]
+            [
+                "bundle",
+                "compose",
+                str(root),
+                "--variant",
+                "target",
+                "--no-collect-metrics",
+                "--json",
+                "--progress",
+                "never",
+            ]
         )
         == 0
     )
     single_output = capsys.readouterr()
     assert json.loads(single_output.out)["format"] == "audiocompose-bundle-result"
     assert single.call_args.kwargs["variant"] == "target"
+    assert single.call_args.kwargs["options"].collect_metrics is False
     batch.assert_called_once()
 
 
@@ -960,3 +1025,13 @@ def test_batch_progress_adapter_routes_book_events_to_book_renderer() -> None:
     renderer.set_context.assert_called_once_with("1/1 variant-a")
     renderer.on_book_progress.assert_called_once_with(event)
     renderer.on_composition_progress.assert_not_called()
+
+
+def test_collect_metrics_cli_pair_is_tristate() -> None:
+    from audiocompose.cli import _parser
+
+    parser = _parser()
+    base = ["bundle", "compose", "workspace"]
+    assert parser.parse_args(base).collect_metrics is None
+    assert parser.parse_args([*base, "--collect-metrics"]).collect_metrics is True
+    assert parser.parse_args([*base, "--no-collect-metrics"]).collect_metrics is False

@@ -7,7 +7,7 @@ from numbers import Real
 from typing import Literal
 
 import numpy as np
-from audiosig import AudioSignalError, analyze_loudness
+from audiosig import AudioSignalError, LoudnessProgressCallback, analyze_loudness
 from audiosig import LoudnessAnalysis as AudioSigAnalysis
 
 from .errors import AudioValidationError, CompositionError
@@ -93,6 +93,8 @@ def apply_complete_output_loudness(
     audio: np.ndarray,
     sample_rate: int,
     policy: LoudnessPolicy,
+    *,
+    on_progress: LoudnessProgressCallback | None = None,
 ) -> LoudnessResult:
     """Measure and normalize the complete output waveform with one analysis.
 
@@ -138,6 +140,7 @@ def apply_complete_output_loudness(
                 integrated=integrated,
                 sample_peak=sample_peak,
                 true_peak=true_peak,
+                on_progress=on_progress,
             )
         except AudioSignalError as exc:
             raise AudioValidationError(f"AudioSig loudness measurement failed: {exc}") from exc

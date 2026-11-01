@@ -176,6 +176,7 @@ def test_forwards_all_options_and_namespaces_audiojobs(tmp_path: Path, monkeypat
         target_lufs=-18.0,
         true_peak_ceiling_dbtp=-1.0,
         peak_policy="reduce_gain",
+        collect_metrics=True,
         save_audiojobs=tmp_path / "jobs",
         force=True,
         fail_fast=True,
@@ -197,6 +198,7 @@ def test_forwards_all_options_and_namespaces_audiojobs(tmp_path: Path, monkeypat
     assert options.target_lufs == -18.0
     assert options.true_peak_ceiling_dbtp == -1.0
     assert options.peak_policy == "reduce_gain"
+    assert options.collect_metrics is True
     assert options.save_audiojobs == tmp_path / "jobs" / "profile-a"
     assert options.force is True
     assert options.fail_fast is True
@@ -735,3 +737,37 @@ def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
     assert report_items["chapter-0005"]["status"] == "reused"
     assert report_items["chapter-0006"]["status"] == "written"
     assert (workspace / "audiocompose" / variant / "chapter-0006.wav").is_file()
+
+
+@pytest.mark.parametrize("kind", ["book", "document"])
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(None, False), (True, True), (False, False)],
+)
+def test_bundle_facade_routes_collect_metrics_with_off_default(
+    tmp_path: Path, monkeypatch, kind: str, requested: bool | None, expected: bool
+) -> None:
+    import audiocompose.book as book_module
+    import audiocompose.bundle as bundle_module
+    import audiocompose.document as document_module
+    from audiocompose.bundle import BundleComposeOptions, compose_bundle
+
+    captured = {}
+    monkeypatch.setattr(
+        bundle_module,
+        "load_bundle_identity",
+        lambda _: SimpleNamespace(kind=kind, root=tmp_path),
+    )
+
+    def fake_compose(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(exit_code=0)
+
+    monkeypatch.setattr(book_module, "compose_book", fake_compose)
+    monkeypatch.setattr(document_module, "compose_document", fake_compose)
+    compose_bundle(
+        tmp_path,
+        variant="variant-a",
+        options=BundleComposeOptions(collect_metrics=requested),
+    )
+    assert captured["options"].collect_metrics is expected

@@ -253,6 +253,7 @@ def main() -> None:
     assert (0, 6, 4) <= _version_tuple(version("utterplan")) < (0, 7, 0)
     assert _version_tuple(version("voicerender")) >= (0, 2, 4)
     assert _version_tuple(version("voicerender")) < (0, 3, 0)
+    assert _version_tuple(version("audiosig")) >= (0, 1, 9)
 
     register_adapter(_Adapter())
     root = Path(tempfile.mkdtemp(prefix="audiocompose-voicerender-smoke-"))

@@ -202,6 +202,8 @@ class CompositionResult:
 
     loudness: LoudnessResult | None = None
 
+    runtime: Mapping[str, float] = field(default_factory=dict, compare=False)
+
     @property
     def duration_seconds(self) -> float:
         return len(self.audio) / self.sample_rate

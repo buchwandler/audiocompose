@@ -147,6 +147,16 @@ def test_compose_uses_one_analysis_and_emits_phase_timings(monkeypatch: pytest.M
     assert completed.details["gain_seconds"] >= 0.0
     assert completed.details["post_gain_metrics_seconds"] >= 0.0
 
+    assert result.runtime["composition_seconds"] >= 0.0
+    assert result.runtime["output_preparation_seconds"] >= 0.0
+    assert result.runtime["loudness_analysis_seconds"] == result.loudness.analysis_seconds
+    assert result.runtime["loudness_gain_seconds"] == result.loudness.gain_seconds
+    assert result.runtime["loudness_post_gain_metrics_seconds"] == (
+        result.loudness.post_gain_metrics_seconds
+    )
+    assert not any(key.endswith("_seconds") for key in result.provenance["loudness"])
+    assert result.provenance["job_id"] == job.job_id
+
 
 def test_off_policy_without_diagnostics_is_a_true_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     from audiocompose import loudness as loudness_module
@@ -203,3 +213,61 @@ def test_collect_metrics_false_is_opt_in_in_job_policy_serialization() -> None:
 
     assert "collect_metrics" not in default["loudness"]
     assert off["loudness"]["collect_metrics"] is False
+
+
+def test_selective_audio_sig_analysis_flags_follow_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from audiocompose import loudness as loudness_module
+
+    original = loudness_module.analyze_loudness
+    calls: list[dict[str, object]] = []
+
+    def record_analysis(audio: np.ndarray, **kwargs: object):
+        calls.append(dict(kwargs))
+        return original(audio, **kwargs)
+
+    monkeypatch.setattr(loudness_module, "analyze_loudness", record_analysis)
+    audio = np.full(24_000, 0.1, dtype=np.float32)
+
+    apply_complete_output_loudness(
+        audio,
+        24_000,
+        LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=-1.0, collect_metrics=False),
+    )
+    assert calls[-1]["integrated"] is False
+    assert calls[-1]["sample_peak"] is False
+    assert calls[-1]["true_peak"] is True
+
+    apply_complete_output_loudness(
+        audio,
+        24_000,
+        LoudnessPolicy(target_lufs=-18.0, true_peak_ceiling_dbtp=-1.0, collect_metrics=False),
+    )
+    assert calls[-1]["integrated"] is True
+    assert calls[-1]["sample_peak"] is False
+    assert calls[-1]["true_peak"] is True
+
+    call_count = len(calls)
+    apply_complete_output_loudness(
+        audio,
+        24_000,
+        LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=None, collect_metrics=False),
+    )
+    assert len(calls) == call_count
+
+
+@pytest.mark.parametrize("level", [0.1, 0.9])
+def test_optional_metrics_do_not_change_output_samples(level: float) -> None:
+    audio = np.full(24_000, level, dtype=np.float32)
+    with_metrics = apply_complete_output_loudness(
+        audio,
+        24_000,
+        LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=-1.0, collect_metrics=True),
+    )
+    without_metrics = apply_complete_output_loudness(
+        audio,
+        24_000,
+        LoudnessPolicy(target_lufs=None, true_peak_ceiling_dbtp=-1.0, collect_metrics=False),
+    )
+    np.testing.assert_array_equal(with_metrics.audio, without_metrics.audio)
+    assert with_metrics.before.true_peak_dbtp is not None
+    assert without_metrics.before.true_peak_dbtp is not None

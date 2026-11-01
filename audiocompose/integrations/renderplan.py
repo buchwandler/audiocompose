@@ -13,6 +13,7 @@ from renderplan import AudioItem, PauseItem, RenderManifest, RenderPlan, SpeechI
 
 from .._version import __version__
 from ..errors import HandoffValidationError, MediaResolutionError
+from ..job import validate_clip_geometry
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
 from ..operations import Gain
 from ..sources import AudioFileSource
@@ -514,7 +515,16 @@ def materialize_renderplan_job(
         source=source_metadata,
     )
     try:
-        job.validate(verify_sources=True)
+        job.validate(verify_sources=False)
+        for flow_index, flow_item in enumerate(plan.flow):
+            if isinstance(flow_item, AudioItem):
+                clip = job.items[flow_index]
+                if not isinstance(clip, AudioClip):
+                    raise HandoffValidationError(
+                        "external RenderPlan media did not materialize as an AudioClip"
+                    )
+                audio, _ = clip.source.load()
+                validate_clip_geometry(clip, audio)
     except Exception as exc:
         raise HandoffValidationError(f"Materialized AudioJob failed validation: {exc}") from exc
     return job

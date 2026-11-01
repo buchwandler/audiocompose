@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -141,6 +142,7 @@ class ChapterComposeOutcome:
     emphasis_warning: str | None = None
     audiojob: str | None = None
 
+    runtime: Mapping[str, float] | None = field(default=None, compare=False)
     utterplan: Path | None = None
     render_manifest: Path | None = None
     render_diagnostics: Path | None = None
@@ -291,6 +293,7 @@ class BookComposeResult:
     emphasis_policy: Literal["segment_fallback", "strict"] = "segment_fallback"
     diagnostics: tuple[Mapping[str, Any], ...] = ()
     report_error: Mapping[str, str] | None = None
+    runtime: Mapping[str, float] = field(default_factory=dict, compare=False)
 
     @property
     def exit_code(self) -> int:
@@ -364,6 +367,7 @@ class BookComposeResult:
             "report_path": str(self.report_path),
             "items": [outcome.to_dict() for outcome in self.outcomes],
             "report_error": dict(self.report_error) if self.report_error is not None else None,
+            "runtime": dict(self.runtime),
         }
 
 
@@ -937,6 +941,11 @@ def _report_toml(report: dict[str, Any]) -> str:
                 f"progress_error_message = {_toml_scalar(progress_error.get('message', ''))}",
             )
         )
+    runtime = report.get("runtime")
+    if isinstance(runtime, Mapping):
+        lines.extend(("", "[runtime]"))
+        for key, value in runtime.items():
+            lines.append(f"{key} = {_toml_scalar(value)}")
     lines.extend(("", "[output]"))
     for key, value in report["output"].items():
         if value is not None:
@@ -944,7 +953,7 @@ def _report_toml(report: dict[str, Any]) -> str:
     for entry in report["item"]:
         lines.extend(("", "[[item]]"))
         for key, value in entry.items():
-            if value is not None:
+            if key != "runtime" and value is not None:
                 lines.append(f"{key} = {_toml_scalar(value)}")
     return "\n".join(lines) + "\n"
 
@@ -1104,8 +1113,8 @@ def _compose_resolved_book(
     from ._version import __version__
     from .composer import Composer
     from .integrations.voicerender import materialize_voicerender_job
-    from .job import load_job
-    from .wav import atomic_write_wav, sha256_file
+    from .job import _save_job_bundle, load_job
+    from .wav import _atomic_write_prepared_wav, sha256_file
 
     policy_dict = _output_policy_dict(output_policy)
     base_policy_id = _policy_id({"output": policy_dict, "pause_policy_id": pause_policy.policy_id})
@@ -1141,7 +1150,7 @@ def _compose_resolved_book(
         progress_error = exc
     stop = progress_error is not None
 
-    def compose_and_write_chapter(job, chapter, output_path):
+    def compose_and_write_chapter(job, chapter, output_path, runtime_timings):
         _notify_progress(
             on_progress,
             BookComposeProgress(
@@ -1169,20 +1178,26 @@ def _compose_resolved_book(
                 ),
             )
 
+        composition_started = time.perf_counter()
         if on_progress is None:
             composition = Composer().compose(job)
         else:
             composition = Composer().compose(job, on_progress=forward_composition)
-        atomic_write_wav(
+        runtime_timings.update(composition.runtime)
+        runtime_timings["composition_seconds"] = time.perf_counter() - composition_started
+        write_started = time.perf_counter()
+        _atomic_write_prepared_wav(
             output_path,
             composition.audio,
             composition.sample_rate,
             clip_policy=job.output.clip_policy,
         )
+        runtime_timings["write_seconds"] = time.perf_counter() - write_started
         return composition
 
     for index, chapter in enumerate(context.chapters, start=1):
         paths = context.resolved_chapter_paths[index - 1]
+        runtime_timings: dict[str, float] = {}
         entry: dict[str, Any] = {
             "variant": context.variant,
             "index": index,
@@ -1211,6 +1226,7 @@ def _compose_resolved_book(
             ),
             "output": paths.output_path.name,
             "status": "failed",
+            "runtime": runtime_timings,
         }
         if stop:
             if progress_error is not None and not results:
@@ -1259,6 +1275,7 @@ def _compose_resolved_book(
                     variant=context.variant,
                 ),
             )
+            materialization_started = time.perf_counter()
             plan = load_chapter_plan(context, paths)
             try:
                 render_dir = _existing_directory(
@@ -1294,6 +1311,9 @@ def _compose_resolved_book(
                 default_role=default_role,
                 media_root=media_root,
                 emphasis_policy=emphasis_policy,
+            )
+            runtime_timings["materialization_seconds"] = (
+                time.perf_counter() - materialization_started
             )
             handoff = VerifiedRenderHandoff(
                 chapter=chapter,
@@ -1331,7 +1351,11 @@ def _compose_resolved_book(
                 )
             manifest_id = handoff.manifest_id
 
+            manifest_hash_started = time.perf_counter()
             manifest_sha256 = "sha256:" + sha256_file(manifest_path)
+            runtime_timings["render_manifest_hash_seconds"] = (
+                time.perf_counter() - manifest_hash_started
+            )
             entry.update(
                 manifest_id=manifest_id,
                 manifest_sha256=manifest_sha256,
@@ -1387,15 +1411,21 @@ def _compose_resolved_book(
                 except Exception:
                     prior_job_valid = False
             try:
+                audiojob_save_started = time.perf_counter()
                 _ensure_output_directory(job_bundle.parent)
-                job.save(job_bundle)
-                persisted_job = load_job(job_bundle)
+                saved_bundle = _save_job_bundle(job, job_bundle)
+                runtime_timings["audiojob_save_seconds"] = (
+                    time.perf_counter() - audiojob_save_started
+                )
             except Exception as exc:
+                runtime_timings["audiojob_save_seconds"] = (
+                    time.perf_counter() - audiojob_save_started
+                )
                 raise BookComposeError(
-                    "job.write_failed", f"cannot save or verify AudioJob bundle {job_bundle}: {exc}"
+                    "job.write_failed", f"cannot save AudioJob bundle {job_bundle}: {exc}"
                 ) from exc
-            job_id = persisted_job.job_id
-            job_schema_version = persisted_job.schema_version
+            job_id = saved_bundle.job_id
+            job_schema_version = saved_bundle.schema_version
             if not isinstance(job_id, str) or not job_id:
                 raise BookComposeError(
                     "job.write_failed", f"persisted AudioJob has no stable identity: {job_bundle}"
@@ -1424,6 +1454,7 @@ def _compose_resolved_book(
                     "output.write_failed", f"refusing symlink output: {paths.output_path}"
                 )
             if output_exists:
+                final_hash_started = time.perf_counter()
                 matches, geometry = _verified_existing_output(
                     paths.output_path,
                     prior,
@@ -1446,6 +1477,7 @@ def _compose_resolved_book(
                     expected_sample_rate=policy_dict["sample_rate"],
                     expected_channels=policy_dict["channels"],
                 )
+                runtime_timings["final_hash_seconds"] = time.perf_counter() - final_hash_started
                 if matches and not force:
                     entry.update(geometry or {})
                     entry["status"] = "reused"
@@ -1456,13 +1488,17 @@ def _compose_resolved_book(
                         f"existing chapter output has no matching verified provenance: {paths.output_path}; use --force",
                     )
                 else:
-                    compose_and_write_chapter(job, chapter, paths.output_path)
+                    compose_and_write_chapter(job, chapter, paths.output_path, runtime_timings)
+                    final_hash_started = time.perf_counter()
                     entry.update(_wav_result(paths.output_path))
+                    runtime_timings["final_hash_seconds"] = time.perf_counter() - final_hash_started
                     entry["status"] = "written"
                     written += 1
             else:
-                compose_and_write_chapter(job, chapter, paths.output_path)
+                compose_and_write_chapter(job, chapter, paths.output_path, runtime_timings)
+                final_hash_started = time.perf_counter()
                 entry.update(_wav_result(paths.output_path))
+                runtime_timings["final_hash_seconds"] = time.perf_counter() - final_hash_started
                 entry["status"] = "written"
                 written += 1
         except Exception as exc:
@@ -1513,6 +1549,14 @@ def _compose_resolved_book(
         for chapter in context.renderplan_set.chapters
         if chapter.id in item_by_id
     ]
+    runtime_totals: dict[str, float] = {}
+    for entry in ordered_entries:
+        entry_runtime = entry.get("runtime")
+        if not isinstance(entry_runtime, Mapping):
+            continue
+        for name, value in entry_runtime.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                runtime_totals[name] = runtime_totals.get(name, 0.0) + float(value)
     report = {
         "variant": context.variant,
         "emphasis_policy": emphasis_policy,
@@ -1535,6 +1579,7 @@ def _compose_resolved_book(
         "failed": failed,
         "skipped": skipped,
         "output": policy_dict,
+        "runtime": runtime_totals,
         "item": ordered_entries,
     }
     if progress_error is not None:
@@ -1570,6 +1615,7 @@ def _compose_resolved_book(
         "skipped": skipped,
         "report": str(context.report_path),
         "items": results,
+        "runtime": runtime_totals,
         "report_error": report_error,
     }
 
@@ -1622,6 +1668,7 @@ def _chapter_outcome(entry: Mapping[str, Any], context: BookContext) -> ChapterC
         job_id=entry.get("job_id"),
         job_schema_version=entry.get("job_schema_version"),
         audiocompose_version=entry.get("audiocompose_version"),
+        runtime=(entry.get("runtime") if isinstance(entry.get("runtime"), Mapping) else None),
     )
 
 
@@ -1647,6 +1694,7 @@ def _book_result_from_dict(
         emphasis_policy=result["emphasis_policy"],
         diagnostics=tuple(result["diagnostics"]),
         report_error=result["report_error"],
+        runtime=(result.get("runtime") if isinstance(result.get("runtime"), Mapping) else {}),
     )
 
 

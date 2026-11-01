@@ -17,6 +17,18 @@ if TYPE_CHECKING:
 
 ProgressMode = Literal["auto", "always", "never"]
 
+_NO_ETA_PHASES = frozenset(
+    {
+        "writing output",
+        "analyzing loudness",
+        "checking true peak",
+        "checking sample peak",
+        "finalizing waveform",
+        "complete",
+        "failed",
+    }
+)
+
 
 def _split_context(context: str | None) -> tuple[str | None, str | None]:
     if not context:
@@ -116,20 +128,41 @@ class CliProgressRenderer:
         if changed:
             self._render(force=True)
 
+    @staticmethod
+    def _composition_phase(event: CompositionProgress, *, command: str) -> str:
+        if event.kind == "compose_started":
+            return "composing RenderPlan" if command == "renderplan" else "composing"
+        if event.kind == "loudness_started":
+            collect_metrics = event.details.get("collect_metrics") is True
+            if collect_metrics or event.details.get("target_lufs") is not None:
+                return "analyzing loudness"
+            if event.details.get("true_peak_ceiling_dbtp") is not None:
+                return "checking true peak"
+            return "finalizing waveform"
+        if event.kind == "loudness_progress":
+            phase = event.details.get("phase")
+            if isinstance(phase, str):
+                return {
+                    "integrated_loudness": "analyzing loudness",
+                    "sample_peak": "checking sample peak",
+                    "true_peak": "checking true peak",
+                }.get(phase, phase.replace("_", " "))
+            return "analyzing loudness"
+        if event.kind == "loudness_completed":
+            return "composing"
+        if event.kind == "compose_completed":
+            return "writing output" if command == "renderplan" else "finalizing waveform"
+        return "composing"
+
     @_synchronized
     def on_composition_progress(self, event: CompositionProgress) -> None:
         if not self.enabled:
             return
-        changed = False
-        if event.kind == "compose_started":
-            phase = "composing RenderPlan" if self._command == "renderplan" else "composing"
-            changed = phase != self._phase
-            self._phase = phase
+        phase = self._composition_phase(event, command=self._command)
+        changed = phase != self._phase
+        self._phase = phase
         self._composition = event
         self._composition_timing = self._estimator.update(event)
-        if event.kind == "compose_completed":
-            changed = self._phase != "writing output"
-            self._phase = "writing output"
         self._render(force=changed or event.kind in {"compose_started", "compose_completed"})
 
     @_synchronized
@@ -147,9 +180,7 @@ class CliProgressRenderer:
             if self._book_estimator is None or previous_chapter != event.chapter_id:
                 self._book_estimator = ProgressEstimator(clock=self._clock)
             self._book_timing = self._book_estimator.update(event.composition)
-            phase = (
-                "writing output" if event.composition.kind == "compose_completed" else "composing"
-            )
+            phase = self._composition_phase(event.composition, command="compose")
             changed = changed or phase != self._phase
             self._phase = phase
         else:
@@ -299,7 +330,7 @@ class CliProgressRenderer:
             timing is not None
             and timing.status == "estimated"
             and timing.estimated_remaining_seconds is not None
-            and self._phase not in {"writing output", "complete", "failed"}
+            and self._phase not in _NO_ETA_PHASES
         ):
             pieces.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
         return " · ".join(pieces)
@@ -370,7 +401,7 @@ class CliProgressRenderer:
             timing is not None
             and timing.status == "estimated"
             and timing.estimated_remaining_seconds is not None
-            and self._phase not in {"writing output", "complete", "failed"}
+            and self._phase not in _NO_ETA_PHASES
         ):
             secondary.append(f"ETA {self._format_duration(timing.estimated_remaining_seconds)}")
         if composition is not None and composition.total_items:

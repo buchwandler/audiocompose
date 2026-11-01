@@ -21,7 +21,7 @@ from audiocompose import (
     RatePitchEnvelope,
     Silence,
 )
-from audiocompose.job import _job_id
+from audiocompose.job import _job_id, _save_job_bundle, load_job, save_job
 
 
 def _saved_payload(tmp_path: Path, schema_version: int) -> tuple[Path, dict[str, Any]]:
@@ -203,3 +203,20 @@ def test_v2_schema_and_parser_reject_unknown_curve_point_fields(
     assert not _schema(2).is_valid(payload)
     with pytest.raises(AudioValidationError, match="unknown field"):
         AudioJob.from_dict(payload, base_dir=str(manifest.parent))
+
+
+def test_detailed_save_result_matches_verified_reload_and_public_save_path(tmp_path: Path) -> None:
+    job = AudioJob(
+        (AudioClip("clip", AudioBufferSource(np.linspace(-0.1, 0.1, 8, dtype=np.float32), 8)),)
+    )
+    bundle_dir = tmp_path / "detailed.audiojob"
+    saved = _save_job_bundle(job, bundle_dir)
+
+    restored = load_job(saved.manifest_path)
+    assert saved.manifest_path == bundle_dir / "audiojob.json"
+    assert saved.job_id == restored.job_id
+    assert saved.schema_version == restored.schema_version
+
+    public_path = save_job(job, tmp_path / "public.audiojob")
+    assert isinstance(public_path, Path)
+    assert public_path == tmp_path / "public.audiojob" / "audiojob.json"

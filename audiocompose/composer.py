@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+from audiosig import LoudnessProgress
 
 from .alignment import ComposedMarker, ComposedSpan
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
 from .errors import AudioValidationError, CompositionError
 from .job import validate_clip_geometry
-from .loudness import LoudnessResult, apply_complete_output_loudness
+from .loudness import LoudnessPolicy, LoudnessResult, apply_complete_output_loudness
 from .model import AudioClip, AudioJob, ComposedItem, CompositionResult, Silence
 from .operations import PitchShift, Tempo, apply_operation, apply_temporal_group
 from .progress import (
@@ -21,7 +23,7 @@ from .progress import (
 )
 from .resampling import resample_audio
 from .sources import AudioBufferSource, AudioFileSource
-from .wav import prepare_output, write_wav
+from .wav import _prepare_output, _write_prepared_wav
 
 
 def _seconds_samples(seconds: float, rate: int) -> int:
@@ -85,13 +87,21 @@ def _predicted_output_frames(item: AudioClip | Silence, output_rate: int) -> int
     return _item_output_frames_and_work(item, output_rate)[0]
 
 
-def _loudness_is_noop(job: AudioJob) -> bool:
-    policy = job.output.loudness
-    return (
-        not policy.collect_metrics
-        and policy.target_lufs is None
-        and policy.true_peak_ceiling_dbtp is None
-    )
+def _loudness_work_phases(policy: LoudnessPolicy, sample_rate: int) -> tuple[str, ...]:
+    integrated = (policy.collect_metrics or policy.target_lufs is not None) and round(
+        0.1 * sample_rate
+    ) > 0
+    sample_peak = policy.collect_metrics
+    true_peak = policy.collect_metrics or policy.true_peak_ceiling_dbtp is not None
+    phases: list[str] = []
+    if integrated:
+        phases.append("integrated_loudness")
+    if true_peak:
+        # AudioSig measures sample peak in this same streaming pass.
+        phases.append("true_peak")
+    elif sample_peak:
+        phases.append("sample_peak")
+    return tuple(phases)
 
 
 def estimate_composition(
@@ -123,11 +133,10 @@ def estimate_composition(
     total_work_units: float | None = None
     if not unknown_items and total_output_frames is not None:
         total_work_units = sum(work or 0.0 for _, work in geometry)
-        # Concatenation, optional complete-output loudness, and final clipping
-        # preparation are distinct execution passes.
-        total_work_units += total_output_frames
-        if not _loudness_is_noop(job):
-            total_work_units += total_output_frames
+        # Placement is fused into item processing; loudness and final clipping remain extra passes.
+        total_work_units += total_output_frames * len(
+            _loudness_work_phases(job.output.loudness, rate)
+        )
         total_work_units += total_output_frames
 
     return CompositionEstimate(
@@ -146,12 +155,17 @@ class _WorkProgressCallback:
         callback: CompositionProgressCallback,
         job: AudioJob,
         total_work_units: float | None,
+        sample_rate: int,
     ) -> None:
         self._callback = callback
         self._job = job
         self._total_work_units = total_work_units
+        self._sample_rate = sample_rate
         self._completed_work_units = 0.0
         self._fraction = 0.0
+        self._loudness_start_work_units: float | None = None
+        self._loudness_phases: tuple[str, ...] = ()
+        self._loudness_frames = 0
 
     def __call__(self, event: CompositionProgress) -> None:
         completed = 0.0
@@ -179,14 +193,39 @@ class _WorkProgressCallback:
             completed = event.input_frames
         elif event.kind == "item_completed" and event.output_frames is not None:
             completed = event.output_frames
-        elif event.kind == "assembly_completed" and event.output_frames is not None:
-            completed = event.output_frames
-        elif (
-            event.kind == "loudness_completed"
-            and event.input_frames is not None
-            and not _loudness_is_noop(self._job)
-        ):
-            completed = event.input_frames
+        elif event.kind == "loudness_started":
+            self._loudness_start_work_units = self._completed_work_units
+            self._loudness_phases = _loudness_work_phases(
+                self._job.output.loudness, self._sample_rate
+            )
+            self._loudness_frames = event.input_frames or 0
+        elif event.kind == "loudness_progress":
+            phase = event.details.get("phase")
+            phase_fraction = event.details.get("phase_fraction")
+            if (
+                self._loudness_start_work_units is not None
+                and self._loudness_frames > 0
+                and phase in self._loudness_phases
+                and isinstance(phase_fraction, (int, float))
+                and math.isfinite(phase_fraction)
+            ):
+                phase_index = self._loudness_phases.index(phase)
+                bounded_fraction = min(1.0, max(0.0, float(phase_fraction)))
+                stage_work = self._loudness_frames * (phase_index + bounded_fraction)
+                self._completed_work_units = max(
+                    self._completed_work_units,
+                    self._loudness_start_work_units + stage_work,
+                )
+        elif event.kind == "loudness_completed":
+            if self._loudness_start_work_units is not None:
+                stage_work = self._loudness_frames * len(self._loudness_phases)
+                self._completed_work_units = max(
+                    self._completed_work_units,
+                    self._loudness_start_work_units + stage_work,
+                )
+            self._loudness_start_work_units = None
+            self._loudness_phases = ()
+            self._loudness_frames = 0
         elif event.kind == "compose_completed" and event.output_frames is not None:
             completed = event.output_frames
 
@@ -234,9 +273,6 @@ def _loudness_summary(result: LoudnessResult) -> dict[str, object]:
         "applied_gain_db": result.applied_gain_db,
         "target_reached": result.target_reached,
         "peak_policy": result.peak_policy,
-        "analysis_seconds": result.analysis_seconds,
-        "gain_seconds": result.gain_seconds,
-        "post_gain_metrics_seconds": result.post_gain_metrics_seconds,
         "warning": result.warning,
     }
 
@@ -259,13 +295,14 @@ class Composer:
         *,
         on_progress: CompositionProgressCallback | None = None,
     ) -> CompositionResult:
+        composition_started = time.perf_counter()
         job.validate(verify_sources=False)
         rate = self.sample_rate if self.sample_rate is not None else job.output.sample_rate
         total_items = len(job.items)
         estimate = estimate_composition(job, sample_rate=rate)
         total_audio_seconds = estimate.total_audio_seconds
         if on_progress is not None:
-            on_progress = _WorkProgressCallback(on_progress, job, estimate.total_work_units)
+            on_progress = _WorkProgressCallback(on_progress, job, estimate.total_work_units, rate)
         completed_audio_seconds = 0.0
         metadata_kind_counts: dict[str, int] = {}
         for item in job.items:
@@ -288,7 +325,12 @@ class Composer:
                 },
             ),
         )
-        parts: list[np.ndarray] = []
+        waveform = (
+            np.empty(estimate.total_output_frames, dtype=np.float32)
+            if estimate.total_output_frames is not None
+            else None
+        )
+        parts: list[np.ndarray] | None = [] if waveform is None else None
         composed: list[ComposedItem] = []
         markers: list[ComposedMarker] = []
         spans: list[ComposedSpan] = []
@@ -482,8 +524,16 @@ class Composer:
                             output_frames=len(audio),
                         ),
                     )
-            parts.append(np.asarray(audio, dtype=np.float32))
-            cursor += len(audio)
+            audio = np.asarray(audio, dtype=np.float32)
+            next_cursor = cursor + len(audio)
+            if waveform is None:
+                assert parts is not None
+                parts.append(audio)
+            else:
+                if next_cursor > len(waveform):
+                    raise CompositionError("composed audio exceeded its estimated frame count")
+                waveform[cursor:next_cursor] = audio
+            cursor = next_cursor
             completed_audio_seconds = cursor / rate
             _emit(
                 on_progress,
@@ -512,6 +562,7 @@ class Composer:
                     source_rate,
                 )
             )
+            del audio
         _emit(
             on_progress,
             CompositionProgress(
@@ -523,11 +574,16 @@ class Composer:
                 total_audio_seconds=total_audio_seconds,
             ),
         )
-        waveform = (
-            np.concatenate(parts).astype(np.float32, copy=False)
-            if parts
-            else np.zeros(0, dtype=np.float32)
-        )
+        if waveform is None:
+            if parts:
+                waveform = np.concatenate(parts).astype(np.float32, copy=False)
+                parts.clear()
+            else:
+                waveform = np.zeros(0, dtype=np.float32)
+        if cursor != len(waveform):
+            raise CompositionError(
+                f"composed output has {cursor} frames but allocated geometry requires {len(waveform)}"
+            )
         _emit(
             on_progress,
             CompositionProgress(
@@ -561,7 +617,33 @@ class Composer:
                 },
             ),
         )
-        loudness = apply_complete_output_loudness(waveform, rate, loudness_policy)
+
+        def emit_loudness_progress(progress: LoudnessProgress) -> None:
+            _emit(
+                on_progress,
+                CompositionProgress(
+                    kind="loudness_progress",
+                    completed_items=total_items,
+                    total_items=total_items,
+                    target_sample_rate=rate,
+                    input_frames=len(waveform),
+                    completed_audio_seconds=completed_audio_seconds,
+                    total_audio_seconds=total_audio_seconds,
+                    details={
+                        "phase": progress.phase,
+                        "completed_frames": progress.completed_frames,
+                        "total_frames": progress.total_frames,
+                        "phase_fraction": progress.phase_fraction,
+                    },
+                ),
+            )
+
+        loudness = apply_complete_output_loudness(
+            waveform,
+            rate,
+            loudness_policy,
+            on_progress=emit_loudness_progress if on_progress is not None else None,
+        )
         waveform = loudness.audio
         _emit(
             on_progress,
@@ -591,12 +673,16 @@ class Composer:
                 },
             ),
         )
+        output_preparation_started = time.perf_counter()
         try:
-            waveform = prepare_output(waveform, clip_policy=job.output.clip_policy)
+            waveform, output_out_of_range = _prepare_output(
+                waveform, clip_policy=job.output.clip_policy
+            )
         except AudioValidationError as exc:
             if job.output.clip_policy != "error":
                 raise
             raise CompositionError(str(exc)) from exc
+        output_preparation_seconds = time.perf_counter() - output_preparation_started
         diagnostics: list[CompositionDiagnostic] = []
         if loudness.warning:
             if loudness.before.integrated_lufs is None:
@@ -621,7 +707,7 @@ class Composer:
                         },
                     )
                 )
-        if job.output.clip_policy == "warn" and np.any(np.abs(waveform) > 1.0):
+        if job.output.clip_policy == "warn" and output_out_of_range:
             diagnostics.append(
                 CompositionDiagnostic(
                     code="CLIPPING_POSSIBLE",
@@ -642,6 +728,13 @@ class Composer:
                 "producer": dict(job.producer),
                 "applied_loudness_gain_db": loudness.applied_gain_db,
                 "loudness": _loudness_summary(loudness),
+            },
+            runtime={
+                "composition_seconds": time.perf_counter() - composition_started,
+                "output_preparation_seconds": output_preparation_seconds,
+                "loudness_analysis_seconds": loudness.analysis_seconds,
+                "loudness_gain_seconds": loudness.gain_seconds,
+                "loudness_post_gain_metrics_seconds": loudness.post_gain_metrics_seconds,
             },
             loudness=loudness,
         )
@@ -667,7 +760,9 @@ class Composer:
         on_progress: CompositionProgressCallback | None = None,
     ) -> Path:
         result = self.compose(job, on_progress=on_progress)
-        return write_wav(path, result.audio, result.sample_rate, clip_policy=job.output.clip_policy)
+        return _write_prepared_wav(
+            path, result.audio, result.sample_rate, clip_policy=job.output.clip_policy
+        )
 
     def compose_to_wav(
         self,

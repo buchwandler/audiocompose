@@ -459,6 +459,59 @@ def _audio(src="music.wav", *, options=None):
     ).with_identity()
 
 
+def test_verified_speech_is_not_reloaded_but_external_file_sources_are_validated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from audiocompose.integrations.media import ResolvedMedia
+    from audiocompose.sources import AudioFileSource
+    from audiocompose.wav import write_wav
+
+    speech = _speech()
+    _, artifact = _rendered(tmp_path, speech)
+    media_file = tmp_path / "external.wav"
+    write_wav(media_file, np.full(24, 0.25, dtype=np.float32), 1000)
+    media_hash = hashlib.sha256(media_file.read_bytes()).hexdigest()
+    source = AudioFileSource(media_file, media_hash, sample_rate=1000, channels=1, frames=24)
+
+    class Resolver:
+        def __init__(self, resolved_source):
+            self.resolved_source = resolved_source
+
+        def resolve(self, request):
+            return ResolvedMedia(self.resolved_source)
+
+    original_load = AudioFileSource.load
+    loaded_paths = []
+
+    def counted_load(self):
+        loaded_paths.append(Path(self.path))
+        return original_load(self)
+
+    monkeypatch.setattr(AudioFileSource, "load", counted_load)
+    plan = _plan(speech, _audio("fixture:external"))
+    job = materialize_renderplan_job(
+        plan,
+        _manifest(plan, [artifact]),
+        render_dir=tmp_path,
+        media_resolver=Resolver(source),
+    )
+    assert len(job.items) == 2
+    assert loaded_paths == [media_file]
+
+    loaded_paths.clear()
+    untrusted_source = AudioFileSource(
+        media_file, "0" * 64, sample_rate=1000, channels=1, frames=24
+    )
+    with pytest.raises(HandoffValidationError, match="source hash mismatch"):
+        materialize_renderplan_job(
+            plan,
+            _manifest(plan, [artifact]),
+            render_dir=tmp_path,
+            media_resolver=Resolver(untrusted_source),
+        )
+    assert loaded_paths == [media_file]
+
+
 def test_external_audio_uses_explicit_media_root_and_supported_operations(tmp_path):
     from audiocompose import Gain, Tempo
     from audiocompose.sources import AudioBufferSource
