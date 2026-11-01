@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     tomllib = importlib.import_module("tomllib")
@@ -1675,6 +1675,10 @@ def _chapter_outcome(entry: Mapping[str, Any], context: BookContext) -> ChapterC
 def _book_result_from_dict(
     context: BookContext, result: Mapping[str, Any], request: BookComposeRequest
 ) -> BookComposeResult:
+    runtime_value = result.get("runtime")
+    runtime: Mapping[str, float] = (
+        cast(Mapping[str, float], runtime_value) if isinstance(runtime_value, Mapping) else {}
+    )
     return BookComposeResult(
         request=request,
         workspace=context.workspace,
@@ -1694,7 +1698,7 @@ def _book_result_from_dict(
         emphasis_policy=result["emphasis_policy"],
         diagnostics=tuple(result["diagnostics"]),
         report_error=result["report_error"],
-        runtime=(result.get("runtime") if isinstance(result.get("runtime"), Mapping) else {}),
+        runtime=runtime,
     )
 
 

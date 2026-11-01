@@ -584,6 +584,8 @@ class Composer:
             raise CompositionError(
                 f"composed output has {cursor} frames but allocated geometry requires {len(waveform)}"
             )
+        assert waveform is not None
+        loudness_input_frames = len(waveform)
         _emit(
             on_progress,
             CompositionProgress(
@@ -626,7 +628,7 @@ class Composer:
                     completed_items=total_items,
                     total_items=total_items,
                     target_sample_rate=rate,
-                    input_frames=len(waveform),
+                    input_frames=loudness_input_frames,
                     completed_audio_seconds=completed_audio_seconds,
                     total_audio_seconds=total_audio_seconds,
                     details={
