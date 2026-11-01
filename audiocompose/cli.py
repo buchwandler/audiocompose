@@ -436,6 +436,16 @@ def _print_bundle_batch_result(result: Any) -> None:
     print(f"  skipped:       {summary.skipped_complete} complete")
     print(f"  blocked:       {summary.skipped_not_ready} not ready")
 
+    blocked_with_errors = any(
+        outcome.status == "skipped_not_ready"
+        and (
+            outcome.validation_error
+            or outcome.render_error
+            or outcome.compose_error
+            or outcome.initial_render_status in {"unknown", "failed"}
+        )
+        for outcome in result.variants
+    )
     if summary.discovered == 0 and result.error_message is None:
         print("No variants found; nothing to do.")
     elif (
@@ -445,9 +455,14 @@ def _print_bundle_batch_result(result: Any) -> None:
         and summary.invalid == 0
     ):
         print("All compose-ready variants are already complete; nothing to do.")
-    elif summary.compose_ready == 0 and summary.discovered > 0 and summary.invalid == 0:
-        print("No variants are currently ready to compose; nothing to do.")
-
+    elif summary.compose_ready == 0 and summary.discovered > 0:
+        if blocked_with_errors:
+            print("No variants are currently ready to compose.")
+            print(
+                "One or more variants are blocked by render-handoff validation errors; see details below."
+            )
+        else:
+            print("No variants are currently ready to compose; nothing to do.")
     selected_index = 0
     for outcome in result.variants:
         if outcome.selected:
@@ -461,10 +476,20 @@ def _print_bundle_batch_result(result: Any) -> None:
             print(f"  attempt: {outcome.attempt_status}")
         if outcome.final_state is not None:
             print(f"  final: {outcome.final_state}")
+        if outcome.status == "skipped_not_ready":
+            render_status = outcome.final_render_status or outcome.initial_render_status
+            compose_status = outcome.final_compose_status or outcome.initial_compose_status
+            print(f"  render: {render_status}")
+            print(f"  compose: {compose_status}")
+            print(f"  ready: {'yes' if outcome.ready_to_compose else 'no'}")
         if outcome.error_message:
             print(f"  error: {outcome.error_message}")
-        elif outcome.validation_error:
-            print(f"  error: {outcome.validation_error}")
+        if outcome.validation_error:
+            print(f"  validation error: {outcome.validation_error}")
+        if outcome.render_error:
+            print(f"  render error: {outcome.render_error}")
+        if outcome.compose_error:
+            print(f"  compose error: {outcome.compose_error}")
         if outcome.result is not None and result.kind == "book":
             value = outcome.result.value
             print(f"  written: {getattr(value, 'written', 0)}")

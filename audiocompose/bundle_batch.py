@@ -488,7 +488,14 @@ def compose_bundle_batch(
         compose_ready=compose_ready,
         scheduled=len(scheduled_names),
     )
-    exit_code = 1 if summary.failed or summary.invalid or summary.not_attempted else 0
+    error_blocker = any(
+        outcome.status == "skipped_not_ready"
+        and outcome.initial_render_status in {"unknown", "failed"}
+        for outcome in final_outcomes
+    )
+    exit_code = (
+        1 if (summary.failed or summary.invalid or summary.not_attempted or error_blocker) else 0
+    )
     return BundleBatchComposeResult(
         bundle=listing.bundle,
         kind=listing.kind,

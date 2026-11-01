@@ -26,6 +26,9 @@ def _variant(
     plan_status: str | None = None,
     compose_status: str | None = None,
     validation_error: str | None = None,
+    render_status: str | None = None,
+    render_error: str | None = None,
+    compose_error: str | None = None,
 ) -> BundleVariant:
     inferred_plan = "invalid" if state == "invalid" else "valid"
     inferred_compose = {
@@ -45,7 +48,7 @@ def _variant(
         name=name,
         profile_id="profile-1",
         plan_status=plan_status or inferred_plan,
-        render_status=inferred_render,
+        render_status=render_status or inferred_render,
         compose_status=compose_status or inferred_compose,
         state=state,
         unit_kind="chapters",
@@ -56,8 +59,8 @@ def _variant(
         available_speech=1 if ready else 0,
         ready_to_compose=ready,
         validation_error=validation_error,
-        render_error=None,
-        compose_error=None,
+        render_error=render_error,
+        compose_error=compose_error,
     )
 
 
@@ -228,6 +231,36 @@ def test_noop_cases_do_not_call_single_variant_composer(tmp_path: Path, monkeypa
 
         compose.assert_not_called()
         assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("state", "render_status"),
+    [("unknown", "unknown"), ("render_failed", "failed")],
+)
+def test_error_render_blockers_return_nonzero_without_bypassing_readiness(
+    tmp_path: Path, monkeypatch, state: str, render_status: str
+) -> None:
+    broken = _variant(
+        "broken",
+        state,
+        ready=False,
+        render_status=render_status,
+        render_error="bad diagnostics",
+    )
+    initial = _listing(tmp_path, (broken,))
+    _install_listing(monkeypatch, initial, initial)
+    compose = Mock()
+    monkeypatch.setattr(bundle_batch, "compose_bundle", compose)
+
+    result = compose_bundle_batch(initial.bundle, force=True)
+
+    compose.assert_not_called()
+    assert result.summary.scheduled == 0
+    assert result.summary.attempted == 0
+    assert result.summary.skipped_not_ready == 1
+    assert result.variants[0].render_error == "bad diagnostics"
+    assert result.force is True
+    assert result.exit_code == 1
 
 
 def test_invalid_variant_is_reported_while_valid_sibling_runs(tmp_path: Path, monkeypatch) -> None:

@@ -548,6 +548,168 @@ def test_bundle_compose_batch_human_no_variant_message(tmp_path: Path, capsys) -
     assert "No variants found; nothing to do." in output
 
 
+def test_bundle_compose_batch_human_reports_all_blocker_details(capsys) -> None:
+    from types import SimpleNamespace
+
+    from audiocompose.cli import _print_bundle_batch_result
+
+    def outcome(
+        name: str,
+        status: str,
+        *,
+        initial_state: str,
+        initial_render_status: str,
+        initial_compose_status: str,
+        ready: bool,
+        error_message: str | None = None,
+        validation_error: str | None = None,
+        render_error: str | None = None,
+        compose_error: str | None = None,
+    ):
+        return SimpleNamespace(
+            name=name,
+            status=status,
+            initial_state=initial_state,
+            initial_render_status=initial_render_status,
+            initial_compose_status=initial_compose_status,
+            ready_to_compose=ready,
+            selected=False,
+            attempt_status="failed" if error_message else None,
+            final_state=None,
+            final_render_status=None,
+            final_compose_status=None,
+            error_message=error_message,
+            validation_error=validation_error,
+            render_error=render_error,
+            compose_error=compose_error,
+            result=None,
+        )
+
+    result = SimpleNamespace(
+        bundle="story.ssmd-bundle",
+        kind="book",
+        renderplan_root=None,
+        voicerender_root=None,
+        output_root=None,
+        error_message=None,
+        summary=SimpleNamespace(
+            discovered=4,
+            compose_ready=0,
+            scheduled=0,
+            attempted=1,
+            skipped_complete=0,
+            skipped_not_ready=2,
+            invalid=1,
+            completed=0,
+            partial=0,
+            failed=1,
+            not_attempted=0,
+        ),
+        variants=(
+            outcome(
+                "render-blocked",
+                "skipped_not_ready",
+                initial_state="unknown",
+                initial_render_status="unknown",
+                initial_compose_status="partial",
+                ready=False,
+                render_error="bad diagnostics",
+            ),
+            outcome(
+                "compose-blocked",
+                "skipped_not_ready",
+                initial_state="render_partial",
+                initial_render_status="partial",
+                initial_compose_status="partial",
+                ready=False,
+                compose_error="stale composition state",
+            ),
+            outcome(
+                "invalid",
+                "invalid",
+                initial_state="invalid",
+                initial_render_status="complete",
+                initial_compose_status="not_composed",
+                ready=False,
+                validation_error="invalid manifest",
+            ),
+            outcome(
+                "attempt-failed",
+                "failed",
+                initial_state="ready",
+                initial_render_status="complete",
+                initial_compose_status="not_composed",
+                ready=True,
+                error_message="chapter composition failed",
+            ),
+        ),
+    )
+
+    _print_bundle_batch_result(result)
+    output = capsys.readouterr().out
+
+    for diagnostic in (
+        "render error: bad diagnostics",
+        "compose error: stale composition state",
+        "validation error: invalid manifest",
+        "error: chapter composition failed",
+        "render: unknown",
+        "compose: partial",
+        "ready: no",
+        "One or more variants are blocked by render-handoff validation errors",
+    ):
+        assert diagnostic in output
+    assert "No variants are currently ready to compose; nothing to do." not in output
+
+
+def test_bundle_compose_batch_json_preserves_blocker_diagnostic_fields(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import audiocompose.bundle_batch as batch_module
+    from audiocompose.bundle_batch import (
+        BundleBatchComposeResult,
+        BundleBatchComposeSummary,
+        BundleVariantComposeOutcome,
+    )
+
+    root = tmp_path / "story.ssmd-bundle"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}), encoding="utf-8"
+    )
+    outcome = BundleVariantComposeOutcome(
+        name="broken",
+        initial_state="unknown",
+        initial_render_status="unknown",
+        initial_compose_status="partial",
+        ready_to_compose=False,
+        plan_status="valid",
+        selected=False,
+        status="skipped_not_ready",
+        render_error="bad diagnostics",
+        compose_error="stale composition state",
+    )
+    result = BundleBatchComposeResult(
+        bundle=root,
+        kind="book",
+        renderplan_root=root / "renderplan",
+        voicerender_root=root / "voicerender",
+        output_root=root / "audiocompose",
+        force=False,
+        variants=(outcome,),
+        summary=BundleBatchComposeSummary(1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0),
+        exit_code=1,
+    )
+    monkeypatch.setattr(batch_module, "compose_bundle_batch", Mock(return_value=result))
+
+    assert main(["bundle", "compose", str(root), "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["variants"][0]["render_error"] == "bad diagnostics"
+    assert payload["variants"][0]["compose_error"] == "stale composition state"
+    assert captured.err == ""
+
+
 def test_batch_progress_adapter_labels_variants_and_resets_estimators() -> None:
     from audiocompose.cli import _BundleProgressAdapter
 
