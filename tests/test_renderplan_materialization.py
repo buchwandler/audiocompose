@@ -430,11 +430,33 @@ def test_path_loader_defaults_manifest_inside_render_dir(tmp_path):
     manifest_path = tmp_path / "render-manifest.toml"
     save_plan(plan, plan_path)
     save_manifest(_manifest(plan, [artifact]), manifest_path)
+    serialized = plan_path.read_text(encoding="utf-8")
+    assert "schema_version = 2" in serialized
+    assert "[bindings.narrator]" in serialized
 
     job = load_and_materialize_renderplan_job(plan_path, render_dir=tmp_path)
 
     assert len(job.items) == 1
     assert isinstance(job.items[0], AudioClip)
+
+
+def test_parenthetical_semantic_end_uses_explicit_pause_only(tmp_path):
+    speech = replace(_speech(text="aside"), semantic_end="parenthetical").with_identity()
+    pause = PauseItem(duration_ms=180, reason="parenthetical").with_identity()
+    plan = _plan(speech, pause)
+    _, artifact = _rendered(tmp_path, speech)
+
+    job = materialize_renderplan_job(
+        plan,
+        _manifest(plan, [artifact]),
+        render_dir=tmp_path,
+    )
+
+    assert speech.semantic_end == "parenthetical"
+    assert len(job.items) == 2
+    assert isinstance(job.items[0], AudioClip)
+    assert isinstance(job.items[1], Silence)
+    assert job.items[1].seconds == pytest.approx(0.180)
 
 
 def test_speech_metadata_does_not_create_sample_aligned_spans(tmp_path):
@@ -975,10 +997,10 @@ def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
     base_dependencies = project["project"]["dependencies"]
     extra_dependencies = project["project"]["optional-dependencies"]["voicerender"]
 
-    assert any(item.startswith("renderplan>=0.1.2,<0.2") for item in base_dependencies)
+    assert any(item.startswith("renderplan>=0.2.1,<0.3") for item in base_dependencies)
     assert not any(
         item.lower().startswith(("voicerender", "utterplan")) for item in base_dependencies
     )
-    assert any(item.startswith("utterplan>=0.6.4,<0.7") for item in extra_dependencies)
-    assert any(item.startswith("voicerender>=0.2.4,<0.3") for item in extra_dependencies)
+    assert any(item.startswith("utterplan>=0.6.12,<0.7") for item in extra_dependencies)
+    assert any(item.startswith("voicerender>=0.2.8,<0.3") for item in extra_dependencies)
     assert (project_path.parent / "audiocompose/integrations/voicerender.py").is_file()

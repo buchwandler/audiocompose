@@ -750,13 +750,16 @@ def test_installed_package_metadata_has_supported_producer_floors():
     utterplan = next(req for req in requirements if req.name == "utterplan")
     voicerender = next(req for req in requirements if req.name == "voicerender")
 
-    assert Version("0.1.0") not in renderplan.specifier
-    assert Version("0.1.1") not in renderplan.specifier
-    assert Version("0.1.2") in renderplan.specifier
-    assert Version("0.6.3") not in utterplan.specifier
-    assert Version("0.6.4") in utterplan.specifier
-    assert Version("0.2.3") not in voicerender.specifier
-    assert Version("0.2.4") in voicerender.specifier
+    assert Version("0.2.0") not in renderplan.specifier
+    assert Version("0.2.1") in renderplan.specifier
+    assert Version("0.3.0") not in renderplan.specifier
+
+    assert Version("0.6.11") not in utterplan.specifier
+    assert Version("0.6.12") in utterplan.specifier
+    assert Version("0.7.0") not in utterplan.specifier
+
+    assert Version("0.2.7") not in voicerender.specifier
+    assert Version("0.2.8") in voicerender.specifier
     assert Version("0.3.0") not in voicerender.specifier
 
 

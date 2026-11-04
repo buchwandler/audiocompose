@@ -102,19 +102,18 @@ jobs:
               assert has_minimum(requirements, "numpy", "1.23")
               assert has_minimum(requirements, "audiosig", "0.1.9")
               renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
-              assert Version("0.1.1") not in renderplan.specifier
-              assert Version("0.1.2") in renderplan.specifier
               assert Version("0.2.0") not in renderplan.specifier
+              assert Version("0.2.1") in renderplan.specifier
+              assert Version("0.3.0") not in renderplan.specifier
 
               utterplan = optional_requirement(requirements, "utterplan", "voicerender")
-              assert Version("0.6.3") not in utterplan.specifier
-              assert Version("0.6.4") in utterplan.specifier
+              assert Version("0.6.11") not in utterplan.specifier
+              assert Version("0.6.12") in utterplan.specifier
               assert Version("0.7.0") not in utterplan.specifier
 
               voicerender = optional_requirement(requirements, "voicerender", "voicerender")
-              assert Version("0.1.1") not in voicerender.specifier
-              assert Version("0.2.3") not in voicerender.specifier
-              assert Version("0.2.4") in voicerender.specifier
+              assert Version("0.2.7") not in voicerender.specifier
+              assert Version("0.2.8") in voicerender.specifier
               assert Version("0.3.0") not in voicerender.specifier
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY

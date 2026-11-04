@@ -249,10 +249,9 @@ def main() -> None:
     assert Path(sys.prefix).resolve() in Path(__import__("audiocompose").__file__).resolve().parents
     assert Path(sys.prefix).resolve() in Path(voicerender.__file__).resolve().parents
     assert Path(sys.prefix).resolve() in Path(utterplan.__file__).resolve().parents
-    assert _version_tuple(version("renderplan")) >= (0, 1, 2)
-    assert (0, 6, 4) <= _version_tuple(version("utterplan")) < (0, 7, 0)
-    assert _version_tuple(version("voicerender")) >= (0, 2, 4)
-    assert _version_tuple(version("voicerender")) < (0, 3, 0)
+    assert (0, 2, 1) <= _version_tuple(version("renderplan")) < (0, 3, 0)
+    assert (0, 6, 12) <= _version_tuple(version("utterplan")) < (0, 7, 0)
+    assert (0, 2, 8) <= _version_tuple(version("voicerender")) < (0, 3, 0)
     assert _version_tuple(version("audiosig")) >= (0, 1, 9)
 
     register_adapter(_Adapter())
@@ -409,7 +408,7 @@ def main() -> None:
     )
     document_result = _compose_installed_document(root, profile)
     assert document_result.document_id == "document-0001"
-    print("installed VoiceRender v0.2.4 artifact -> AudioCompose book and document smoke passed")
+    print("installed VoiceRender v0.2.8 artifact -> AudioCompose book and document smoke passed")
 
 
 if __name__ == "__main__":
