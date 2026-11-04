@@ -3,18 +3,17 @@ schema_version: 2
 object_type: release_entry
 versioning:
   schema_version: 1
-  revision: 1
+  revision: 3
 entry_id: entry-0002
-release_version: v0.3.6
+release_version: v0.3.7
 kind: changed
-summary:
-  Raised the shared RenderPlan dependency to 0.2.1 and aligned supported UtterPlan/VoiceRender
-  producer floors with the RenderPlan 0.2 contract line
+summary: Changed RenderPlan and producer dependency floors to the 0.2 contract line
 status: accepted
 audience: null
 scopes: []
 source_refs:
   - tl:task-0029
+  - git:f8a130737e34751322f599ecfbdbbfe309043c8c
 paths:
   - pyproject.toml
   - README.md
@@ -30,5 +29,5 @@ sources: []
 contributors: []
 breaking: false
 internal: false
-order: 2
+order: 1
 ---
