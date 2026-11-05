@@ -16,7 +16,7 @@ from ..errors import HandoffValidationError, MediaResolutionError
 from ..job import validate_clip_geometry
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
 from ..operations import Gain
-from ..sources import AudioFileSource
+from ..sources import AudioBufferSource, AudioFileSource, RenderedAudioBuffer
 from ..wav import read_wav, sha256_file, wav_info
 from .media import (
     LocalWavResolver,
@@ -71,15 +71,17 @@ class _ValidatedControlOwnership:
     deferred_capabilities: tuple[str, ...]
 
 
-def _validate_contract(plan: RenderPlan, manifest: RenderManifest) -> str:
+def _validate_contract(plan: RenderPlan, manifest: RenderManifest | None = None) -> str:
     if not isinstance(plan, RenderPlan):
         raise HandoffValidationError("plan must be a renderplan.RenderPlan")
-    if not isinstance(manifest, RenderManifest):
+    if manifest is not None and not isinstance(manifest, RenderManifest):
         raise HandoffValidationError("manifest must be a renderplan.RenderManifest")
 
     plan_id = plan.computed_id()
     if plan.plan_id is not None and plan.plan_id != plan_id:
         raise HandoffValidationError("RenderPlan plan_id does not match its content")
+    if manifest is None:
+        return plan_id
     manifest_id = manifest.computed_id()
     if manifest.manifest_id is not None and manifest.manifest_id != manifest_id:
         raise HandoffValidationError("RenderManifest manifest_id does not match its content")
@@ -309,12 +311,17 @@ def _speech_emphasis(
 def _materialize_speech(
     item: SpeechItem,
     plan_id: str,
-    manifest: RenderManifest,
-    verified: dict[int, tuple[Any, Path, str]],
+    *,
+    manifest_id: str | None,
+    verified_speech: tuple[Any, Path, str] | None,
+    rendered_audio: RenderedAudioBuffer | None,
     emphasis_policy: Literal["segment_fallback", "strict"],
     control_ownership: _ValidatedControlOwnership | None = None,
 ) -> AudioClip:
-    artifact, path, digest = verified[item.number]
+    if (verified_speech is None) == (rendered_audio is None):
+        raise HandoffValidationError(
+            "speech materialization requires exactly one persisted or in-memory source"
+        )
     segment_id = item.segment_id or item.computed_id()
     gain, emphasis_report = _speech_emphasis(
         item, emphasis_policy, control_ownership=control_ownership
@@ -325,13 +332,37 @@ def _materialize_speech(
         RENDERPLAN_SEGMENT_NUMBER: item.number,
         RENDERPLAN_SEGMENT_ID: segment_id,
         RENDERPLAN_SOURCE: _source_metadata(item),
-        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
-        MANIFEST_WAV_SHA256: artifact.sha256,
-        MANIFEST_WAV: artifact.wav,
-        MANIFEST_SAMPLE_RATE: artifact.sample_rate,
-        MANIFEST_CHANNELS: artifact.channels,
-        MANIFEST_FRAMES: artifact.frames,
     }
+    if verified_speech is not None:
+        artifact, path, digest = verified_speech
+        if manifest_id is None:
+            raise HandoffValidationError(
+                "persisted speech materialization requires a manifest identity"
+            )
+        metadata.update(
+            {
+                MANIFEST_ID: manifest_id,
+                MANIFEST_WAV_SHA256: artifact.sha256,
+                MANIFEST_WAV: artifact.wav,
+                MANIFEST_SAMPLE_RATE: artifact.sample_rate,
+                MANIFEST_CHANNELS: artifact.channels,
+                MANIFEST_FRAMES: artifact.frames,
+            }
+        )
+        source = AudioFileSource(
+            path=path,
+            expected_sha256=digest,
+            sample_rate=artifact.sample_rate,
+            channels=1,
+            frames=artifact.frames,
+        )
+    else:
+        assert rendered_audio is not None
+        source = AudioBufferSource(rendered_audio.audio, rendered_audio.sample_rate)
+        metadata["renderplan.word_timings"] = [
+            dict(timing) for timing in rendered_audio.word_timings
+        ]
+        metadata["renderplan.rendered_metadata"] = dict(rendered_audio.metadata)
     if control_ownership is not None:
         realized = [
             {"name": control.name, "start": control.start, "end": control.end}
@@ -345,13 +376,7 @@ def _materialize_speech(
         metadata[RENDERPLAN_EMPHASIS] = emphasis_report
     return AudioClip(
         id=f"speech:{item.number:06d}",
-        source=AudioFileSource(
-            path=path,
-            expected_sha256=digest,
-            sample_rate=artifact.sample_rate,
-            channels=1,
-            frames=artifact.frames,
-        ),
+        source=source,
         operations=operations,
         metadata=metadata,
     )
@@ -436,20 +461,21 @@ def _materialize_audio(
 
 def materialize_renderplan_job(
     plan: RenderPlan,
-    manifest: RenderManifest,
+    manifest: RenderManifest | None = None,
     *,
-    render_dir: str | Path,
+    render_dir: str | Path | None = None,
+    rendered_speech: Mapping[tuple[int, str], RenderedAudioBuffer] | None = None,
     output_policy: OutputPolicy | None = None,
     media_resolver: MediaResolver | None = None,
     media_root: str | Path | None = None,
     emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
     _control_ownership: _ValidatedControlOwnership | None = None,
 ) -> AudioJob:
-    """Verify a complete RenderPlan handoff and return a generic AudioJob.
+    """Materialize a persisted or in-memory RenderPlan as a generic AudioJob.
 
-    Plan and manifest identity, speech artifacts, and all external media are
-    validated before AudioJob construction. Relative external paths use only the
-    explicit ``media_root`` supplied for this in-memory plan.
+    Persisted speech requires a matching RenderManifest and render directory.
+    In-memory speech is keyed by stable ``(segment_number, segment_id)`` identity;
+    it never reads or writes renderer artifacts.
     """
     if emphasis_policy not in ("segment_fallback", "strict"):
         raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
@@ -463,8 +489,40 @@ def materialize_renderplan_job(
             raise HandoffValidationError(
                 "validated control ownership does not match this RenderPlan handoff"
             )
-    render_root = _safe_directory(render_dir, label="render_dir")
-    verified = _verify_speech_artifacts(plan, manifest, render_root)
+    if rendered_speech is None:
+        if manifest is None:
+            raise HandoffValidationError("persisted composition requires a RenderManifest")
+        if render_dir is None:
+            raise HandoffValidationError("persisted composition requires a render directory")
+        render_root = _safe_directory(render_dir, label="render_dir")
+        verified = _verify_speech_artifacts(plan, manifest, render_root)
+        manifest_id: str | None = manifest.manifest_id or manifest.computed_id()
+    else:
+        if manifest is not None or render_dir is not None:
+            raise HandoffValidationError(
+                "in-memory composition must not receive a manifest or render directory"
+            )
+        if not isinstance(rendered_speech, Mapping):
+            raise HandoffValidationError("rendered_speech must be a mapping")
+        expected = {
+            (item.number, item.segment_id or item.computed_id())
+            for item in plan.flow
+            if isinstance(item, SpeechItem)
+        }
+        actual = set(rendered_speech)
+        if actual != expected:
+            missing = sorted(expected.difference(actual), key=repr)
+            extra = sorted(actual.difference(expected), key=repr)
+            raise HandoffValidationError(
+                f"in-memory speech occurrences differ from RenderPlan (missing={missing}, extra={extra})"
+            )
+        if any(not isinstance(value, RenderedAudioBuffer) for value in rendered_speech.values()):
+            raise HandoffValidationError(
+                "rendered_speech values must be RenderedAudioBuffer objects"
+            )
+        render_root = None
+        verified = {}
+        manifest_id = None
     if output_policy is not None and not isinstance(output_policy, OutputPolicy):
         raise HandoffValidationError("output_policy must be an AudioCompose OutputPolicy")
     resolved_media_root = (
@@ -479,9 +537,18 @@ def materialize_renderplan_job(
     items: list[AudioClip | Silence] = []
     for flow_index, item in enumerate(plan.flow):
         if isinstance(item, SpeechItem):
+            occurrence = (item.number, item.segment_id or item.computed_id())
             items.append(
                 _materialize_speech(
-                    item, plan_id, manifest, verified, emphasis_policy, _control_ownership
+                    item,
+                    plan_id,
+                    manifest_id=manifest_id,
+                    verified_speech=(verified[item.number] if rendered_speech is None else None),
+                    rendered_audio=(
+                        rendered_speech[occurrence] if rendered_speech is not None else None
+                    ),
+                    emphasis_policy=emphasis_policy,
+                    control_ownership=_control_ownership,
                 )
             )
         elif isinstance(item, PauseItem):
@@ -495,9 +562,10 @@ def materialize_renderplan_job(
         RENDERPLAN_PLAN_ID: plan_id,
         RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
         RENDERPLAN_PROFILE_ID: plan.render_profile_id,
-        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
         AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
     }
+    if manifest_id is not None:
+        source_metadata[MANIFEST_ID] = manifest_id
     if _control_ownership is not None:
         source_metadata.update(
             {

@@ -152,6 +152,39 @@ class BundleVariantsResult:
         }
 
 
+BundleCompositionState = Literal["not_started", "partial", "complete", "stale", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class BundleCompositionInspection:
+    """Read-only per-unit AudioCompose state for one bundle variant."""
+
+    variant: str
+    state: BundleCompositionState
+    selected: tuple[str, ...]
+    complete: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    stale: tuple[str, ...] = ()
+    reason: str | None = None
+    force_required: bool = False
+    replacement_safe: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": "audiocompose-bundle-composition-inspection",
+            "version": 1,
+            "variant": self.variant,
+            "state": self.state,
+            "selected": list(self.selected),
+            "complete": list(self.complete),
+            "missing": list(self.missing),
+            "stale": list(self.stale),
+            "reason": self.reason,
+            "force_required": self.force_required,
+            "replacement_safe": self.replacement_safe,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class _PlanUnit:
     id: str
@@ -190,6 +223,9 @@ class _ComposeInspection:
     composed_units: int
     report_path: Path | None
     error: str | None
+    complete_units: tuple[str, ...] = ()
+    missing_units: tuple[str, ...] = ()
+    stale_units: tuple[str, ...] = ()
 
 
 def _abs(path: str | Path) -> Path:
@@ -757,7 +793,13 @@ def _inspect_book_compose(
     try:
         variant_dir = _safe_output_variant(output_root, variant)
         if variant_dir is None:
-            return _ComposeInspection("not_composed", 0, None, None)
+            return _ComposeInspection(
+                "not_composed",
+                0,
+                None,
+                None,
+                missing_units=tuple(unit.id for unit in plan.units),
+            )
         if not report_path.exists() and not report_path.is_symlink():
             any_output = any(
                 (variant_dir / f"{unit.id}.wav").exists()
@@ -768,7 +810,13 @@ def _inspect_book_compose(
                 return _ComposeInspection(
                     "unknown", 0, None, "AudioCompose output exists without an ownership report"
                 )
-            return _ComposeInspection("not_composed", 0, None, None)
+            return _ComposeInspection(
+                "not_composed",
+                0,
+                None,
+                None,
+                missing_units=tuple(unit.id for unit in plan.units),
+            )
         report = _load_toml(report_path, root=output_root, label="AudioCompose book report")
         _report_common(
             report, expected_format=BOOK_REPORT_FORMAT, variant=variant, profile_id=plan.profile_id
@@ -810,11 +858,14 @@ def _inspect_book_compose(
             return _ComposeInspection(
                 "failed", 0, report_path, "AudioCompose report records failed selected work"
             )
-        completed = 0
+        complete_units: list[str] = []
+        missing_units: list[str] = []
+        stale_units: list[str] = []
         stale_reasons: list[str] = []
         for unit in plan.units:
             item = selected_items.get(unit.id)
             if item is None or item.get("status") not in {"written", "reused"}:
+                missing_units.append(unit.id)
                 continue
             _output_file(output_root, variant_dir, unit.id, item.get("output"))
             current = render.identities.get(unit.id)
@@ -823,6 +874,7 @@ def _inspect_book_compose(
                     stale_reasons.append(f"{unit.id} VoiceRender handoff was not inspected")
                 else:
                     stale_reasons.append(f"{unit.id} no longer has a valid VoiceRender manifest")
+                stale_units.append(unit.id)
                 continue
             checks = {
                 "render_plan_id": current["render_plan_id"],
@@ -834,19 +886,28 @@ def _inspect_book_compose(
             }
             if any(item.get(key) != value for key, value in checks.items()):
                 stale_reasons.append(f"{unit.id} upstream identity changed")
+                stale_units.append(unit.id)
                 continue
-            completed += 1
+            complete_units.append(unit.id)
+        completed = len(complete_units)
+        details = {
+            "complete_units": tuple(complete_units),
+            "missing_units": tuple(missing_units),
+            "stale_units": tuple(stale_units),
+        }
         if stale_reasons:
-            return _ComposeInspection("stale", completed, report_path, "; ".join(stale_reasons))
+            return _ComposeInspection(
+                "stale", completed, report_path, "; ".join(stale_reasons), **details
+            )
         if plan.selection_scoped:
             if completed == len(plan.units):
-                return _ComposeInspection("complete", completed, report_path, None)
+                return _ComposeInspection("complete", completed, report_path, None, **details)
             if completed == 0:
-                return _ComposeInspection("not_composed", 0, report_path, None)
-            return _ComposeInspection("partial", completed, report_path, None)
+                return _ComposeInspection("not_composed", 0, report_path, None, **details)
+            return _ComposeInspection("partial", completed, report_path, None, **details)
         if completed == len(plan.units) and len(by_id) == len(plan.known_unit_ids):
-            return _ComposeInspection("complete", completed, report_path, None)
-        return _ComposeInspection("partial", completed, report_path, None)
+            return _ComposeInspection("complete", completed, report_path, None, **details)
+        return _ComposeInspection("partial", completed, report_path, None, **details)
     except Exception as exc:
         return _ComposeInspection(
             "unknown",
@@ -864,14 +925,14 @@ def _inspect_document_compose(
     try:
         variant_dir = _safe_output_variant(output_root, variant)
         if variant_dir is None:
-            return _ComposeInspection("not_composed", 0, None, None)
+            return _ComposeInspection("not_composed", 0, None, None, missing_units=(unit.id,))
         expected_output = variant_dir / f"{unit.id}.wav"
         if not report_path.exists() and not report_path.is_symlink():
             if expected_output.exists() or expected_output.is_symlink():
                 return _ComposeInspection(
                     "unknown", 0, None, "AudioCompose output exists without an ownership report"
                 )
-            return _ComposeInspection("not_composed", 0, None, None)
+            return _ComposeInspection("not_composed", 0, None, None, missing_units=(unit.id,))
         report = _load_toml(report_path, root=output_root, label="AudioCompose document report")
         if (
             report.get("format") != DOCUMENT_REPORT_FORMAT
@@ -894,7 +955,7 @@ def _inspect_document_compose(
                 reason = "document VoiceRender handoff was not inspected"
             else:
                 reason = "document no longer has a valid VoiceRender manifest"
-            return _ComposeInspection("stale", 0, report_path, reason)
+            return _ComposeInspection("stale", 0, report_path, reason, stale_units=(unit.id,))
         checks = {
             "source_plan_id": current["source_plan_id"],
             "render_profile_id": current["render_profile_id"],
@@ -904,8 +965,14 @@ def _inspect_document_compose(
             "render_diagnostics_sha256": current["render_diagnostics_sha256"],
         }
         if any(report.get(key) != value for key, value in checks.items()):
-            return _ComposeInspection("stale", 0, report_path, "document upstream identity changed")
-        return _ComposeInspection("complete", 1, report_path, None)
+            return _ComposeInspection(
+                "stale",
+                0,
+                report_path,
+                "document upstream identity changed",
+                stale_units=(unit.id,),
+            )
+        return _ComposeInspection("complete", 1, report_path, None, complete_units=(unit.id,))
     except Exception as exc:
         return _ComposeInspection(
             "unknown",
@@ -1074,7 +1141,90 @@ def list_bundle_variants(
     )
 
 
+def inspect_bundle_composition(
+    bundle: str | Path,
+    *,
+    variant: str,
+    chapters: str = "all",
+    renderplan_root: str | Path | None = None,
+    voicerender_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+) -> BundleCompositionInspection:
+    """Inspect selected bundle composition state without writing or encoding media."""
+    if not isinstance(variant, str) or not variant or any(char in variant for char in "/\\\x00"):
+        return BundleCompositionInspection(
+            variant=str(variant), state="error", selected=(), reason="variant must be a safe name"
+        )
+    if not isinstance(chapters, str) or not chapters.strip():
+        return BundleCompositionInspection(
+            variant=variant,
+            state="error",
+            selected=(),
+            reason="chapters must be a non-empty selector",
+        )
+    try:
+        identity = load_bundle_identity(bundle)
+        plan_root = _stage_root(identity.root, renderplan_root, "renderplan", "RenderPlan root")
+        voice_root = _stage_root(identity.root, voicerender_root, "voicerender", "VoiceRender root")
+        compose_root = _stage_root(
+            identity.root, output_root, "audiocompose", "AudioCompose output root"
+        )
+        candidates = _enumerate_candidates(plan_root)
+    except Exception as exc:
+        return BundleCompositionInspection(
+            variant=variant, state="error", selected=(), reason=str(exc)
+        )
+    candidate = next((item for item in candidates if item.name == variant), None)
+    if candidate is None:
+        return BundleCompositionInspection(
+            variant=variant,
+            state="not_started",
+            selected=(),
+            reason="RenderPlan variant is not available",
+        )
+    selector = None
+    if identity.kind == "book" and chapters.strip().casefold() != "all":
+        selector = chapters
+    try:
+        plan = (
+            _validate_book_candidate(candidate, plan_root, chapter_selector=selector)
+            if identity.kind == "book"
+            else _validate_document_candidate(candidate)
+        )
+        render = _inspect_render(variant, plan, voice_root)
+        composition = (
+            _inspect_book_compose(variant, plan, render, compose_root)
+            if identity.kind == "book"
+            else _inspect_document_compose(variant, plan, render, compose_root)
+        )
+    except Exception as exc:
+        return BundleCompositionInspection(
+            variant=variant, state="error", selected=(), reason=str(exc)
+        )
+    states: dict[str, BundleCompositionState] = {
+        "not_composed": "not_started",
+        "partial": "partial",
+        "complete": "complete",
+        "stale": "stale",
+        "failed": "error",
+        "unknown": "error",
+    }
+    return BundleCompositionInspection(
+        variant=variant,
+        state=states[composition.status],
+        selected=tuple(unit.id for unit in plan.units),
+        complete=composition.complete_units,
+        missing=composition.missing_units,
+        stale=composition.stale_units,
+        reason=composition.error,
+        force_required=composition.status == "stale",
+        replacement_safe=states[composition.status] in {"complete", "partial", "stale"},
+    )
+
+
 __all__ = [
+    "BundleCompositionInspection",
+    "BundleCompositionState",
     "BundleVariant",
     "BundleVariantsResult",
     "ComposeStatus",
@@ -1082,5 +1232,6 @@ __all__ = [
     "RenderStatus",
     "UnitKind",
     "VariantState",
+    "inspect_bundle_composition",
     "list_bundle_variants",
 ]

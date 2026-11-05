@@ -62,11 +62,20 @@ from .progress import (
 from .renderplan import (
     RenderPlanComposeRequest,
     RenderPlanComposeResult,
+    RenderPlanMemoryComposeResult,
     compose_renderplan,
+    compose_renderplan_memory,
 )
 from .schema import audiojob_schema
-from .sources import AudioBufferSource, AudioFileSource
-from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
+from .sources import AudioBufferSource, AudioFileSource, RenderedAudioBuffer
+from .variants import (
+    BundleCompositionInspection,
+    BundleCompositionState,
+    BundleVariant,
+    BundleVariantsResult,
+    inspect_bundle_composition,
+    list_bundle_variants,
+)
 
 __all__ = [
     "__version__",
@@ -83,9 +92,13 @@ __all__ = [
     "load_bundle_identity",
     "BundleVariant",
     "BundleVariantsResult",
+    "BundleCompositionInspection",
+    "BundleCompositionState",
     "list_bundle_variants",
+    "inspect_bundle_composition",
     "AudioAnchor",
     "AudioBufferSource",
+    "RenderedAudioBuffer",
     "AudioClip",
     "AudioComposeError",
     "BookComposeError",
@@ -120,6 +133,7 @@ __all__ = [
     "compose_book",
     "compose_document",
     "compose_renderplan",
+    "compose_renderplan_memory",
     "estimate_composition",
     "default_book_output_policy",
     "default_document_output_policy",
@@ -137,6 +151,7 @@ __all__ = [
     "RatePitchEnvelope",
     "RenderPlanComposeRequest",
     "RenderPlanComposeResult",
+    "RenderPlanMemoryComposeResult",
     "Silence",
     "Tempo",
     "audiojob_schema",

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from renderplan import (
     AudioItem,
+    PauseItem,
     RenderManifest,
     RenderPlan,
     SourceSpan,
@@ -25,6 +26,7 @@ from audiocompose import (
     DiagnosticSeverity,
     LoudnessPolicy,
     OutputPolicy,
+    RenderedAudioBuffer,
 )
 from audiocompose.cli import main
 from audiocompose.errors import HandoffValidationError
@@ -460,3 +462,84 @@ def test_public_api_forwards_core_progress_and_preserves_output(tmp_path) -> Non
     with pytest.raises(RuntimeError, match="compose_started"):
         audiocompose.compose_renderplan(request, on_progress=fail)
     assert not request_output.exists()
+
+
+def test_memory_composition_matches_persisted_semantics_without_writing(tmp_path):
+    render_dir = tmp_path / "renders"
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    speech = _speech()
+    artifact = _rendered(render_dir, speech)
+    plan = _plan(
+        speech,
+        PauseItem(duration_ms=150, reason="chapter pause").with_identity(),
+        AudioItem(src="music.wav", source=(SourceSpan("source.txt", 0, 5),)).with_identity(),
+    )
+    plan_path, _ = _save_handoff(tmp_path, plan, _manifest(plan, [artifact]), render_dir=render_dir)
+    write_wav(assets / "music.wav", np.full(32, 0.2, dtype=np.float32), 16_000)
+    rendered = RenderedAudioBuffer(
+        audio=np.full(32, 0.125, dtype=np.float32),
+        sample_rate=16_000,
+        word_timings=({"word": "Hello", "start_seconds": 0.0, "end_seconds": 0.02},),
+        metadata={"engine": "fixture", "anchor": "word-1"},
+    )
+    memory_workspace = tmp_path / "memory-workspace"
+    memory_workspace.mkdir()
+
+    def snapshot():
+        return {
+            path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None
+            for path in tmp_path.rglob("*")
+        }
+
+    before = snapshot()
+    memory = audiocompose.compose_renderplan_memory(
+        plan,
+        {(speech.number, speech.segment_id or speech.computed_id()): rendered},
+        media_root=assets,
+        output_policy=OutputPolicy(sample_rate=16_000),
+    )
+    assert snapshot() == before
+    assert not (memory_workspace / "renderplan").exists()
+    assert memory.timeline[0]["renderplan.word_timings"] == [
+        {"word": "Hello", "start_seconds": 0.0, "end_seconds": 0.02}
+    ]
+    assert memory.timeline[0]["renderplan.rendered_metadata"] == {
+        "engine": "fixture",
+        "anchor": "word-1",
+    }
+    assert memory.composition.items[1].duration_samples == 2_400
+
+    persisted = audiocompose.compose_renderplan(
+        plan_path,
+        render_dir=render_dir,
+        output=tmp_path / "persisted.wav",
+        media_root=assets,
+        output_policy=OutputPolicy(sample_rate=16_000),
+    )
+    persisted_audio, persisted_rate = read_wav(persisted.output)
+    assert memory.sample_rate == persisted_rate == 16_000
+    assert np.array_equal(memory.audio, persisted_audio)
+
+
+def test_memory_composition_validates_occurrence_identity_and_emphasis():
+    speech = _speech(controls=(SpeechControl(1, 3, "emphasis", {}),))
+    plan = _plan(speech)
+    rendered = RenderedAudioBuffer(
+        audio=np.full(32, 0.125, dtype=np.float32),
+        sample_rate=16_000,
+    )
+    occurrence = (speech.number, speech.segment_id or speech.computed_id())
+
+    with pytest.raises(HandoffValidationError, match="occurrences differ"):
+        audiocompose.compose_renderplan_memory(plan, {})
+
+    result = audiocompose.compose_renderplan_memory(plan, {occurrence: rendered})
+    assert len(result.warnings) == 1
+    assert "entire segment" in result.warnings[0]
+    with pytest.raises(HandoffValidationError, match="split the speech upstream"):
+        audiocompose.compose_renderplan_memory(
+            plan,
+            {occurrence: rendered},
+            emphasis_policy="strict",
+        )

@@ -24,6 +24,7 @@ from audiocompose.variants import (
     BundleVariantsResult,
     _derive_state,
     _inspect_bundle_variants,
+    inspect_bundle_composition,
     list_bundle_variants,
 )
 
@@ -631,3 +632,68 @@ def test_complete_voicerender_report_without_manifests_is_unknown(tmp_path: Path
 
     assert discovered.render_status == "unknown"
     assert discovered.state == "unknown"
+
+
+def test_bundle_composition_inspector_reports_selected_states_without_writes(
+    tmp_path: Path,
+) -> None:
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, profile_id, plan = _book_variant(root)
+
+    def snapshot():
+        return {
+            path.relative_to(root): path.read_bytes() if path.is_file() else None
+            for path in root.rglob("*")
+        }
+
+    before = snapshot()
+    missing = inspect_bundle_composition(root, variant=variant)
+    assert missing.state == "not_started"
+    assert missing.selected == ("chapter-0001",)
+    assert missing.missing == ("chapter-0001",)
+    assert snapshot() == before
+
+    manifest, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    report_path = _write_book_compose_report(
+        root,
+        variant,
+        profile_id,
+        plan,
+        manifest,
+        render_dir / "render-manifest.toml",
+        render_dir / "render-diagnostics.json",
+    )
+    before = snapshot()
+    complete = inspect_bundle_composition(root, variant=variant)
+    assert complete.state == "complete"
+    assert complete.selected == complete.complete == ("chapter-0001",)
+    assert complete.missing == complete.stale == ()
+    assert snapshot() == before
+
+    report = report_path.read_text(encoding="utf-8").replace(
+        manifest.manifest_id or manifest.computed_id(), "sha256:" + "0" * 64
+    )
+    report_path.write_text(report, encoding="utf-8")
+    before = snapshot()
+    stale = inspect_bundle_composition(root, variant=variant, chapters="1")
+    assert stale.state == "stale"
+    assert stale.selected == stale.stale == ("chapter-0001",)
+    assert stale.force_required
+    assert stale.replacement_safe
+    assert "upstream identity changed" in (stale.reason or "")
+    assert snapshot() == before
+
+
+def test_bundle_composition_inspector_does_not_trust_unowned_output(tmp_path: Path) -> None:
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, _, _ = _book_variant(root)
+    output = root / "audiocompose" / variant
+    output.mkdir(parents=True)
+    (output / "chapter-0001.wav").write_bytes(b"unowned")
+
+    result = inspect_bundle_composition(root, variant=variant)
+
+    assert result.state == "error"
+    assert result.selected == ("chapter-0001",)
+    assert result.complete == ()
+    assert "without an ownership report" in (result.reason or "")

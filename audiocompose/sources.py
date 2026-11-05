@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -34,6 +36,28 @@ class AudioBufferSource:
 
     def load(self) -> tuple[np.ndarray, int]:
         return self.audio.copy(), self.sample_rate
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedAudioBuffer:
+    """Generic in-memory speech audio for RenderPlan composition."""
+
+    audio: np.ndarray
+    sample_rate: int
+    word_timings: tuple[Mapping[str, Any], ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        source = AudioBufferSource(self.audio, self.sample_rate)
+        if not isinstance(self.word_timings, (tuple, list)) or any(
+            not isinstance(timing, Mapping) for timing in self.word_timings
+        ):
+            raise AudioValidationError("word_timings must be a sequence of mappings")
+        if not isinstance(self.metadata, Mapping):
+            raise AudioValidationError("metadata must be a mapping")
+        object.__setattr__(self, "audio", source.audio)
+        object.__setattr__(self, "word_timings", tuple(dict(item) for item in self.word_timings))
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,11 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, overload
 
+import numpy as np
+from renderplan import RenderPlan
+
 from .composer import Composer
 from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
-from .integrations.renderplan import load_and_materialize_renderplan_job
+from .integrations.renderplan import load_and_materialize_renderplan_job, materialize_renderplan_job
 from .model import AudioJob, CompositionResult, OutputPolicy
 from .progress import CompositionProgressCallback
+from .sources import RenderedAudioBuffer
 from .wav import _atomic_write_prepared_wav
 
 EmphasisPolicy = Literal["segment_fallback", "strict"]
@@ -57,6 +61,17 @@ class RenderPlanComposeResult:
     runtime: Mapping[str, float] = field(default_factory=dict, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class RenderPlanMemoryComposeResult:
+    """In-memory RenderPlan composition result with no persisted artifacts."""
+
+    audio: np.ndarray
+    sample_rate: int
+    composition: CompositionResult
+    warnings: tuple[str, ...] = ()
+    timeline: tuple[Mapping[str, Any], ...] = ()
+
+
 def _timeline(job: AudioJob, composition: CompositionResult) -> tuple[Mapping[str, Any], ...]:
     entries: list[Mapping[str, Any]] = []
     for item, composed in zip(job.items, composition.items, strict=True):
@@ -81,6 +96,8 @@ def _timeline(job: AudioJob, composition: CompositionResult) -> tuple[Mapping[st
             "renderplan.audio.options",
             "render_manifest.wav",
             "render_manifest.wav_sha256",
+            "renderplan.word_timings",
+            "renderplan.rendered_metadata",
             "renderplan.emphasis",
         ):
             if key in metadata:
@@ -115,6 +132,34 @@ def _emphasis_diagnostics(job: AudioJob) -> tuple[CompositionDiagnostic, ...]:
             )
         )
     return tuple(diagnostics)
+
+
+def compose_renderplan_memory(
+    plan: RenderPlan,
+    rendered: Mapping[tuple[int, str], RenderedAudioBuffer],
+    *,
+    media_root: str | Path | None = None,
+    output_policy: OutputPolicy | None = None,
+    emphasis_policy: EmphasisPolicy = "segment_fallback",
+    on_progress: CompositionProgressCallback | None = None,
+) -> RenderPlanMemoryComposeResult:
+    """Compose rendered speech buffers against a RenderPlan without writing files."""
+    job = materialize_renderplan_job(
+        plan,
+        rendered_speech=rendered,
+        media_root=media_root,
+        output_policy=output_policy,
+        emphasis_policy=emphasis_policy,
+    )
+    composition = Composer().compose(job, on_progress=on_progress)
+    warnings = tuple(item.message for item in _emphasis_diagnostics(job))
+    return RenderPlanMemoryComposeResult(
+        audio=composition.audio,
+        sample_rate=composition.sample_rate,
+        composition=composition,
+        warnings=warnings,
+        timeline=_timeline(job, composition),
+    )
 
 
 @overload
@@ -242,4 +287,6 @@ __all__ = [
     "RenderPlanComposeRequest",
     "RenderPlanComposeResult",
     "compose_renderplan",
+    "RenderPlanMemoryComposeResult",
+    "compose_renderplan_memory",
 ]
