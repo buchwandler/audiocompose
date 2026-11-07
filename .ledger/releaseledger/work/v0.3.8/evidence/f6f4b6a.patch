@@ -1,0 +1,928 @@
+ audiocompose/__init__.py                |  19 +++-
+ audiocompose/integrations/renderplan.py | 126 +++++++++++++++++-----
+ audiocompose/renderplan.py              |  49 ++++++++-
+ audiocompose/sources.py                 |  26 ++++-
+ audiocompose/variants.py                | 181 +++++++++++++++++++++++++++++---
+ tests/test_compose_renderplan_api.py    |  83 +++++++++++++++
+ tests/test_schema_resources.py          |   6 ++
+ tests/test_variants.py                  |  66 ++++++++++++
+ 8 files changed, 508 insertions(+), 48 deletions(-)
+
+diff --git a/audiocompose/__init__.py b/audiocompose/__init__.py
+index 7a19e3e..f4c3c93 100644
+--- a/audiocompose/__init__.py
++++ b/audiocompose/__init__.py
+@@ -62,11 +62,20 @@ from .progress import (
+ from .renderplan import (
+     RenderPlanComposeRequest,
+     RenderPlanComposeResult,
++    RenderPlanMemoryComposeResult,
+     compose_renderplan,
++    compose_renderplan_memory,
+ )
+ from .schema import audiojob_schema
+-from .sources import AudioBufferSource, AudioFileSource
+-from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
++from .sources import AudioBufferSource, AudioFileSource, RenderedAudioBuffer
++from .variants import (
++    BundleCompositionInspection,
++    BundleCompositionState,
++    BundleVariant,
++    BundleVariantsResult,
++    inspect_bundle_composition,
++    list_bundle_variants,
++)
+
+ __all__ = [
+     "__version__",
+@@ -83,9 +92,13 @@ __all__ = [
+     "load_bundle_identity",
+     "BundleVariant",
+     "BundleVariantsResult",
++    "BundleCompositionInspection",
++    "BundleCompositionState",
+     "list_bundle_variants",
++    "inspect_bundle_composition",
+     "AudioAnchor",
+     "AudioBufferSource",
++    "RenderedAudioBuffer",
+     "AudioClip",
+     "AudioComposeError",
+     "BookComposeError",
+@@ -120,6 +133,7 @@ __all__ = [
+     "compose_book",
+     "compose_document",
+     "compose_renderplan",
++    "compose_renderplan_memory",
+     "estimate_composition",
+     "default_book_output_policy",
+     "default_document_output_policy",
+@@ -137,6 +151,7 @@ __all__ = [
+     "RatePitchEnvelope",
+     "RenderPlanComposeRequest",
+     "RenderPlanComposeResult",
++    "RenderPlanMemoryComposeResult",
+     "Silence",
+     "Tempo",
+     "audiojob_schema",
+diff --git a/audiocompose/integrations/renderplan.py b/audiocompose/integrations/renderplan.py
+index a4d8a45..0f63db1 100644
+--- a/audiocompose/integrations/renderplan.py
++++ b/audiocompose/integrations/renderplan.py
+@@ -16,7 +16,7 @@ from ..errors import HandoffValidationError, MediaResolutionError
+ from ..job import validate_clip_geometry
+ from ..model import AudioClip, AudioJob, OutputPolicy, Silence
+ from ..operations import Gain
+-from ..sources import AudioFileSource
++from ..sources import AudioBufferSource, AudioFileSource, RenderedAudioBuffer
+ from ..wav import read_wav, sha256_file, wav_info
+ from .media import (
+     LocalWavResolver,
+@@ -71,15 +71,17 @@ class _ValidatedControlOwnership:
+     deferred_capabilities: tuple[str, ...]
+
+
+-def _validate_contract(plan: RenderPlan, manifest: RenderManifest) -> str:
++def _validate_contract(plan: RenderPlan, manifest: RenderManifest | None = None) -> str:
+     if not isinstance(plan, RenderPlan):
+         raise HandoffValidationError("plan must be a renderplan.RenderPlan")
+-    if not isinstance(manifest, RenderManifest):
++    if manifest is not None and not isinstance(manifest, RenderManifest):
+         raise HandoffValidationError("manifest must be a renderplan.RenderManifest")
+
+     plan_id = plan.computed_id()
+     if plan.plan_id is not None and plan.plan_id != plan_id:
+         raise HandoffValidationError("RenderPlan plan_id does not match its content")
++    if manifest is None:
++        return plan_id
+     manifest_id = manifest.computed_id()
+     if manifest.manifest_id is not None and manifest.manifest_id != manifest_id:
+         raise HandoffValidationError("RenderManifest manifest_id does not match its content")
+@@ -309,12 +311,17 @@ def _speech_emphasis(
+ def _materialize_speech(
+     item: SpeechItem,
+     plan_id: str,
+-    manifest: RenderManifest,
+-    verified: dict[int, tuple[Any, Path, str]],
++    *,
++    manifest_id: str | None,
++    verified_speech: tuple[Any, Path, str] | None,
++    rendered_audio: RenderedAudioBuffer | None,
+     emphasis_policy: Literal["segment_fallback", "strict"],
+     control_ownership: _ValidatedControlOwnership | None = None,
+ ) -> AudioClip:
+-    artifact, path, digest = verified[item.number]
++    if (verified_speech is None) == (rendered_audio is None):
++        raise HandoffValidationError(
++            "speech materialization requires exactly one persisted or in-memory source"
++        )
+     segment_id = item.segment_id or item.computed_id()
+     gain, emphasis_report = _speech_emphasis(
+         item, emphasis_policy, control_ownership=control_ownership
+@@ -325,13 +332,37 @@ def _materialize_speech(
+         RENDERPLAN_SEGMENT_NUMBER: item.number,
+         RENDERPLAN_SEGMENT_ID: segment_id,
+         RENDERPLAN_SOURCE: _source_metadata(item),
+-        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
+-        MANIFEST_WAV_SHA256: artifact.sha256,
+-        MANIFEST_WAV: artifact.wav,
+-        MANIFEST_SAMPLE_RATE: artifact.sample_rate,
+-        MANIFEST_CHANNELS: artifact.channels,
+-        MANIFEST_FRAMES: artifact.frames,
+     }
++    if verified_speech is not None:
++        artifact, path, digest = verified_speech
++        if manifest_id is None:
++            raise HandoffValidationError(
++                "persisted speech materialization requires a manifest identity"
++            )
++        metadata.update(
++            {
++                MANIFEST_ID: manifest_id,
++                MANIFEST_WAV_SHA256: artifact.sha256,
++                MANIFEST_WAV: artifact.wav,
++                MANIFEST_SAMPLE_RATE: artifact.sample_rate,
++                MANIFEST_CHANNELS: artifact.channels,
++                MANIFEST_FRAMES: artifact.frames,
++            }
++        )
++        source = AudioFileSource(
++            path=path,
++            expected_sha256=digest,
++            sample_rate=artifact.sample_rate,
++            channels=1,
++            frames=artifact.frames,
++        )
++    else:
++        assert rendered_audio is not None
++        source = AudioBufferSource(rendered_audio.audio, rendered_audio.sample_rate)
++        metadata["renderplan.word_timings"] = [
++            dict(timing) for timing in rendered_audio.word_timings
++        ]
++        metadata["renderplan.rendered_metadata"] = dict(rendered_audio.metadata)
+     if control_ownership is not None:
+         realized = [
+             {"name": control.name, "start": control.start, "end": control.end}
+@@ -345,13 +376,7 @@ def _materialize_speech(
+         metadata[RENDERPLAN_EMPHASIS] = emphasis_report
+     return AudioClip(
+         id=f"speech:{item.number:06d}",
+-        source=AudioFileSource(
+-            path=path,
+-            expected_sha256=digest,
+-            sample_rate=artifact.sample_rate,
+-            channels=1,
+-            frames=artifact.frames,
+-        ),
++        source=source,
+         operations=operations,
+         metadata=metadata,
+     )
+@@ -436,20 +461,21 @@ def _materialize_audio(
+
+ def materialize_renderplan_job(
+     plan: RenderPlan,
+-    manifest: RenderManifest,
++    manifest: RenderManifest | None = None,
+     *,
+-    render_dir: str | Path,
++    render_dir: str | Path | None = None,
++    rendered_speech: Mapping[tuple[int, str], RenderedAudioBuffer] | None = None,
+     output_policy: OutputPolicy | None = None,
+     media_resolver: MediaResolver | None = None,
+     media_root: str | Path | None = None,
+     emphasis_policy: Literal["segment_fallback", "strict"] = "strict",
+     _control_ownership: _ValidatedControlOwnership | None = None,
+ ) -> AudioJob:
+-    """Verify a complete RenderPlan handoff and return a generic AudioJob.
++    """Materialize a persisted or in-memory RenderPlan as a generic AudioJob.
+
+-    Plan and manifest identity, speech artifacts, and all external media are
+-    validated before AudioJob construction. Relative external paths use only the
+-    explicit ``media_root`` supplied for this in-memory plan.
++    Persisted speech requires a matching RenderManifest and render directory.
++    In-memory speech is keyed by stable ``(segment_number, segment_id)`` identity;
++    it never reads or writes renderer artifacts.
+     """
+     if emphasis_policy not in ("segment_fallback", "strict"):
+         raise HandoffValidationError("emphasis_policy must be 'segment_fallback' or 'strict'")
+@@ -463,8 +489,40 @@ def materialize_renderplan_job(
+             raise HandoffValidationError(
+                 "validated control ownership does not match this RenderPlan handoff"
+             )
+-    render_root = _safe_directory(render_dir, label="render_dir")
+-    verified = _verify_speech_artifacts(plan, manifest, render_root)
++    if rendered_speech is None:
++        if manifest is None:
++            raise HandoffValidationError("persisted composition requires a RenderManifest")
++        if render_dir is None:
++            raise HandoffValidationError("persisted composition requires a render directory")
++        render_root = _safe_directory(render_dir, label="render_dir")
++        verified = _verify_speech_artifacts(plan, manifest, render_root)
++        manifest_id: str | None = manifest.manifest_id or manifest.computed_id()
++    else:
++        if manifest is not None or render_dir is not None:
++            raise HandoffValidationError(
++                "in-memory composition must not receive a manifest or render directory"
++            )
++        if not isinstance(rendered_speech, Mapping):
++            raise HandoffValidationError("rendered_speech must be a mapping")
++        expected = {
++            (item.number, item.segment_id or item.computed_id())
++            for item in plan.flow
++            if isinstance(item, SpeechItem)
++        }
++        actual = set(rendered_speech)
++        if actual != expected:
++            missing = sorted(expected.difference(actual), key=repr)
++            extra = sorted(actual.difference(expected), key=repr)
++            raise HandoffValidationError(
++                f"in-memory speech occurrences differ from RenderPlan (missing={missing}, extra={extra})"
++            )
++        if any(not isinstance(value, RenderedAudioBuffer) for value in rendered_speech.values()):
++            raise HandoffValidationError(
++                "rendered_speech values must be RenderedAudioBuffer objects"
++            )
++        render_root = None
++        verified = {}
++        manifest_id = None
+     if output_policy is not None and not isinstance(output_policy, OutputPolicy):
+         raise HandoffValidationError("output_policy must be an AudioCompose OutputPolicy")
+     resolved_media_root = (
+@@ -479,9 +537,18 @@ def materialize_renderplan_job(
+     items: list[AudioClip | Silence] = []
+     for flow_index, item in enumerate(plan.flow):
+         if isinstance(item, SpeechItem):
++            occurrence = (item.number, item.segment_id or item.computed_id())
+             items.append(
+                 _materialize_speech(
+-                    item, plan_id, manifest, verified, emphasis_policy, _control_ownership
++                    item,
++                    plan_id,
++                    manifest_id=manifest_id,
++                    verified_speech=(verified[item.number] if rendered_speech is None else None),
++                    rendered_audio=(
++                        rendered_speech[occurrence] if rendered_speech is not None else None
++                    ),
++                    emphasis_policy=emphasis_policy,
++                    control_ownership=_control_ownership,
+                 )
+             )
+         elif isinstance(item, PauseItem):
+@@ -495,9 +562,10 @@ def materialize_renderplan_job(
+         RENDERPLAN_PLAN_ID: plan_id,
+         RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
+         RENDERPLAN_PROFILE_ID: plan.render_profile_id,
+-        MANIFEST_ID: manifest.manifest_id or manifest.computed_id(),
+         AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
+     }
++    if manifest_id is not None:
++        source_metadata[MANIFEST_ID] = manifest_id
+     if _control_ownership is not None:
+         source_metadata.update(
+             {
+diff --git a/audiocompose/renderplan.py b/audiocompose/renderplan.py
+index 63ed9e0..c4bf88d 100644
+--- a/audiocompose/renderplan.py
++++ b/audiocompose/renderplan.py
+@@ -8,11 +8,15 @@ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any, Literal, overload
+
++import numpy as np
++from renderplan import RenderPlan
++
+ from .composer import Composer
+ from .diagnostics import CompositionDiagnostic, DiagnosticSeverity
+-from .integrations.renderplan import load_and_materialize_renderplan_job
++from .integrations.renderplan import load_and_materialize_renderplan_job, materialize_renderplan_job
+ from .model import AudioJob, CompositionResult, OutputPolicy
+ from .progress import CompositionProgressCallback
++from .sources import RenderedAudioBuffer
+ from .wav import _atomic_write_prepared_wav
+
+ EmphasisPolicy = Literal["segment_fallback", "strict"]
+@@ -57,6 +61,17 @@ class RenderPlanComposeResult:
+     runtime: Mapping[str, float] = field(default_factory=dict, compare=False)
+
+
++@dataclass(frozen=True, slots=True)
++class RenderPlanMemoryComposeResult:
++    """In-memory RenderPlan composition result with no persisted artifacts."""
++
++    audio: np.ndarray
++    sample_rate: int
++    composition: CompositionResult
++    warnings: tuple[str, ...] = ()
++    timeline: tuple[Mapping[str, Any], ...] = ()
++
++
+ def _timeline(job: AudioJob, composition: CompositionResult) -> tuple[Mapping[str, Any], ...]:
+     entries: list[Mapping[str, Any]] = []
+     for item, composed in zip(job.items, composition.items, strict=True):
+@@ -81,6 +96,8 @@ def _timeline(job: AudioJob, composition: CompositionResult) -> tuple[Mapping[st
+             "renderplan.audio.options",
+             "render_manifest.wav",
+             "render_manifest.wav_sha256",
++            "renderplan.word_timings",
++            "renderplan.rendered_metadata",
+             "renderplan.emphasis",
+         ):
+             if key in metadata:
+@@ -117,6 +134,34 @@ def _emphasis_diagnostics(job: AudioJob) -> tuple[CompositionDiagnostic, ...]:
+     return tuple(diagnostics)
+
+
++def compose_renderplan_memory(
++    plan: RenderPlan,
++    rendered: Mapping[tuple[int, str], RenderedAudioBuffer],
++    *,
++    media_root: str | Path | None = None,
++    output_policy: OutputPolicy | None = None,
++    emphasis_policy: EmphasisPolicy = "segment_fallback",
++    on_progress: CompositionProgressCallback | None = None,
++) -> RenderPlanMemoryComposeResult:
++    """Compose rendered speech buffers against a RenderPlan without writing files."""
++    job = materialize_renderplan_job(
++        plan,
++        rendered_speech=rendered,
++        media_root=media_root,
++        output_policy=output_policy,
++        emphasis_policy=emphasis_policy,
++    )
++    composition = Composer().compose(job, on_progress=on_progress)
++    warnings = tuple(item.message for item in _emphasis_diagnostics(job))
++    return RenderPlanMemoryComposeResult(
++        audio=composition.audio,
++        sample_rate=composition.sample_rate,
++        composition=composition,
++        warnings=warnings,
++        timeline=_timeline(job, composition),
++    )
++
++
+ @overload
+ def compose_renderplan(
+     plan: RenderPlanComposeRequest,
+@@ -242,4 +287,6 @@ __all__ = [
+     "RenderPlanComposeRequest",
+     "RenderPlanComposeResult",
+     "compose_renderplan",
++    "RenderPlanMemoryComposeResult",
++    "compose_renderplan_memory",
+ ]
+diff --git a/audiocompose/sources.py b/audiocompose/sources.py
+index c76048e..1b1e544 100644
+--- a/audiocompose/sources.py
++++ b/audiocompose/sources.py
+@@ -1,7 +1,9 @@
+ from __future__ import annotations
+
+-from dataclasses import dataclass
++from collections.abc import Mapping
++from dataclasses import dataclass, field
+ from pathlib import Path
++from typing import Any
+
+ import numpy as np
+
+@@ -36,6 +38,28 @@ class AudioBufferSource:
+         return self.audio.copy(), self.sample_rate
+
+
++@dataclass(frozen=True, slots=True)
++class RenderedAudioBuffer:
++    """Generic in-memory speech audio for RenderPlan composition."""
++
++    audio: np.ndarray
++    sample_rate: int
++    word_timings: tuple[Mapping[str, Any], ...] = ()
++    metadata: Mapping[str, Any] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        source = AudioBufferSource(self.audio, self.sample_rate)
++        if not isinstance(self.word_timings, (tuple, list)) or any(
++            not isinstance(timing, Mapping) for timing in self.word_timings
++        ):
++            raise AudioValidationError("word_timings must be a sequence of mappings")
++        if not isinstance(self.metadata, Mapping):
++            raise AudioValidationError("metadata must be a mapping")
++        object.__setattr__(self, "audio", source.audio)
++        object.__setattr__(self, "word_timings", tuple(dict(item) for item in self.word_timings))
++        object.__setattr__(self, "metadata", dict(self.metadata))
++
++
+ @dataclass(frozen=True, slots=True)
+ class AudioFileSource:
+     path: str | Path
+diff --git a/audiocompose/variants.py b/audiocompose/variants.py
+index 27bb4f9..acc4dda 100644
+--- a/audiocompose/variants.py
++++ b/audiocompose/variants.py
+@@ -152,6 +152,39 @@ class BundleVariantsResult:
+         }
+
+
++BundleCompositionState = Literal["not_started", "partial", "complete", "stale", "error"]
++
++
++@dataclass(frozen=True, slots=True)
++class BundleCompositionInspection:
++    """Read-only per-unit AudioCompose state for one bundle variant."""
++
++    variant: str
++    state: BundleCompositionState
++    selected: tuple[str, ...]
++    complete: tuple[str, ...] = ()
++    missing: tuple[str, ...] = ()
++    stale: tuple[str, ...] = ()
++    reason: str | None = None
++    force_required: bool = False
++    replacement_safe: bool = False
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "audiocompose-bundle-composition-inspection",
++            "version": 1,
++            "variant": self.variant,
++            "state": self.state,
++            "selected": list(self.selected),
++            "complete": list(self.complete),
++            "missing": list(self.missing),
++            "stale": list(self.stale),
++            "reason": self.reason,
++            "force_required": self.force_required,
++            "replacement_safe": self.replacement_safe,
++        }
++
++
+ @dataclass(frozen=True, slots=True)
+ class _PlanUnit:
+     id: str
+@@ -190,6 +223,9 @@ class _ComposeInspection:
+     composed_units: int
+     report_path: Path | None
+     error: str | None
++    complete_units: tuple[str, ...] = ()
++    missing_units: tuple[str, ...] = ()
++    stale_units: tuple[str, ...] = ()
+
+
+ def _abs(path: str | Path) -> Path:
+@@ -757,7 +793,13 @@ def _inspect_book_compose(
+     try:
+         variant_dir = _safe_output_variant(output_root, variant)
+         if variant_dir is None:
+-            return _ComposeInspection("not_composed", 0, None, None)
++            return _ComposeInspection(
++                "not_composed",
++                0,
++                None,
++                None,
++                missing_units=tuple(unit.id for unit in plan.units),
++            )
+         if not report_path.exists() and not report_path.is_symlink():
+             any_output = any(
+                 (variant_dir / f"{unit.id}.wav").exists()
+@@ -768,7 +810,13 @@ def _inspect_book_compose(
+                 return _ComposeInspection(
+                     "unknown", 0, None, "AudioCompose output exists without an ownership report"
+                 )
+-            return _ComposeInspection("not_composed", 0, None, None)
++            return _ComposeInspection(
++                "not_composed",
++                0,
++                None,
++                None,
++                missing_units=tuple(unit.id for unit in plan.units),
++            )
+         report = _load_toml(report_path, root=output_root, label="AudioCompose book report")
+         _report_common(
+             report, expected_format=BOOK_REPORT_FORMAT, variant=variant, profile_id=plan.profile_id
+@@ -810,11 +858,14 @@ def _inspect_book_compose(
+             return _ComposeInspection(
+                 "failed", 0, report_path, "AudioCompose report records failed selected work"
+             )
+-        completed = 0
++        complete_units: list[str] = []
++        missing_units: list[str] = []
++        stale_units: list[str] = []
+         stale_reasons: list[str] = []
+         for unit in plan.units:
+             item = selected_items.get(unit.id)
+             if item is None or item.get("status") not in {"written", "reused"}:
++                missing_units.append(unit.id)
+                 continue
+             _output_file(output_root, variant_dir, unit.id, item.get("output"))
+             current = render.identities.get(unit.id)
+@@ -823,6 +874,7 @@ def _inspect_book_compose(
+                     stale_reasons.append(f"{unit.id} VoiceRender handoff was not inspected")
+                 else:
+                     stale_reasons.append(f"{unit.id} no longer has a valid VoiceRender manifest")
++                stale_units.append(unit.id)
+                 continue
+             checks = {
+                 "render_plan_id": current["render_plan_id"],
+@@ -834,19 +886,28 @@ def _inspect_book_compose(
+             }
+             if any(item.get(key) != value for key, value in checks.items()):
+                 stale_reasons.append(f"{unit.id} upstream identity changed")
++                stale_units.append(unit.id)
+                 continue
+-            completed += 1
++            complete_units.append(unit.id)
++        completed = len(complete_units)
++        details = {
++            "complete_units": tuple(complete_units),
++            "missing_units": tuple(missing_units),
++            "stale_units": tuple(stale_units),
++        }
+         if stale_reasons:
+-            return _ComposeInspection("stale", completed, report_path, "; ".join(stale_reasons))
++            return _ComposeInspection(
++                "stale", completed, report_path, "; ".join(stale_reasons), **details
++            )
+         if plan.selection_scoped:
+             if completed == len(plan.units):
+-                return _ComposeInspection("complete", completed, report_path, None)
++                return _ComposeInspection("complete", completed, report_path, None, **details)
+             if completed == 0:
+-                return _ComposeInspection("not_composed", 0, report_path, None)
+-            return _ComposeInspection("partial", completed, report_path, None)
++                return _ComposeInspection("not_composed", 0, report_path, None, **details)
++            return _ComposeInspection("partial", completed, report_path, None, **details)
+         if completed == len(plan.units) and len(by_id) == len(plan.known_unit_ids):
+-            return _ComposeInspection("complete", completed, report_path, None)
+-        return _ComposeInspection("partial", completed, report_path, None)
++            return _ComposeInspection("complete", completed, report_path, None, **details)
++        return _ComposeInspection("partial", completed, report_path, None, **details)
+     except Exception as exc:
+         return _ComposeInspection(
+             "unknown",
+@@ -864,14 +925,14 @@ def _inspect_document_compose(
+     try:
+         variant_dir = _safe_output_variant(output_root, variant)
+         if variant_dir is None:
+-            return _ComposeInspection("not_composed", 0, None, None)
++            return _ComposeInspection("not_composed", 0, None, None, missing_units=(unit.id,))
+         expected_output = variant_dir / f"{unit.id}.wav"
+         if not report_path.exists() and not report_path.is_symlink():
+             if expected_output.exists() or expected_output.is_symlink():
+                 return _ComposeInspection(
+                     "unknown", 0, None, "AudioCompose output exists without an ownership report"
+                 )
+-            return _ComposeInspection("not_composed", 0, None, None)
++            return _ComposeInspection("not_composed", 0, None, None, missing_units=(unit.id,))
+         report = _load_toml(report_path, root=output_root, label="AudioCompose document report")
+         if (
+             report.get("format") != DOCUMENT_REPORT_FORMAT
+@@ -894,7 +955,7 @@ def _inspect_document_compose(
+                 reason = "document VoiceRender handoff was not inspected"
+             else:
+                 reason = "document no longer has a valid VoiceRender manifest"
+-            return _ComposeInspection("stale", 0, report_path, reason)
++            return _ComposeInspection("stale", 0, report_path, reason, stale_units=(unit.id,))
+         checks = {
+             "source_plan_id": current["source_plan_id"],
+             "render_profile_id": current["render_profile_id"],
+@@ -904,8 +965,14 @@ def _inspect_document_compose(
+             "render_diagnostics_sha256": current["render_diagnostics_sha256"],
+         }
+         if any(report.get(key) != value for key, value in checks.items()):
+-            return _ComposeInspection("stale", 0, report_path, "document upstream identity changed")
+-        return _ComposeInspection("complete", 1, report_path, None)
++            return _ComposeInspection(
++                "stale",
++                0,
++                report_path,
++                "document upstream identity changed",
++                stale_units=(unit.id,),
++            )
++        return _ComposeInspection("complete", 1, report_path, None, complete_units=(unit.id,))
+     except Exception as exc:
+         return _ComposeInspection(
+             "unknown",
+@@ -1074,7 +1141,90 @@ def list_bundle_variants(
+     )
+
+
++def inspect_bundle_composition(
++    bundle: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    renderplan_root: str | Path | None = None,
++    voicerender_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++) -> BundleCompositionInspection:
++    """Inspect selected bundle composition state without writing or encoding media."""
++    if not isinstance(variant, str) or not variant or any(char in variant for char in "/\\\x00"):
++        return BundleCompositionInspection(
++            variant=str(variant), state="error", selected=(), reason="variant must be a safe name"
++        )
++    if not isinstance(chapters, str) or not chapters.strip():
++        return BundleCompositionInspection(
++            variant=variant,
++            state="error",
++            selected=(),
++            reason="chapters must be a non-empty selector",
++        )
++    try:
++        identity = load_bundle_identity(bundle)
++        plan_root = _stage_root(identity.root, renderplan_root, "renderplan", "RenderPlan root")
++        voice_root = _stage_root(identity.root, voicerender_root, "voicerender", "VoiceRender root")
++        compose_root = _stage_root(
++            identity.root, output_root, "audiocompose", "AudioCompose output root"
++        )
++        candidates = _enumerate_candidates(plan_root)
++    except Exception as exc:
++        return BundleCompositionInspection(
++            variant=variant, state="error", selected=(), reason=str(exc)
++        )
++    candidate = next((item for item in candidates if item.name == variant), None)
++    if candidate is None:
++        return BundleCompositionInspection(
++            variant=variant,
++            state="not_started",
++            selected=(),
++            reason="RenderPlan variant is not available",
++        )
++    selector = None
++    if identity.kind == "book" and chapters.strip().casefold() != "all":
++        selector = chapters
++    try:
++        plan = (
++            _validate_book_candidate(candidate, plan_root, chapter_selector=selector)
++            if identity.kind == "book"
++            else _validate_document_candidate(candidate)
++        )
++        render = _inspect_render(variant, plan, voice_root)
++        composition = (
++            _inspect_book_compose(variant, plan, render, compose_root)
++            if identity.kind == "book"
++            else _inspect_document_compose(variant, plan, render, compose_root)
++        )
++    except Exception as exc:
++        return BundleCompositionInspection(
++            variant=variant, state="error", selected=(), reason=str(exc)
++        )
++    states: dict[str, BundleCompositionState] = {
++        "not_composed": "not_started",
++        "partial": "partial",
++        "complete": "complete",
++        "stale": "stale",
++        "failed": "error",
++        "unknown": "error",
++    }
++    return BundleCompositionInspection(
++        variant=variant,
++        state=states[composition.status],
++        selected=tuple(unit.id for unit in plan.units),
++        complete=composition.complete_units,
++        missing=composition.missing_units,
++        stale=composition.stale_units,
++        reason=composition.error,
++        force_required=composition.status == "stale",
++        replacement_safe=states[composition.status] in {"complete", "partial", "stale"},
++    )
++
++
+ __all__ = [
++    "BundleCompositionInspection",
++    "BundleCompositionState",
+     "BundleVariant",
+     "BundleVariantsResult",
+     "ComposeStatus",
+@@ -1082,5 +1232,6 @@ __all__ = [
+     "RenderStatus",
+     "UnitKind",
+     "VariantState",
++    "inspect_bundle_composition",
+     "list_bundle_variants",
+ ]
+diff --git a/tests/test_compose_renderplan_api.py b/tests/test_compose_renderplan_api.py
+index 3c690ae..7aa5f00 100644
+--- a/tests/test_compose_renderplan_api.py
++++ b/tests/test_compose_renderplan_api.py
+@@ -8,6 +8,7 @@ import numpy as np
+ import pytest
+ from renderplan import (
+     AudioItem,
++    PauseItem,
+     RenderManifest,
+     RenderPlan,
+     SourceSpan,
+@@ -25,6 +26,7 @@ from audiocompose import (
+     DiagnosticSeverity,
+     LoudnessPolicy,
+     OutputPolicy,
++    RenderedAudioBuffer,
+ )
+ from audiocompose.cli import main
+ from audiocompose.errors import HandoffValidationError
+@@ -460,3 +462,84 @@ def test_public_api_forwards_core_progress_and_preserves_output(tmp_path) -> Non
+     with pytest.raises(RuntimeError, match="compose_started"):
+         audiocompose.compose_renderplan(request, on_progress=fail)
+     assert not request_output.exists()
++
++
++def test_memory_composition_matches_persisted_semantics_without_writing(tmp_path):
++    render_dir = tmp_path / "renders"
++    assets = tmp_path / "assets"
++    assets.mkdir()
++    speech = _speech()
++    artifact = _rendered(render_dir, speech)
++    plan = _plan(
++        speech,
++        PauseItem(duration_ms=150, reason="chapter pause").with_identity(),
++        AudioItem(src="music.wav", source=(SourceSpan("source.txt", 0, 5),)).with_identity(),
++    )
++    plan_path, _ = _save_handoff(tmp_path, plan, _manifest(plan, [artifact]), render_dir=render_dir)
++    write_wav(assets / "music.wav", np.full(32, 0.2, dtype=np.float32), 16_000)
++    rendered = RenderedAudioBuffer(
++        audio=np.full(32, 0.125, dtype=np.float32),
++        sample_rate=16_000,
++        word_timings=({"word": "Hello", "start_seconds": 0.0, "end_seconds": 0.02},),
++        metadata={"engine": "fixture", "anchor": "word-1"},
++    )
++    memory_workspace = tmp_path / "memory-workspace"
++    memory_workspace.mkdir()
++
++    def snapshot():
++        return {
++            path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None
++            for path in tmp_path.rglob("*")
++        }
++
++    before = snapshot()
++    memory = audiocompose.compose_renderplan_memory(
++        plan,
++        {(speech.number, speech.segment_id or speech.computed_id()): rendered},
++        media_root=assets,
++        output_policy=OutputPolicy(sample_rate=16_000),
++    )
++    assert snapshot() == before
++    assert not (memory_workspace / "renderplan").exists()
++    assert memory.timeline[0]["renderplan.word_timings"] == [
++        {"word": "Hello", "start_seconds": 0.0, "end_seconds": 0.02}
++    ]
++    assert memory.timeline[0]["renderplan.rendered_metadata"] == {
++        "engine": "fixture",
++        "anchor": "word-1",
++    }
++    assert memory.composition.items[1].duration_samples == 2_400
++
++    persisted = audiocompose.compose_renderplan(
++        plan_path,
++        render_dir=render_dir,
++        output=tmp_path / "persisted.wav",
++        media_root=assets,
++        output_policy=OutputPolicy(sample_rate=16_000),
++    )
++    persisted_audio, persisted_rate = read_wav(persisted.output)
++    assert memory.sample_rate == persisted_rate == 16_000
++    assert np.array_equal(memory.audio, persisted_audio)
++
++
++def test_memory_composition_validates_occurrence_identity_and_emphasis():
++    speech = _speech(controls=(SpeechControl(1, 3, "emphasis", {}),))
++    plan = _plan(speech)
++    rendered = RenderedAudioBuffer(
++        audio=np.full(32, 0.125, dtype=np.float32),
++        sample_rate=16_000,
++    )
++    occurrence = (speech.number, speech.segment_id or speech.computed_id())
++
++    with pytest.raises(HandoffValidationError, match="occurrences differ"):
++        audiocompose.compose_renderplan_memory(plan, {})
++
++    result = audiocompose.compose_renderplan_memory(plan, {occurrence: rendered})
++    assert len(result.warnings) == 1
++    assert "entire segment" in result.warnings[0]
++    with pytest.raises(HandoffValidationError, match="split the speech upstream"):
++        audiocompose.compose_renderplan_memory(
++            plan,
++            {occurrence: rendered},
++            emphasis_policy="strict",
++        )
+diff --git a/tests/test_schema_resources.py b/tests/test_schema_resources.py
+index 4f35717..9ebd619 100644
+--- a/tests/test_schema_resources.py
++++ b/tests/test_schema_resources.py
+@@ -16,6 +16,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "__version__",
+         "AudioAnchor",
+         "AudioBufferSource",
++        "RenderedAudioBuffer",
+         "AudioClip",
+         "AudioComposeError",
+         "BundleComposeOptions",
+@@ -27,6 +28,8 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "BundleVariantComposeOutcome",
+         "BundleVariant",
+         "BundleVariantsResult",
++        "BundleCompositionInspection",
++        "BundleCompositionState",
+         "BundleIdentity",
+         "BookComposeError",
+         "BookComposeRequest",
+@@ -59,8 +62,10 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "compose_bundle",
+         "compose_bundle_batch",
+         "list_bundle_variants",
++        "inspect_bundle_composition",
+         "compose_document",
+         "compose_renderplan",
++        "compose_renderplan_memory",
+         "default_book_output_policy",
+         "default_document_output_policy",
+         "estimate_composition",
+@@ -78,6 +83,7 @@ def test_root_api_is_bounded_and_exposes_the_closed_operation_union() -> None:
+         "RatePitchEnvelope",
+         "RenderPlanComposeRequest",
+         "RenderPlanComposeResult",
++        "RenderPlanMemoryComposeResult",
+         "resolve_book",
+         "resolve_document",
+         "Silence",
+diff --git a/tests/test_variants.py b/tests/test_variants.py
+index e35e997..f01e59b 100644
+--- a/tests/test_variants.py
++++ b/tests/test_variants.py
+@@ -24,6 +24,7 @@ from audiocompose.variants import (
+     BundleVariantsResult,
+     _derive_state,
+     _inspect_bundle_variants,
++    inspect_bundle_composition,
+     list_bundle_variants,
+ )
+
+@@ -631,3 +632,68 @@ def test_complete_voicerender_report_without_manifests_is_unknown(tmp_path: Path
+
+     assert discovered.render_status == "unknown"
+     assert discovered.state == "unknown"
++
++
++def test_bundle_composition_inspector_reports_selected_states_without_writes(
++    tmp_path: Path,
++) -> None:
++    root = _bundle(tmp_path / "book.ssmd-bundle")
++    variant, profile_id, plan = _book_variant(root)
++
++    def snapshot():
++        return {
++            path.relative_to(root): path.read_bytes() if path.is_file() else None
++            for path in root.rglob("*")
++        }
++
++    before = snapshot()
++    missing = inspect_bundle_composition(root, variant=variant)
++    assert missing.state == "not_started"
++    assert missing.selected == ("chapter-0001",)
++    assert missing.missing == ("chapter-0001",)
++    assert snapshot() == before
++
++    manifest, render_dir = _write_render(root, variant, "chapter-0001", plan)
++    report_path = _write_book_compose_report(
++        root,
++        variant,
++        profile_id,
++        plan,
++        manifest,
++        render_dir / "render-manifest.toml",
++        render_dir / "render-diagnostics.json",
++    )
++    before = snapshot()
++    complete = inspect_bundle_composition(root, variant=variant)
++    assert complete.state == "complete"
++    assert complete.selected == complete.complete == ("chapter-0001",)
++    assert complete.missing == complete.stale == ()
++    assert snapshot() == before
++
++    report = report_path.read_text(encoding="utf-8").replace(
++        manifest.manifest_id or manifest.computed_id(), "sha256:" + "0" * 64
++    )
++    report_path.write_text(report, encoding="utf-8")
++    before = snapshot()
++    stale = inspect_bundle_composition(root, variant=variant, chapters="1")
++    assert stale.state == "stale"
++    assert stale.selected == stale.stale == ("chapter-0001",)
++    assert stale.force_required
++    assert stale.replacement_safe
++    assert "upstream identity changed" in (stale.reason or "")
++    assert snapshot() == before
++
++
++def test_bundle_composition_inspector_does_not_trust_unowned_output(tmp_path: Path) -> None:
++    root = _bundle(tmp_path / "book.ssmd-bundle")
++    variant, _, _ = _book_variant(root)
++    output = root / "audiocompose" / variant
++    output.mkdir(parents=True)
++    (output / "chapter-0001.wav").write_bytes(b"unowned")
++
++    result = inspect_bundle_composition(root, variant=variant)
++
++    assert result.state == "error"
++    assert result.selected == ("chapter-0001",)
++    assert result.complete == ()
++    assert "without an ownership report" in (result.reason or "")

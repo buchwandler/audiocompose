@@ -1,0 +1,74 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.3.8
+git_base_ref: v0.3.7
+git_base_sha: f8a130737e34751322f599ecfbdbbfe309043c8c
+git_head_ref: HEAD
+git_head_sha: 1f4852575e261789770bc930ee12e66df78c7c4b
+git_range: f8a130737e34751322f599ecfbdbbfe309043c8c..1f4852575e261789770bc930ee12e66df78c7c4b
+commit_count: 3
+rows:
+  - sha: 0ed354e29625a7b48d32b430f04ece7dd9b8cf58
+    source_ref: git:0ed354e29625a7b48d32b430f04ece7dd9b8cf58
+    short_sha: 0ed354e
+    changed_paths:
+      - .github/workflows/tests.yml
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.6/release.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.7/audit/commit-audit.yaml
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.7/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.7/release.md
+      - docs/changelog.md
+    stats:
+      files_changed: 7
+      insertions: 113
+      deletions: 13
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "doc: changelog"
+  - sha: f6f4b6a1d89b2afe8de8c560ac1b84db165b26f5
+    source_ref: git:f6f4b6a1d89b2afe8de8c560ac1b84db165b26f5
+    short_sha: f6f4b6a
+    changed_paths:
+      - audiocompose/__init__.py
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/renderplan.py
+      - audiocompose/sources.py
+      - audiocompose/variants.py
+      - tests/test_compose_renderplan_api.py
+      - tests/test_schema_resources.py
+      - tests/test_variants.py
+    stats:
+      files_changed: 8
+      insertions: 508
+      deletions: 48
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: api for readio"
+  - sha: 1f4852575e261789770bc930ee12e66df78c7c4b
+    source_ref: git:1f4852575e261789770bc930ee12e66df78c7c4b
+    short_sha: 1f48525
+    changed_paths:
+      - audiocompose/integrations/renderplan.py
+    stats:
+      files_changed: 1
+      insertions: 2
+      deletions: 2
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "fix: pytest"

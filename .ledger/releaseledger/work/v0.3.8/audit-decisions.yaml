@@ -1,0 +1,44 @@
+rows:
+  - sha: 0ed354e29625a7b48d32b430f04ece7dd9b8cf58
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.6/release.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.7/release.md
+      - docs/changelog.md
+    observed_behavior: "Updated releaseledger bookkeeping and the historical changelog for v0.3.7; the CI lower-bound job now installs packaging explicitly."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Release bookkeeping and CI maintenance are not public v0.3.8 product changes."
+    stale: false
+  - sha: f6f4b6a1d89b2afe8de8c560ac1b84db165b26f5
+    inspected: true
+    inspected_paths:
+      - audiocompose/__init__.py
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/renderplan.py
+      - audiocompose/sources.py
+      - audiocompose/variants.py
+      - tests/test_compose_renderplan_api.py
+      - tests/test_schema_resources.py
+      - tests/test_variants.py
+    observed_behavior: "Added the public in-memory RenderPlan composition API, RenderedAudioBuffer inputs, and read-only bundle composition inspection with identity validation and timeline metadata."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Covered by the added release entry."
+    stale: false
+  - sha: 1f4852575e261789770bc930ee12e66df78c7c4b
+    inspected: true
+    inspected_paths:
+      - audiocompose/integrations/renderplan.py
+    observed_behavior: "Corrected the RenderPlan integration's persisted-artifact validation path so the new composition API remains compatible with the supported dependency boundary."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Type annotation maintenance for compatibility with the test and type-checking path; no user-visible behavior change."
+    stale: false

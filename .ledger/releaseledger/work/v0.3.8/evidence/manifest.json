@@ -1,0 +1,60 @@
+{
+  "candidate_count": 3,
+  "candidates": [
+    {
+      "additions": 113,
+      "deletions": 13,
+      "patch_file": "0ed354e.patch",
+      "patch_sha256": "f435dd68da3615e9bafd4cbab80f8b80793f046df96cab2bc19d8995b185d60b",
+      "paths": [
+        ".github/workflows/tests.yml",
+        ".ledger/releaseledger/data/ledgers/main/events/events.jsonl",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.6/release.md",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.7/audit/commit-audit.yaml",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.7/entries/entry-0002.md",
+        ".ledger/releaseledger/data/ledgers/main/releases/v0.3.7/release.md",
+        "docs/changelog.md"
+      ],
+      "sha": "0ed354e29625a7b48d32b430f04ece7dd9b8cf58",
+      "short_sha": "0ed354e",
+      "source_ref": "git:0ed354e29625a7b48d32b430f04ece7dd9b8cf58"
+    },
+    {
+      "additions": 508,
+      "deletions": 48,
+      "patch_file": "f6f4b6a.patch",
+      "patch_sha256": "55b400ab0ff6dea8edc232ed4329e9cdb34454a6557965cda18a07331e28e0b3",
+      "paths": [
+        "audiocompose/__init__.py",
+        "audiocompose/integrations/renderplan.py",
+        "audiocompose/renderplan.py",
+        "audiocompose/sources.py",
+        "audiocompose/variants.py",
+        "tests/test_compose_renderplan_api.py",
+        "tests/test_schema_resources.py",
+        "tests/test_variants.py"
+      ],
+      "sha": "f6f4b6a1d89b2afe8de8c560ac1b84db165b26f5",
+      "short_sha": "f6f4b6a",
+      "source_ref": "git:f6f4b6a1d89b2afe8de8c560ac1b84db165b26f5"
+    },
+    {
+      "additions": 2,
+      "deletions": 2,
+      "patch_file": "1f48525.patch",
+      "patch_sha256": "c7f7ea30bf5605756c381d9f8c823f0260cab31344e9d990193b97e8aa87b239",
+      "paths": ["audiocompose/integrations/renderplan.py"],
+      "sha": "1f4852575e261789770bc930ee12e66df78c7c4b",
+      "short_sha": "1f48525",
+      "source_ref": "git:1f4852575e261789770bc930ee12e66df78c7c4b"
+    }
+  ],
+  "git_base_ref": "f8a130737e34751322f599ecfbdbbfe309043c8c",
+  "git_base_sha": "f8a130737e34751322f599ecfbdbbfe309043c8c",
+  "git_head_ref": "1f4852575e261789770bc930ee12e66df78c7c4b",
+  "git_head_sha": "1f4852575e261789770bc930ee12e66df78c7c4b",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.8",
+  "schema_version": 1
+}
