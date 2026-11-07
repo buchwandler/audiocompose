@@ -16,7 +16,7 @@ from ..errors import HandoffValidationError, MediaResolutionError
 from ..job import validate_clip_geometry
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
 from ..operations import Gain
-from ..sources import AudioBufferSource, AudioFileSource, RenderedAudioBuffer
+from ..sources import AudioBufferSource, AudioFileSource, AudioSource, RenderedAudioBuffer
 from ..wav import read_wav, sha256_file, wav_info
 from .media import (
     LocalWavResolver,
@@ -349,7 +349,7 @@ def _materialize_speech(
                 MANIFEST_FRAMES: artifact.frames,
             }
         )
-        source = AudioFileSource(
+        source: AudioSource = AudioFileSource(
             path=path,
             expected_sha256=digest,
             sample_rate=artifact.sample_rate,
