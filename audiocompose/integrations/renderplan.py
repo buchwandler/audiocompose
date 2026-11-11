@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import math
 import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Integral, Real
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+import numpy as np
 from renderplan import AudioItem, PauseItem, RenderManifest, RenderPlan, SpeechItem
 
 from .._version import __version__
@@ -16,7 +19,8 @@ from ..errors import HandoffValidationError, MediaResolutionError
 from ..job import validate_clip_geometry
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
 from ..operations import Gain
-from ..sources import AudioBufferSource, AudioFileSource, AudioSource, RenderedAudioBuffer
+from ..sources import AudioBufferSource, AudioSource, RenderedAudioBuffer
+from ..speech_boundaries import SPEECH_BOUNDARY_POLICY_ID, condition_speech_tail
 from ..wav import read_wav, sha256_file, wav_info
 from .media import (
     LocalWavResolver,
@@ -29,6 +33,12 @@ from .renderplan_metadata import (
     AUDIOCOMPOSE_MATERIALIZER,
     AUDIOCOMPOSE_MEDIA_IDENTITY,
     AUDIOCOMPOSE_MEDIA_METADATA,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE,
     MANIFEST_CHANNELS,
     MANIFEST_FRAMES,
     MANIFEST_ID,
@@ -69,6 +79,15 @@ class _ValidatedControlOwnership:
     diagnostics_schema: str
     emphasis_policy: str
     deferred_capabilities: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedSpeechArtifact:
+    artifact: Any
+    path: Path
+    sha256: str
+    audio: np.ndarray
+    sample_rate: int
 
 
 def _validate_contract(plan: RenderPlan, manifest: RenderManifest | None = None) -> str:
@@ -148,7 +167,7 @@ def _resolve_render_wav(render_root: Path, wav: str) -> Path:
 
 def _verify_speech_artifacts(
     plan: RenderPlan, manifest: RenderManifest, render_root: Path
-) -> dict[int, tuple[Any, Path, str]]:
+) -> dict[int, _VerifiedSpeechArtifact]:
     artifacts = {artifact.segment_number: artifact for artifact in manifest.speech}
     if len(artifacts) != len(manifest.speech):
         raise HandoffValidationError("RenderManifest contains duplicate speech segment numbers")
@@ -160,7 +179,7 @@ def _verify_speech_artifacts(
             f"RenderManifest speech occurrences differ from RenderPlan (missing={missing}, extra={extra})"
         )
 
-    verified: dict[int, tuple[Any, Path, str]] = {}
+    verified: dict[int, _VerifiedSpeechArtifact] = {}
 
     for number, item in speeches.items():
         artifact = artifacts[number]
@@ -201,12 +220,60 @@ def _verify_speech_artifacts(
             raise HandoffValidationError(
                 f"speech {number}: AudioCompose supports mono WAV artifacts only"
             )
-        verified[number] = (artifact, path, actual_sha256)
+        verified[number] = _VerifiedSpeechArtifact(
+            artifact=artifact,
+            path=path,
+            sha256=actual_sha256,
+            audio=audio,
+            sample_rate=sample_rate,
+        )
     return verified
 
 
 def _source_metadata(item: SpeechItem) -> list[dict[str, Any]]:
     return [span.to_dict() for span in item.source]
+
+
+def _validate_word_timing_starts(
+    item: SpeechItem,
+    timings: tuple[Mapping[str, Any], ...],
+    *,
+    sample_rate: int,
+    trim_end_sample: int,
+) -> None:
+    for timing in timings:
+        if "start_sample" in timing:
+            start_sample = timing["start_sample"]
+            if isinstance(start_sample, bool) or not isinstance(start_sample, Integral):
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_sample must be a non-negative integer"
+                )
+            start_sample = int(start_sample)
+            if start_sample < 0:
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_sample must be a non-negative integer"
+                )
+            if start_sample > trim_end_sample:
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_sample {start_sample} exceeds "
+                    f"conditioned endpoint {trim_end_sample}"
+                )
+        if "start_seconds" in timing:
+            start_seconds = timing["start_seconds"]
+            if isinstance(start_seconds, bool) or not isinstance(start_seconds, Real):
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_seconds must be a finite non-negative number"
+                )
+            start_seconds = float(start_seconds)
+            if not math.isfinite(start_seconds) or start_seconds < 0:
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_seconds must be a finite non-negative number"
+                )
+            if start_seconds * sample_rate > trim_end_sample:
+                raise HandoffValidationError(
+                    f"speech {item.number}: word timing start_seconds {start_seconds} exceeds "
+                    f"conditioned endpoint {trim_end_sample} at {sample_rate} Hz"
+                )
 
 
 _EMPHASIS_GAIN_DB = {"reduced": 0.75, "moderate": 1.5, "strong": 2.5}
@@ -313,7 +380,7 @@ def _materialize_speech(
     plan_id: str,
     *,
     manifest_id: str | None,
-    verified_speech: tuple[Any, Path, str] | None,
+    verified_speech: _VerifiedSpeechArtifact | None,
     rendered_audio: RenderedAudioBuffer | None,
     emphasis_policy: Literal["segment_fallback", "strict"],
     control_ownership: _ValidatedControlOwnership | None = None,
@@ -334,7 +401,7 @@ def _materialize_speech(
         RENDERPLAN_SOURCE: _source_metadata(item),
     }
     if verified_speech is not None:
-        artifact, path, digest = verified_speech
+        artifact = verified_speech.artifact
         if manifest_id is None:
             raise HandoffValidationError(
                 "persisted speech materialization requires a manifest identity"
@@ -349,20 +416,41 @@ def _materialize_speech(
                 MANIFEST_FRAMES: artifact.frames,
             }
         )
-        source: AudioSource = AudioFileSource(
-            path=path,
-            expected_sha256=digest,
-            sample_rate=artifact.sample_rate,
-            channels=1,
-            frames=artifact.frames,
-        )
+        raw_audio = verified_speech.audio
+        sample_rate = verified_speech.sample_rate
     else:
         assert rendered_audio is not None
-        source = AudioBufferSource(rendered_audio.audio, rendered_audio.sample_rate)
+        raw_audio = rendered_audio.audio
+        sample_rate = rendered_audio.sample_rate
         metadata["renderplan.word_timings"] = [
             dict(timing) for timing in rendered_audio.word_timings
         ]
         metadata["renderplan.rendered_metadata"] = dict(rendered_audio.metadata)
+
+    try:
+        conditioned, boundary = condition_speech_tail(raw_audio, sample_rate=sample_rate)
+    except Exception as exc:
+        raise HandoffValidationError(
+            f"speech {item.number}: cannot condition AudioCompose speech audio: {exc}"
+        ) from exc
+    if rendered_audio is not None:
+        _validate_word_timing_starts(
+            item,
+            rendered_audio.word_timings,
+            sample_rate=sample_rate,
+            trim_end_sample=boundary.trim_end_sample,
+        )
+    metadata.update(
+        {
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY: boundary.policy,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES: boundary.input_frames,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES: boundary.output_frames,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES: boundary.removed_frames,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS: boundary.removed_seconds,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE: boundary.trim_end_sample,
+        }
+    )
+    source: AudioSource = AudioBufferSource(conditioned, sample_rate)
     if control_ownership is not None:
         realized = [
             {"name": control.name, "start": control.start, "end": control.end}
@@ -562,7 +650,8 @@ def materialize_renderplan_job(
         RENDERPLAN_PLAN_ID: plan_id,
         RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
         RENDERPLAN_PROFILE_ID: plan.render_profile_id,
-        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
+        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v2",
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY: SPEECH_BOUNDARY_POLICY_ID,
     }
     if manifest_id is not None:
         source_metadata[MANIFEST_ID] = manifest_id
