@@ -1,0 +1,18 @@
+rows:
+  - sha: 2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/speech_boundaries.py
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+    observed_behavior: "AudioCompose trims confirmed trailing silence from persisted and in-memory synthesized RenderPlan speech before composition, records boundary metadata, preserves upstream WAVs and word timings, and leaves generic AudioItem media unchanged."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

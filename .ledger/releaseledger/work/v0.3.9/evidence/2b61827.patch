@@ -1,0 +1,700 @@
+ README.md                                        |   2 +
+ audiocompose/integrations/renderplan.py          | 119 +++++++++--
+ audiocompose/integrations/renderplan_metadata.py |   6 +
+ audiocompose/speech_boundaries.py                |  50 +++++
+ pyproject.toml                                   |   2 +-
+ tests/test_renderplan_materialization.py         | 249 +++++++++++++++++++++++
+ tests/test_speech_boundaries.py                  | 109 ++++++++++
+ 7 files changed, 521 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index 8c4eb14..31d81fe 100644
+--- a/README.md
++++ b/README.md
+@@ -130,6 +130,8 @@ audiocompose compose-renderplan chapter.renderplan.toml \
+ RenderPlan `emphasis` controls are realized after synthesis as bounded relative gain: default/`moderate` +1.5 dB, `reduced` +0.75 dB, and `strong` +2.5 dB. The integrated commands, `compose-renderplan` and `bundle compose`, default to `--emphasis-policy segment_fallback`; this boosts the entire speech segment for partial character ranges and reports that word-level alignment was unavailable. Use `--emphasis-policy strict` to reject partial emphasis when exact alignment is required (the error recommends upstream splitting/alignment). Full-span controls are applied at clip scope. Overlapping controls choose the strongest level, never sum. These are relative pre-normalization gains; final loudness/peak processing may reduce the audible difference, and emphasis does not promise native prosody. The library materializer defaults to strict; generic AudioJob composition does not interpret speech controls.
+ The adapter follows `RenderPlan.flow` in order. It materializes each pause using its declared millisecond duration, including zero-duration pauses; there is no symbolic pause policy or inferred timing. Source spans are retained as opaque provenance metadata, not fabricated sample-aligned `AudioSpan` values. The Composer's normal seconds-to-samples behavior and output policy still apply.
+
++For synthesized RenderPlan `SpeechItem` sources, AudioCompose removes confirmed renderer-added terminal silence from the working buffer before composing the flow. Persisted and in-memory speech use the same boundary policy; leading audio and upstream VoiceRender WAVs, hashes, and raw word timings remain unchanged. Speech-local operations and resampling then apply to the conditioned clip, and an explicit `PauseItem` follows from that conditioned endpoint at its declared duration. Boundary conditioning does not apply to generic `AudioItem` media.
++
+ ### Public single-document Python API
+
+ The package-root `compose_renderplan` function verifies the handoff, materializes and composes one document, atomically writes its WAV, and returns a typed `RenderPlanComposeResult`. Other Python orchestration clients can use this supported API without importing `audiocompose.integrations`:
+diff --git a/audiocompose/integrations/renderplan.py b/audiocompose/integrations/renderplan.py
+index fca2589..d9c326c 100644
+--- a/audiocompose/integrations/renderplan.py
++++ b/audiocompose/integrations/renderplan.py
+@@ -2,13 +2,16 @@
+
+ from __future__ import annotations
+
++import math
+ import os
+ import stat
+ from collections.abc import Mapping
+ from dataclasses import dataclass
++from numbers import Integral, Real
+ from pathlib import Path, PurePosixPath
+ from typing import Any, Literal
+
++import numpy as np
+ from renderplan import AudioItem, PauseItem, RenderManifest, RenderPlan, SpeechItem
+
+ from .._version import __version__
+@@ -16,7 +19,8 @@ from ..errors import HandoffValidationError, MediaResolutionError
+ from ..job import validate_clip_geometry
+ from ..model import AudioClip, AudioJob, OutputPolicy, Silence
+ from ..operations import Gain
+-from ..sources import AudioBufferSource, AudioFileSource, AudioSource, RenderedAudioBuffer
++from ..sources import AudioBufferSource, AudioSource, RenderedAudioBuffer
++from ..speech_boundaries import SPEECH_BOUNDARY_POLICY_ID, condition_speech_tail
+ from ..wav import read_wav, sha256_file, wav_info
+ from .media import (
+     LocalWavResolver,
+@@ -29,6 +33,12 @@ from .renderplan_metadata import (
+     AUDIOCOMPOSE_MATERIALIZER,
+     AUDIOCOMPOSE_MEDIA_IDENTITY,
+     AUDIOCOMPOSE_MEDIA_METADATA,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS,
++    AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE,
+     MANIFEST_CHANNELS,
+     MANIFEST_FRAMES,
+     MANIFEST_ID,
+@@ -71,6 +81,15 @@ class _ValidatedControlOwnership:
+     deferred_capabilities: tuple[str, ...]
+
+
++@dataclass(frozen=True, slots=True)
++class _VerifiedSpeechArtifact:
++    artifact: Any
++    path: Path
++    sha256: str
++    audio: np.ndarray
++    sample_rate: int
++
++
+ def _validate_contract(plan: RenderPlan, manifest: RenderManifest | None = None) -> str:
+     if not isinstance(plan, RenderPlan):
+         raise HandoffValidationError("plan must be a renderplan.RenderPlan")
+@@ -148,7 +167,7 @@ def _resolve_render_wav(render_root: Path, wav: str) -> Path:
+
+ def _verify_speech_artifacts(
+     plan: RenderPlan, manifest: RenderManifest, render_root: Path
+-) -> dict[int, tuple[Any, Path, str]]:
++) -> dict[int, _VerifiedSpeechArtifact]:
+     artifacts = {artifact.segment_number: artifact for artifact in manifest.speech}
+     if len(artifacts) != len(manifest.speech):
+         raise HandoffValidationError("RenderManifest contains duplicate speech segment numbers")
+@@ -160,7 +179,7 @@ def _verify_speech_artifacts(
+             f"RenderManifest speech occurrences differ from RenderPlan (missing={missing}, extra={extra})"
+         )
+
+-    verified: dict[int, tuple[Any, Path, str]] = {}
++    verified: dict[int, _VerifiedSpeechArtifact] = {}
+
+     for number, item in speeches.items():
+         artifact = artifacts[number]
+@@ -201,7 +220,13 @@ def _verify_speech_artifacts(
+             raise HandoffValidationError(
+                 f"speech {number}: AudioCompose supports mono WAV artifacts only"
+             )
+-        verified[number] = (artifact, path, actual_sha256)
++        verified[number] = _VerifiedSpeechArtifact(
++            artifact=artifact,
++            path=path,
++            sha256=actual_sha256,
++            audio=audio,
++            sample_rate=sample_rate,
++        )
+     return verified
+
+
+@@ -209,6 +234,48 @@ def _source_metadata(item: SpeechItem) -> list[dict[str, Any]]:
+     return [span.to_dict() for span in item.source]
+
+
++def _validate_word_timing_starts(
++    item: SpeechItem,
++    timings: tuple[Mapping[str, Any], ...],
++    *,
++    sample_rate: int,
++    trim_end_sample: int,
++) -> None:
++    for timing in timings:
++        if "start_sample" in timing:
++            start_sample = timing["start_sample"]
++            if isinstance(start_sample, bool) or not isinstance(start_sample, Integral):
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_sample must be a non-negative integer"
++                )
++            start_sample = int(start_sample)
++            if start_sample < 0:
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_sample must be a non-negative integer"
++                )
++            if start_sample > trim_end_sample:
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_sample {start_sample} exceeds "
++                    f"conditioned endpoint {trim_end_sample}"
++                )
++        if "start_seconds" in timing:
++            start_seconds = timing["start_seconds"]
++            if isinstance(start_seconds, bool) or not isinstance(start_seconds, Real):
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_seconds must be a finite non-negative number"
++                )
++            start_seconds = float(start_seconds)
++            if not math.isfinite(start_seconds) or start_seconds < 0:
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_seconds must be a finite non-negative number"
++                )
++            if start_seconds * sample_rate > trim_end_sample:
++                raise HandoffValidationError(
++                    f"speech {item.number}: word timing start_seconds {start_seconds} exceeds "
++                    f"conditioned endpoint {trim_end_sample} at {sample_rate} Hz"
++                )
++
++
+ _EMPHASIS_GAIN_DB = {"reduced": 0.75, "moderate": 1.5, "strong": 2.5}
+
+
+@@ -313,7 +380,7 @@ def _materialize_speech(
+     plan_id: str,
+     *,
+     manifest_id: str | None,
+-    verified_speech: tuple[Any, Path, str] | None,
++    verified_speech: _VerifiedSpeechArtifact | None,
+     rendered_audio: RenderedAudioBuffer | None,
+     emphasis_policy: Literal["segment_fallback", "strict"],
+     control_ownership: _ValidatedControlOwnership | None = None,
+@@ -334,7 +401,7 @@ def _materialize_speech(
+         RENDERPLAN_SOURCE: _source_metadata(item),
+     }
+     if verified_speech is not None:
+-        artifact, path, digest = verified_speech
++        artifact = verified_speech.artifact
+         if manifest_id is None:
+             raise HandoffValidationError(
+                 "persisted speech materialization requires a manifest identity"
+@@ -349,20 +416,41 @@ def _materialize_speech(
+                 MANIFEST_FRAMES: artifact.frames,
+             }
+         )
+-        source: AudioSource = AudioFileSource(
+-            path=path,
+-            expected_sha256=digest,
+-            sample_rate=artifact.sample_rate,
+-            channels=1,
+-            frames=artifact.frames,
+-        )
++        raw_audio = verified_speech.audio
++        sample_rate = verified_speech.sample_rate
+     else:
+         assert rendered_audio is not None
+-        source = AudioBufferSource(rendered_audio.audio, rendered_audio.sample_rate)
++        raw_audio = rendered_audio.audio
++        sample_rate = rendered_audio.sample_rate
+         metadata["renderplan.word_timings"] = [
+             dict(timing) for timing in rendered_audio.word_timings
+         ]
+         metadata["renderplan.rendered_metadata"] = dict(rendered_audio.metadata)
++
++    try:
++        conditioned, boundary = condition_speech_tail(raw_audio, sample_rate=sample_rate)
++    except Exception as exc:
++        raise HandoffValidationError(
++            f"speech {item.number}: cannot condition AudioCompose speech audio: {exc}"
++        ) from exc
++    if rendered_audio is not None:
++        _validate_word_timing_starts(
++            item,
++            rendered_audio.word_timings,
++            sample_rate=sample_rate,
++            trim_end_sample=boundary.trim_end_sample,
++        )
++    metadata.update(
++        {
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY: boundary.policy,
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES: boundary.input_frames,
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES: boundary.output_frames,
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES: boundary.removed_frames,
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS: boundary.removed_seconds,
++            AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE: boundary.trim_end_sample,
++        }
++    )
++    source: AudioSource = AudioBufferSource(conditioned, sample_rate)
+     if control_ownership is not None:
+         realized = [
+             {"name": control.name, "start": control.start, "end": control.end}
+@@ -562,7 +650,8 @@ def materialize_renderplan_job(
+         RENDERPLAN_PLAN_ID: plan_id,
+         RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
+         RENDERPLAN_PROFILE_ID: plan.render_profile_id,
+-        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1",
++        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v2",
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY: SPEECH_BOUNDARY_POLICY_ID,
+     }
+     if manifest_id is not None:
+         source_metadata[MANIFEST_ID] = manifest_id
+diff --git a/audiocompose/integrations/renderplan_metadata.py b/audiocompose/integrations/renderplan_metadata.py
+index 432848d..11a9ebb 100644
+--- a/audiocompose/integrations/renderplan_metadata.py
++++ b/audiocompose/integrations/renderplan_metadata.py
+@@ -24,6 +24,12 @@ MANIFEST_FRAMES = "render_manifest.frames"
+ AUDIOCOMPOSE_MEDIA_METADATA = "audiocompose.media.metadata"
+ AUDIOCOMPOSE_MEDIA_IDENTITY = "audiocompose.media.identity"
+ AUDIOCOMPOSE_MATERIALIZER = "audiocompose.materializer"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY = "audiocompose.speech_boundary.policy"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES = "audiocompose.speech_boundary.input_frames"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES = "audiocompose.speech_boundary.output_frames"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES = "audiocompose.speech_boundary.removed_frames"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS = "audiocompose.speech_boundary.removed_seconds"
++AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE = "audiocompose.speech_boundary.trim_end_sample"
+
+ RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
+ VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.diagnostics_schema"
+diff --git a/audiocompose/speech_boundaries.py b/audiocompose/speech_boundaries.py
+new file mode 100644
+index 0000000..74f0a80
+--- /dev/null
++++ b/audiocompose/speech_boundaries.py
+@@ -0,0 +1,50 @@
++"""AudioCompose policy for removing confirmed synthesized-speech tail silence."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import audiosig
++import numpy as np
++
++from .errors import AudioValidationError
++from .wav import _as_finite_mono_float32
++
++SPEECH_BOUNDARY_POLICY_ID = "audiocompose.trailing-silence.v1"
++
++
++@dataclass(frozen=True, slots=True)
++class SpeechBoundaryConditioning:
++    policy: str
++    input_frames: int
++    output_frames: int
++    removed_frames: int
++    removed_seconds: float
++    trim_end_sample: int
++
++
++def condition_speech_tail(
++    audio: np.ndarray,
++    *,
++    sample_rate: int,
++) -> tuple[np.ndarray, SpeechBoundaryConditioning]:
++    """Remove confirmed terminal silence from a synthesized speech buffer."""
++    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
++        raise AudioValidationError("sample_rate must be a positive integer")
++    source = _as_finite_mono_float32(audio, name="speech audio")
++    if source.size == 0:
++        raise AudioValidationError("speech audio must contain at least one frame")
++
++    conditioned = audiosig.trim_trail(source, sample_rate=sample_rate, trail_seconds=0.0)
++    conditioned = np.ascontiguousarray(conditioned, dtype=np.float32)
++    input_frames = int(source.size)
++    output_frames = int(conditioned.size)
++    removed_frames = input_frames - output_frames
++    return conditioned, SpeechBoundaryConditioning(
++        policy=SPEECH_BOUNDARY_POLICY_ID,
++        input_frames=input_frames,
++        output_frames=output_frames,
++        removed_frames=removed_frames,
++        removed_seconds=removed_frames / sample_rate,
++        trim_end_sample=output_frames,
++    )
+diff --git a/pyproject.toml b/pyproject.toml
+index 63a93ac..103518c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -11,7 +11,7 @@ license = {file = "LICENSE"}
+ authors = [{name = "AudioCompose contributors"}]
+ dependencies = [
+   "numpy>=1.23",
+-  "audiosig>=0.1.9,<0.2",
++  "audiosig>=0.1.11,<0.2",
+   "renderplan>=0.2.1,<0.3",
+ ]
+ keywords = ["audio", "composition", "wav", "dsp"]
+diff --git a/tests/test_renderplan_materialization.py b/tests/test_renderplan_materialization.py
+index 0ce343a..75335f4 100644
+--- a/tests/test_renderplan_materialization.py
++++ b/tests/test_renderplan_materialization.py
+@@ -1004,3 +1004,252 @@ def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
+     assert any(item.startswith("utterplan>=0.6.12,<0.7") for item in extra_dependencies)
+     assert any(item.startswith("voicerender>=0.2.8,<0.3") for item in extra_dependencies)
+     assert (project_path.parent / "audiocompose/integrations/voicerender.py").is_file()
++
++
++def test_persisted_speech_conditions_verified_samples_without_reloading_wav(
++    tmp_path: Path, monkeypatch
++) -> None:
++    from audiocompose.integrations import renderplan as adapter
++    from audiocompose.integrations.renderplan_metadata import (
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE,
++    )
++    from audiocompose.sources import AudioBufferSource, RenderedAudioBuffer
++
++    sample_rate = 1_000
++    audio = np.concatenate(
++        (
++            np.zeros(200, dtype=np.float32),
++            np.full(300, 0.5, dtype=np.float32),
++            np.zeros(400, dtype=np.float32),
++        )
++    )
++    speech = _speech()
++    wav_path = tmp_path / speech.wav
++    write_wav(wav_path, audio, sample_rate)
++    raw_bytes = wav_path.read_bytes()
++    artifact = _artifact(speech, wav_path, frames=len(audio), sample_rate=sample_rate)
++    plan = _plan(speech)
++    manifest = _manifest(plan, [artifact])
++
++    original_read_wav = adapter.read_wav
++    read_paths = []
++
++    def counted_read_wav(path, *args, **kwargs):
++        read_paths.append(Path(path))
++        return original_read_wav(path, *args, **kwargs)
++
++    monkeypatch.setattr(adapter, "read_wav", counted_read_wav)
++    persisted = materialize_renderplan_job(plan, manifest, render_dir=tmp_path)
++    assert read_paths == [wav_path]
++    assert wav_path.read_bytes() == raw_bytes
++    assert hashlib.sha256(wav_path.read_bytes()).hexdigest() == artifact.sha256.removeprefix(
++        "sha256:"
++    )
++
++    persisted_clip = persisted.items[0]
++    assert isinstance(persisted_clip, AudioClip)
++    assert isinstance(persisted_clip.source, AudioBufferSource)
++    persisted_audio, actual_rate = persisted_clip.source.load()
++    assert actual_rate == sample_rate
++    assert len(persisted_audio) == 500
++    np.testing.assert_array_equal(persisted_audio, audio[:500])
++    assert persisted_clip.metadata["render_manifest.frames"] == 900
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
++        "audiocompose.trailing-silence.v1"
++    )
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES] == 900
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES] == 500
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES] == 400
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS] == 0.4
++    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE] == 500
++
++    occurrence = (speech.number, speech.segment_id or speech.computed_id())
++    rendered = RenderedAudioBuffer(audio, sample_rate)
++    in_memory = materialize_renderplan_job(plan, rendered_speech={occurrence: rendered})
++    in_memory_clip = in_memory.items[0]
++    assert isinstance(in_memory_clip, AudioClip)
++    in_memory_audio, memory_rate = in_memory_clip.source.load()
++    assert memory_rate == actual_rate
++    np.testing.assert_array_equal(in_memory_audio, persisted_audio)
++
++
++def test_word_timings_overlapping_removed_tail_are_preserved_verbatim(tmp_path: Path) -> None:
++    from audiocompose.sources import RenderedAudioBuffer
++
++    sample_rate = 1_000
++    audio = np.concatenate(
++        (
++            np.zeros(200, dtype=np.float32),
++            np.full(300, 0.5, dtype=np.float32),
++            np.zeros(400, dtype=np.float32),
++        )
++    )
++    speech = _speech()
++    plan = _plan(speech)
++    occurrence = (speech.number, speech.segment_id or speech.computed_id())
++    timing = {"word": "Hello", "start_sample": 450, "end_sample": 650}
++    rendered = RenderedAudioBuffer(audio, sample_rate, word_timings=(timing,))
++
++    job = materialize_renderplan_job(plan, rendered_speech={occurrence: rendered})
++
++    clip = job.items[0]
++    assert isinstance(clip, AudioClip)
++    assert clip.metadata["renderplan.word_timings"] == [timing]
++
++
++@pytest.mark.parametrize(
++    "timing",
++    [
++        {"word": "Hello", "start_sample": 501, "end_sample": 600},
++        {"word": "Hello", "start_seconds": 0.501, "end_seconds": 0.6},
++    ],
++)
++def test_word_timing_start_beyond_conditioned_endpoint_is_rejected(
++    timing: dict[str, object],
++) -> None:
++    from audiocompose.sources import RenderedAudioBuffer
++
++    audio = np.concatenate(
++        (
++            np.zeros(200, dtype=np.float32),
++            np.full(300, 0.5, dtype=np.float32),
++            np.zeros(400, dtype=np.float32),
++        )
++    )
++    speech = _speech()
++    plan = _plan(speech)
++    occurrence = (speech.number, speech.segment_id or speech.computed_id())
++    rendered = RenderedAudioBuffer(audio, 1_000, word_timings=(timing,))
++
++    with pytest.raises(HandoffValidationError, match="exceeds conditioned endpoint"):
++        materialize_renderplan_job(plan, rendered_speech={occurrence: rendered})
++
++
++def test_policy_and_materializer_versions_change_audiojob_identity(
++    tmp_path: Path, monkeypatch
++) -> None:
++    import audiocompose.speech_boundaries as speech_boundaries
++    from audiocompose.integrations import renderplan as adapter
++    from audiocompose.integrations.renderplan_metadata import (
++        AUDIOCOMPOSE_MATERIALIZER,
++        AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
++    )
++
++    speech = _speech()
++    _, artifact = _rendered(tmp_path, speech)
++    plan = _plan(speech)
++    manifest = _manifest(plan, [artifact])
++    original = materialize_renderplan_job(plan, manifest, render_dir=tmp_path)
++    assert original.source[AUDIOCOMPOSE_MATERIALIZER] == "renderplan.v2"
++    assert original.source[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
++        "audiocompose.trailing-silence.v1"
++    )
++
++    monkeypatch.setattr(adapter, "SPEECH_BOUNDARY_POLICY_ID", "audiocompose.trailing-silence.test")
++    monkeypatch.setattr(
++        speech_boundaries,
++        "SPEECH_BOUNDARY_POLICY_ID",
++        "audiocompose.trailing-silence.test",
++    )
++    changed_policy = materialize_renderplan_job(plan, manifest, render_dir=tmp_path)
++    assert changed_policy.source[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
++        "audiocompose.trailing-silence.test"
++    )
++    assert changed_policy.items[0].metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
++        "audiocompose.trailing-silence.test"
++    )
++
++    original_id = AudioJob.load(original.save(tmp_path / "original.audiojob")).job_id
++    changed_policy_id = AudioJob.load(
++        changed_policy.save(tmp_path / "changed-policy.audiojob")
++    ).job_id
++    older_materializer = replace(
++        original,
++        source={**original.source, AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1"},
++    )
++    older_materializer_id = AudioJob.load(
++        older_materializer.save(tmp_path / "older-materializer.audiojob")
++    ).job_id
++    assert original_id != changed_policy_id
++    assert original_id != older_materializer_id
++
++
++def test_explicit_pause_uses_conditioned_speech_boundary_and_estimate_matches(
++    tmp_path: Path,
++) -> None:
++    from audiocompose import Composer, estimate_composition
++
++    sample_rate = 1_000
++    first = _speech(1)
++    second = _speech(2, text="World")
++    pause = PauseItem(duration_ms=500, reason="sentence").with_identity()
++    first_audio = np.concatenate(
++        (np.full(200, 0.5, dtype=np.float32), np.zeros(400, dtype=np.float32))
++    )
++    second_audio = np.full(100, 0.5, dtype=np.float32)
++    first_path = tmp_path / first.wav
++    second_path = tmp_path / second.wav
++    write_wav(first_path, first_audio, sample_rate)
++    write_wav(second_path, second_audio, sample_rate)
++    plan = _plan(first, pause, second)
++    artifacts = [
++        _artifact(first, first_path, frames=len(first_audio), sample_rate=sample_rate),
++        _artifact(second, second_path, frames=len(second_audio), sample_rate=sample_rate),
++    ]
++
++    job = materialize_renderplan_job(
++        plan,
++        _manifest(plan, artifacts),
++        render_dir=tmp_path,
++        output_policy=OutputPolicy(sample_rate=sample_rate),
++    )
++    composition = Composer().compose(job)
++    estimate = estimate_composition(job)
++
++    assert estimate.item_output_frames == (200, 500, 100)
++    assert estimate.total_output_frames == len(composition.audio) == 800
++    assert [(item.start_sample, item.end_sample) for item in composition.items] == [
++        (0, 200),
++        (200, 700),
++        (700, 800),
++    ]
++
++
++def test_external_audio_with_silence_is_not_speech_conditioned(tmp_path: Path) -> None:
++    from audiocompose.sources import AudioFileSource
++
++    sample_rate = 1_000
++    speech = _speech()
++    _, artifact = _rendered(tmp_path, speech)
++    media_audio = np.concatenate(
++        (
++            np.zeros(200, dtype=np.float32),
++            np.full(300, 0.5, dtype=np.float32),
++            np.zeros(400, dtype=np.float32),
++        )
++    )
++    media_root = tmp_path / "media"
++    media_root.mkdir()
++    write_wav(media_root / "music.wav", media_audio, sample_rate)
++    plan = _plan(speech, _audio("music.wav"))
++
++    job = materialize_renderplan_job(
++        plan,
++        _manifest(plan, [artifact]),
++        render_dir=tmp_path,
++        media_root=media_root,
++    )
++
++    media_clip = job.items[1]
++    assert isinstance(media_clip, AudioClip)
++    assert media_clip.metadata["kind"] == "external_audio"
++    assert isinstance(media_clip.source, AudioFileSource)
++    resolved_audio, resolved_rate = media_clip.source.load()
++    assert resolved_rate == sample_rate
++    assert len(resolved_audio) == len(media_audio) == 900
++    np.testing.assert_array_equal(resolved_audio, media_audio)
+diff --git a/tests/test_speech_boundaries.py b/tests/test_speech_boundaries.py
+new file mode 100644
+index 0000000..eaffa13
+--- /dev/null
++++ b/tests/test_speech_boundaries.py
+@@ -0,0 +1,109 @@
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from audiocompose.errors import AudioValidationError
++from audiocompose.speech_boundaries import (
++    SPEECH_BOUNDARY_POLICY_ID,
++    SpeechBoundaryConditioning,
++    condition_speech_tail,
++)
++
++
++def test_trims_confirmed_terminal_silence_and_preserves_leading_samples() -> None:
++    sample_rate = 1_000
++    audio = np.concatenate(
++        (
++            np.zeros(200, dtype=np.float32),
++            np.full(300, 0.5, dtype=np.float32),
++            np.zeros(400, dtype=np.float32),
++        )
++    )
++
++    conditioned, result = condition_speech_tail(audio, sample_rate=sample_rate)
++
++    assert len(conditioned) == 500
++    np.testing.assert_array_equal(conditioned, audio[:500])
++    assert result == SpeechBoundaryConditioning(
++        policy=SPEECH_BOUNDARY_POLICY_ID,
++        input_frames=900,
++        output_frames=500,
++        removed_frames=400,
++        removed_seconds=0.4,
++        trim_end_sample=500,
++    )
++    assert conditioned.flags.c_contiguous
++
++
++def test_no_confirmed_activity_preserves_silence_and_uncertain_audio() -> None:
++    sample_rate = 1_000
++    for audio in (
++        np.zeros(1_000, dtype=np.float32),
++        np.full(1_000, 1e-4, dtype=np.float32),
++    ):
++        conditioned, result = condition_speech_tail(audio, sample_rate=sample_rate)
++
++        np.testing.assert_array_equal(conditioned, audio)
++        assert result.output_frames == len(audio)
++        assert result.removed_frames == 0
++        assert result.trim_end_sample == len(audio)
++        assert conditioned.flags.c_contiguous
++
++
++def test_audio_active_through_eof_is_not_trimmed() -> None:
++    audio = np.full(1_000, 0.5, dtype=np.float32)
++
++    conditioned, result = condition_speech_tail(audio, sample_rate=1_000)
++
++    np.testing.assert_array_equal(conditioned, audio)
++    assert result.removed_frames == 0
++    assert result.trim_end_sample == len(audio)
++
++
++def test_short_resumed_speech_after_internal_pause_is_preserved() -> None:
++    sample_rate = 1_000
++    audio = np.concatenate(
++        (
++            np.full(200, 0.5, dtype=np.float32),
++            np.zeros(150, dtype=np.float32),
++            np.full(60, 0.25, dtype=np.float32),
++            np.zeros(300, dtype=np.float32),
++        )
++    )
++
++    conditioned, result = condition_speech_tail(audio, sample_rate=sample_rate)
++
++    assert result.trim_end_sample == 410
++    np.testing.assert_array_equal(conditioned, audio[:410])
++    assert result.removed_frames == 300
++
++
++def test_noncontiguous_input_returns_contiguous_buffer() -> None:
++    audio = np.zeros(2_000, dtype=np.float32)[::2]
++    assert not audio.flags.c_contiguous
++
++    conditioned, result = condition_speech_tail(audio, sample_rate=1_000)
++
++    assert conditioned.flags.c_contiguous
++    np.testing.assert_array_equal(conditioned, audio)
++    assert result.input_frames == len(audio)
++
++
++@pytest.mark.parametrize("sample_rate", [0, -1, True])
++def test_rejects_invalid_sample_rate(sample_rate: int) -> None:
++    with pytest.raises(AudioValidationError, match="sample_rate must be a positive integer"):
++        condition_speech_tail(np.ones(10, dtype=np.float32), sample_rate=sample_rate)
++
++
++@pytest.mark.parametrize(
++    "audio",
++    [
++        np.ones((2, 10), dtype=np.float32),
++        np.array([0.0, np.nan], dtype=np.float32),
++        np.array([], dtype=np.float32),
++    ],
++)
++def test_rejects_invalid_speech_audio(audio: np.ndarray) -> None:
++    with pytest.raises(AudioValidationError):
++        condition_speech_tail(audio, sample_rate=1_000)

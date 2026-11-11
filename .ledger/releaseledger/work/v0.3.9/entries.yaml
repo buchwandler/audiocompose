@@ -1,0 +1,30 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.3.9
+git_base_ref: 10bec61c57dde4f4b8c518cfb19b4058ad2e91aa
+git_base_sha: 10bec61c57dde4f4b8c518cfb19b4058ad2e91aa
+git_head_ref: 2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+git_head_sha: 2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added trimming of confirmed terminal silence from synthesized RenderPlan speech before composition
+    status: accepted
+    source_refs:
+      - git:2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+    paths:
+      - README.md
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/speech_boundaries.py
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+    sources:
+      - git:2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

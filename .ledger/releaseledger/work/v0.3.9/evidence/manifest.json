@@ -1,0 +1,31 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 521,
+      "deletions": 16,
+      "patch_file": "2b61827.patch",
+      "patch_sha256": "9b82582c50e7d148c45da11a3b07adc295bdb570074b6b5de91018ac278db9e2",
+      "paths": [
+        "README.md",
+        "audiocompose/integrations/renderplan.py",
+        "audiocompose/integrations/renderplan_metadata.py",
+        "audiocompose/speech_boundaries.py",
+        "pyproject.toml",
+        "tests/test_renderplan_materialization.py",
+        "tests/test_speech_boundaries.py"
+      ],
+      "sha": "2b61827dd25cf00fd2c3e5f0fd65163fb404e989",
+      "short_sha": "2b61827",
+      "source_ref": "git:2b61827dd25cf00fd2c3e5f0fd65163fb404e989"
+    }
+  ],
+  "git_base_ref": "10bec61c57dde4f4b8c518cfb19b4058ad2e91aa",
+  "git_base_sha": "10bec61c57dde4f4b8c518cfb19b4058ad2e91aa",
+  "git_head_ref": "2b61827dd25cf00fd2c3e5f0fd65163fb404e989",
+  "git_head_sha": "2b61827dd25cf00fd2c3e5f0fd65163fb404e989",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.9",
+  "schema_version": 1
+}

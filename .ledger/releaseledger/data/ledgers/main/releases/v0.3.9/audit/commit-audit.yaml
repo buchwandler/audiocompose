@@ -1,0 +1,48 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.3.9
+git_base_ref: v0.3.8
+git_base_sha: 10bec61c57dde4f4b8c518cfb19b4058ad2e91aa
+git_head_ref: HEAD
+git_head_sha: 2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+git_range: 10bec61c57dde4f4b8c518cfb19b4058ad2e91aa..2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+commit_count: 1
+rows:
+  - sha: 2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+    source_ref: git:2b61827dd25cf00fd2c3e5f0fd65163fb404e989
+    short_sha: 2b61827
+    changed_paths:
+      - README.md
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/speech_boundaries.py
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+    stats:
+      files_changed: 7
+      insertions: 521
+      deletions: 16
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/speech_boundaries.py
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+    observed_behavior:
+      AudioCompose trims confirmed trailing silence from persisted
+      and in-memory synthesized RenderPlan speech before composition, records boundary
+      metadata, preserves upstream WAVs and word timings, and leaves generic AudioItem
+      media unchanged.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add speech boundaries"
+    target_entry_id: entry-0001
+    notes: ""
