@@ -1,0 +1,35 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.3.10
+git_base_ref: 48d655281cd1963033437cdfce8a9b00ffe36663
+git_base_sha: 48d655281cd1963033437cdfce8a9b00ffe36663
+git_head_ref: 2c25827863d80a517f09fb3e2c117b153e514173
+git_head_sha: 2c25827863d80a517f09fb3e2c117b153e514173
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: "Changed VoiceRender handoff validation to require version 0.2.11+ and the raw-synthesis artifact policy"
+    status: accepted
+    source_refs:
+      - git:2c25827863d80a517f09fb3e2c117b153e514173
+    paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - audiocompose/integrations/voicerender.py
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/installed_renderplan_smoke.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    sources:
+      - git:2c25827863d80a517f09fb3e2c117b153e514173
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

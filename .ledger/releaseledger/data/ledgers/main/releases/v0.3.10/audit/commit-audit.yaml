@@ -1,0 +1,58 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.3.10
+git_base_ref: v0.3.9
+git_base_sha: 48d655281cd1963033437cdfce8a9b00ffe36663
+git_head_ref: HEAD
+git_head_sha: 2c25827863d80a517f09fb3e2c117b153e514173
+git_range: 48d655281cd1963033437cdfce8a9b00ffe36663..2c25827863d80a517f09fb3e2c117b153e514173
+commit_count: 1
+rows:
+  - sha: 2c25827863d80a517f09fb3e2c117b153e514173
+    source_ref: git:2c25827863d80a517f09fb3e2c117b153e514173
+    short_sha: 2c25827
+    changed_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - audiocompose/integrations/voicerender.py
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/installed_renderplan_smoke.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    stats:
+      files_changed: 12
+      insertions: 93
+      deletions: 18
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - audiocompose/integrations/voicerender.py
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/installed_renderplan_smoke.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior:
+      VoiceRender handoffs now require the raw-synthesis audio artifact
+      policy; missing or unsupported policies are rejected before composition output
+      is written, and supported dependency floors/tests use VoiceRender 0.2.11 and AudioSig
+      0.1.11.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: adapt to voicerender >=0.2.11"
+    target_entry_id: entry-0001
+    notes: ""

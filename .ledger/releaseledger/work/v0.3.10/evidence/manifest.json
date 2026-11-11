@@ -1,0 +1,36 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 93,
+      "deletions": 18,
+      "patch_file": "2c25827.patch",
+      "patch_sha256": "97f2091e85f67e930c741f0c47a176292f07b39186931a9a555bcaa47a2945f2",
+      "paths": [
+        ".github/workflows/python-publish.yml",
+        ".github/workflows/tests.yml",
+        "audiocompose/integrations/voicerender.py",
+        "pyproject.toml",
+        "tests/_bundle_fixtures.py",
+        "tests/installed_renderplan_smoke.py",
+        "tests/test_bundle_batch_compose.py",
+        "tests/test_compose_book.py",
+        "tests/test_compose_document.py",
+        "tests/test_renderplan_materialization.py",
+        "tests/test_variants.py",
+        "tests/test_voicerender_materialization.py"
+      ],
+      "sha": "2c25827863d80a517f09fb3e2c117b153e514173",
+      "short_sha": "2c25827",
+      "source_ref": "git:2c25827863d80a517f09fb3e2c117b153e514173"
+    }
+  ],
+  "git_base_ref": "48d655281cd1963033437cdfce8a9b00ffe36663",
+  "git_base_sha": "48d655281cd1963033437cdfce8a9b00ffe36663",
+  "git_head_ref": "2c25827863d80a517f09fb3e2c117b153e514173",
+  "git_head_sha": "2c25827863d80a517f09fb3e2c117b153e514173",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.3.10",
+  "schema_version": 1
+}

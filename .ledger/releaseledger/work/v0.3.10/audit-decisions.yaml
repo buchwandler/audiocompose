@@ -1,0 +1,23 @@
+rows:
+  - sha: 2c25827863d80a517f09fb3e2c117b153e514173
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - audiocompose/integrations/voicerender.py
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/installed_renderplan_smoke.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior: "VoiceRender handoffs now require the raw-synthesis audio artifact policy; missing or unsupported policies are rejected before composition output is written, and supported dependency floors/tests use VoiceRender 0.2.11 and AudioSig 0.1.11."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

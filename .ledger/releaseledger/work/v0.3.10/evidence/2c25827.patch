@@ -1,0 +1,352 @@
+ .github/workflows/python-publish.yml      |  6 +++---
+ .github/workflows/tests.yml               | 15 +++++++------
+ audiocompose/integrations/voicerender.py  |  7 +++++++
+ pyproject.toml                            |  2 +-
+ tests/_bundle_fixtures.py                 |  1 +
+ tests/installed_renderplan_smoke.py       | 10 ++++-----
+ tests/test_bundle_batch_compose.py        |  1 +
+ tests/test_compose_book.py                | 35 +++++++++++++++++++++++++++++--
+ tests/test_compose_document.py            |  1 +
+ tests/test_renderplan_materialization.py  |  3 ++-
+ tests/test_variants.py                    |  1 +
+ tests/test_voicerender_materialization.py | 29 +++++++++++++++++++++++++
+ 12 files changed, 93 insertions(+), 18 deletions(-)
+
+diff --git a/.github/workflows/python-publish.yml b/.github/workflows/python-publish.yml
+index a551638..f49ec73 100644
+--- a/.github/workflows/python-publish.yml
++++ b/.github/workflows/python-publish.yml
+@@ -100,7 +100,7 @@ jobs:
+                   Requirement(value) for value in metadata.get_all("Requires-Dist", [])
+               ]
+               assert has_minimum(requirements, "numpy", "1.23")
+-              assert has_minimum(requirements, "audiosig", "0.1.9")
++              assert has_minimum(requirements, "audiosig", "0.1.11")
+               renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
+               assert Version("0.2.0") not in renderplan.specifier
+               assert Version("0.2.1") in renderplan.specifier
+@@ -112,8 +112,8 @@ jobs:
+               assert Version("0.7.0") not in utterplan.specifier
+
+               voicerender = optional_requirement(requirements, "voicerender", "voicerender")
+-              assert Version("0.2.7") not in voicerender.specifier
+-              assert Version("0.2.8") in voicerender.specifier
++              assert Version("0.2.10") not in voicerender.specifier
++              assert Version("0.2.11") in voicerender.specifier
+               assert Version("0.3.0") not in voicerender.specifier
+               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
+           PY
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index ee96e1a..0ac263b 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -55,7 +55,7 @@ jobs:
+       - name: Install lower-bound package
+         run: |
+           python -m pip install --upgrade pip
+-          python -m pip install "numpy==1.24.0" "audiosig==0.1.9" "renderplan==0.2.1" "packaging"
++          python -m pip install "numpy==1.24.0" "audiosig==0.1.11" "renderplan==0.2.1" "packaging"
+           python -m pip install --no-deps -e .
+           python - <<'PY'
+           from importlib.metadata import requires
+@@ -64,6 +64,9 @@ jobs:
+
+           requirements = [Requirement(value) for value in (requires("audiocompose") or [])]
+           renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
++          audiosig = next(requirement for requirement in requirements if requirement.name == "audiosig")
++          assert Version("0.1.10") not in audiosig.specifier
++          assert Version("0.1.11") in audiosig.specifier
+           assert Version("0.2.0") not in renderplan.specifier
+           assert Version("0.2.1") in renderplan.specifier
+           assert Version("0.3.0") not in renderplan.specifier
+@@ -88,8 +91,8 @@ jobs:
+         run: |
+           python -m pip install --upgrade pip
+           python -m pip install \
+-            "numpy==1.24.0" "audiosig==0.1.9" "renderplan==0.2.1" \
+-            "utterplan==0.6.12" "voicerender==0.2.8" "pytest==8.0.0"
++            "numpy==1.24.0" "audiosig==0.1.11" "renderplan==0.2.1" \
++            "utterplan==0.6.12" "voicerender==0.2.11" "pytest==8.0.0"
+           python -m pip install --no-deps -e .
+
+       - name: Verify public producer handoff materialization
+@@ -110,8 +113,8 @@ jobs:
+         run: |
+           python -m pip install --upgrade pip
+           python -m pip install \
+-            "numpy>=1.23" "audiosig>=0.1.9,<0.2" "renderplan>=0.2.1,<0.3" \
+-            "utterplan>=0.6.12,<0.7" "voicerender>=0.2.8,<0.3" "pytest>=8"
++            "numpy>=1.23" "audiosig>=0.1.11,<0.2" "renderplan>=0.2.1,<0.3" \
++            "utterplan>=0.6.12,<0.7" "voicerender>=0.2.11,<0.3" "pytest>=8"
+           python -m pip install --no-deps -e .
+
+       - name: Verify public producer handoff materialization
+@@ -139,7 +142,7 @@ jobs:
+         run: |
+           python -m venv "$RUNNER_TEMP/audiocompose-wheel-venv"
+           wheel=$(printf '%s\n' dist/audiocompose-*.whl)
+-          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" -m pip install "$wheel" "utterplan>=0.6.12,<0.7" "voicerender>=0.2.8,<0.3"
++          "$RUNNER_TEMP/audiocompose-wheel-venv/bin/python" -m pip install "$wheel" "utterplan>=0.6.12,<0.7" "voicerender>=0.2.11,<0.3"
+
+       - name: Smoke-test installed wheel
+         run: |
+diff --git a/audiocompose/integrations/voicerender.py b/audiocompose/integrations/voicerender.py
+index 6d6dd43..070b84e 100644
+--- a/audiocompose/integrations/voicerender.py
++++ b/audiocompose/integrations/voicerender.py
+@@ -31,6 +31,7 @@ from .renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+
+ EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
+ _VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.render-diagnostics.v1"
++_VOICERENDER_AUDIO_ARTIFACT_POLICY = "voicerender.raw-synthesis.v1"
+ _VOICERENDER_EMPHASIS_POLICIES = frozenset({"reject", "defer-to-compose"})
+
+
+@@ -102,6 +103,12 @@ def _validate_render_diagnostics(
+         raise HandoffValidationError(
+             f"Unsupported VoiceRender diagnostics schema {diagnostics.get('schema')!r}"
+         )
++    artifact_policy = diagnostics.get("audio_artifact_policy")
++    if artifact_policy != _VOICERENDER_AUDIO_ARTIFACT_POLICY:
++        raise HandoffValidationError(
++            "VoiceRender artifacts use an unsupported audio artifact policy; "
++            "re-render with VoiceRender >=0.2.11 before composition"
++        )
+     plan_id = plan.plan_id or plan.computed_id()
+     if diagnostics.get("render_plan_id") != plan_id:
+         raise HandoffValidationError(
+diff --git a/pyproject.toml b/pyproject.toml
+index 103518c..17d64ae 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -32,7 +32,7 @@ classifiers = [
+
+ [project.optional-dependencies]
+ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "build>=1.2", "twine>=5", "jsonschema>=4.18"]
+-voicerender = ["utterplan>=0.6.12,<0.7", "voicerender>=0.2.8,<0.3"]
++voicerender = ["utterplan>=0.6.12,<0.7", "voicerender>=0.2.11,<0.3"]
+
+ [project.scripts]
+ audiocompose = "audiocompose.cli:main"
+diff --git a/tests/_bundle_fixtures.py b/tests/_bundle_fixtures.py
+index 9d69b39..11880fc 100644
+--- a/tests/_bundle_fixtures.py
++++ b/tests/_bundle_fixtures.py
+@@ -129,6 +129,7 @@ def two_chapter_book(tmp_path: Path) -> tuple[Path, str]:
+             save_manifest(render_manifest, render_dir / "render-manifest.toml")
+             diagnostics = {
+                 "schema": "voicerender.render-diagnostics.v1",
++                "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+                 "render_plan_id": plan.plan_id or plan.computed_id(),
+                 "emphasis_policy": "reject",
+                 "pending_composition": False,
+diff --git a/tests/installed_renderplan_smoke.py b/tests/installed_renderplan_smoke.py
+index 156cf85..496a0a6 100644
+--- a/tests/installed_renderplan_smoke.py
++++ b/tests/installed_renderplan_smoke.py
+@@ -233,7 +233,7 @@ def _compose_installed_document(root: Path, profile: RenderProfile) -> DocumentC
+     )
+     assert not rendered.failed, rendered.error
+     assert rendered.manifest.complete
+-    assert _version_tuple(rendered.manifest.producer.version) >= (0, 2, 4)
++    assert _version_tuple(rendered.manifest.producer.version) >= (0, 2, 11)
+
+     result = compose_document(workspace, variant=variant)
+     assert isinstance(result, DocumentComposeResult)
+@@ -251,8 +251,8 @@ def main() -> None:
+     assert Path(sys.prefix).resolve() in Path(utterplan.__file__).resolve().parents
+     assert (0, 2, 1) <= _version_tuple(version("renderplan")) < (0, 3, 0)
+     assert (0, 6, 12) <= _version_tuple(version("utterplan")) < (0, 7, 0)
+-    assert (0, 2, 8) <= _version_tuple(version("voicerender")) < (0, 3, 0)
+-    assert _version_tuple(version("audiosig")) >= (0, 1, 9)
++    assert (0, 2, 11) <= _version_tuple(version("voicerender")) < (0, 3, 0)
++    assert _version_tuple(version("audiosig")) >= (0, 1, 11)
+
+     register_adapter(_Adapter())
+     root = Path(tempfile.mkdtemp(prefix="audiocompose-voicerender-smoke-"))
+@@ -333,7 +333,7 @@ def main() -> None:
+     assert not rendered.failed, rendered.error
+     manifest = load_manifest(rendered.manifest_path)
+     assert manifest.complete and manifest.producer.name == "voicerender"
+-    assert _version_tuple(manifest.producer.version) >= (0, 2, 4)
++    assert _version_tuple(manifest.producer.version) >= (0, 2, 11)
+     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
+     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+     assert diagnostics["pending_composition"] is True
+@@ -408,7 +408,7 @@ def main() -> None:
+     )
+     document_result = _compose_installed_document(root, profile)
+     assert document_result.document_id == "document-0001"
+-    print("installed VoiceRender v0.2.8 artifact -> AudioCompose book and document smoke passed")
++    print("installed VoiceRender v0.2.11 artifact -> AudioCompose book and document smoke passed")
+
+
+ if __name__ == "__main__":
+diff --git a/tests/test_bundle_batch_compose.py b/tests/test_bundle_batch_compose.py
+index 16e22bd..b65edb5 100644
+--- a/tests/test_bundle_batch_compose.py
++++ b/tests/test_bundle_batch_compose.py
+@@ -702,6 +702,7 @@ def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
+         json.dumps(
+             {
+                 "schema": "voicerender.render-diagnostics.v1",
++                "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+                 "render_plan_id": plan.plan_id or plan.computed_id(),
+                 "emphasis_policy": "reject",
+                 "pending_composition": False,
+diff --git a/tests/test_compose_book.py b/tests/test_compose_book.py
+index 7c2e9bc..ec77d82 100644
+--- a/tests/test_compose_book.py
++++ b/tests/test_compose_book.py
+@@ -72,6 +72,7 @@ def _write_voice_diagnostics(render_dir: Path, plan: RenderPlan) -> None:
+             )
+     diagnostics = {
+         "schema": "voicerender.render-diagnostics.v1",
++        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+         "render_plan_id": plan.plan_id or plan.computed_id(),
+         "emphasis_policy": "defer-to-compose" if deferred else "reject",
+         "pending_composition": bool(deferred),
+@@ -739,6 +740,36 @@ def test_compose_book_rejects_missing_voice_diagnostics(tmp_path):
+     assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
+
+
++@pytest.mark.parametrize(
++    "artifact_policy",
++    ["voicerender.trailing-silence.v1", None],
++)
++def test_compose_book_rejects_unsupported_audio_artifact_policy_before_writing(
++    tmp_path, artifact_policy
++):
++    from audiocompose import compose_book
++
++    workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
++    diagnostics_path = (
++        workspace / "voicerender" / variant / chapters[0].id / RENDER_DIAGNOSTICS_FILENAME
++    )
++    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    if artifact_policy is None:
++        diagnostics.pop("audio_artifact_policy")
++    else:
++        diagnostics["audio_artifact_policy"] = artifact_policy
++    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
++
++    result = compose_book(workspace, variant=variant)
++    outcome = result.outcomes[0]
++    assert outcome.status == "failed"
++    assert outcome.error_code == "handoff.invalid"
++    assert "re-render with VoiceRender >=0.2.11" in outcome.error_message
++    output_dir = workspace / "audiocompose" / variant
++    assert not (output_dir / "chapter-0005.wav").exists()
++    assert not (output_dir / "chapter-0005.audiojob").exists()
++
++
+ def test_installed_package_metadata_has_supported_producer_floors():
+     from importlib.metadata import requires
+
+@@ -758,8 +789,8 @@ def test_installed_package_metadata_has_supported_producer_floors():
+     assert Version("0.6.12") in utterplan.specifier
+     assert Version("0.7.0") not in utterplan.specifier
+
+-    assert Version("0.2.7") not in voicerender.specifier
+-    assert Version("0.2.8") in voicerender.specifier
++    assert Version("0.2.10") not in voicerender.specifier
++    assert Version("0.2.11") in voicerender.specifier
+     assert Version("0.3.0") not in voicerender.specifier
+
+
+diff --git a/tests/test_compose_document.py b/tests/test_compose_document.py
+index 83040de..2047270 100644
+--- a/tests/test_compose_document.py
++++ b/tests/test_compose_document.py
+@@ -141,6 +141,7 @@ def _document_render_workspace(
+             )
+     diagnostics = {
+         "schema": "voicerender.render-diagnostics.v1",
++        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+         "render_plan_id": plan.plan_id or plan.computed_id(),
+         "emphasis_policy": "defer-to-compose" if deferred else "reject",
+         "pending_composition": bool(deferred),
+diff --git a/tests/test_renderplan_materialization.py b/tests/test_renderplan_materialization.py
+index 75335f4..53b1ed5 100644
+--- a/tests/test_renderplan_materialization.py
++++ b/tests/test_renderplan_materialization.py
+@@ -998,11 +998,12 @@ def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
+     extra_dependencies = project["project"]["optional-dependencies"]["voicerender"]
+
+     assert any(item.startswith("renderplan>=0.2.1,<0.3") for item in base_dependencies)
++    assert any(item.startswith("audiosig>=0.1.11,<0.2") for item in base_dependencies)
+     assert not any(
+         item.lower().startswith(("voicerender", "utterplan")) for item in base_dependencies
+     )
+     assert any(item.startswith("utterplan>=0.6.12,<0.7") for item in extra_dependencies)
+-    assert any(item.startswith("voicerender>=0.2.8,<0.3") for item in extra_dependencies)
++    assert any(item.startswith("voicerender>=0.2.11,<0.3") for item in extra_dependencies)
+     assert (project_path.parent / "audiocompose/integrations/voicerender.py").is_file()
+
+
+diff --git a/tests/test_variants.py b/tests/test_variants.py
+index f01e59b..24c8720 100644
+--- a/tests/test_variants.py
++++ b/tests/test_variants.py
+@@ -119,6 +119,7 @@ def _write_render(root: Path, variant: str, unit_id: str, plan: RenderPlan, *, c
+     save_manifest(manifest, render_dir / "render-manifest.toml")
+     diagnostics = {
+         "schema": "voicerender.render-diagnostics.v1",
++        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+         "render_plan_id": plan.plan_id or plan.computed_id(),
+         "emphasis_policy": "reject",
+         "pending_composition": False,
+diff --git a/tests/test_voicerender_materialization.py b/tests/test_voicerender_materialization.py
+index b2024ea..c3a2037 100644
+--- a/tests/test_voicerender_materialization.py
++++ b/tests/test_voicerender_materialization.py
+@@ -103,6 +103,7 @@ def _book_handoff(
+     emphasis_count = sum(control.name == "emphasis" for control in speech.controls)
+     diagnostics = {
+         "schema": "voicerender.render-diagnostics.v1",
++        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+         "render_plan_id": plan.plan_id or plan.computed_id(),
+         "emphasis_policy": "defer-to-compose" if emphasis_count else "reject",
+         "pending_composition": bool(emphasis_count),
+@@ -171,6 +172,8 @@ def test_released_public_book_handoff_materializes_audiojob(tmp_path):
+     assert job.source["render_manifest.manifest_id"] == manifest.manifest_id
+     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
+     assert job.source[VOICERENDER_DIAGNOSTICS_SCHEMA] == "voicerender.render-diagnostics.v1"
++    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    assert diagnostics["audio_artifact_policy"] == "voicerender.raw-synthesis.v1"
+     assert (
+         job.source[VOICERENDER_DIAGNOSTICS_SHA256]
+         == "sha256:" + hashlib.sha256(diagnostics_path.read_bytes()).hexdigest()
+@@ -307,6 +310,32 @@ def test_voicerender_handoff_rejects_missing_diagnostics(tmp_path):
+         materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
+
+
++@pytest.mark.parametrize(
++    ("artifact_policy", "include_policy"),
++    [
++        ("voicerender.trailing-silence.v1", True),
++        (None, False),
++    ],
++)
++def test_voicerender_handoff_rejects_stale_or_missing_audio_artifact_policy(
++    tmp_path, artifact_policy, include_policy
++):
++    _, _, source, plan, manifest, render_dir = _book_handoff(tmp_path, producer_version="0.2.11")
++    diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
++    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    if include_policy:
++        diagnostics["audio_artifact_policy"] = artifact_policy
++    else:
++        diagnostics.pop("audio_artifact_policy")
++    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
++
++    with pytest.raises(
++        HandoffValidationError,
++        match="re-render with VoiceRender >=0\\.2\\.11 before composition",
++    ):
++        materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
++
++
+ @pytest.mark.parametrize(
+     ("diagnostics_overrides", "message"),
+     [
