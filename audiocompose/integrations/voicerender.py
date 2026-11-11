@@ -31,6 +31,7 @@ from .renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
 
 EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
 _VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.render-diagnostics.v1"
+_VOICERENDER_AUDIO_ARTIFACT_POLICY = "voicerender.raw-synthesis.v1"
 _VOICERENDER_EMPHASIS_POLICIES = frozenset({"reject", "defer-to-compose"})
 
 
@@ -101,6 +102,12 @@ def _validate_render_diagnostics(
     if diagnostics.get("schema") != _VOICERENDER_DIAGNOSTICS_SCHEMA:
         raise HandoffValidationError(
             f"Unsupported VoiceRender diagnostics schema {diagnostics.get('schema')!r}"
+        )
+    artifact_policy = diagnostics.get("audio_artifact_policy")
+    if artifact_policy != _VOICERENDER_AUDIO_ARTIFACT_POLICY:
+        raise HandoffValidationError(
+            "VoiceRender artifacts use an unsupported audio artifact policy; "
+            "re-render with VoiceRender >=0.2.11 before composition"
         )
     plan_id = plan.plan_id or plan.computed_id()
     if diagnostics.get("render_plan_id") != plan_id:

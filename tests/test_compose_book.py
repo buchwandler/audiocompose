@@ -72,6 +72,7 @@ def _write_voice_diagnostics(render_dir: Path, plan: RenderPlan) -> None:
             )
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
+        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if deferred else "reject",
         "pending_composition": bool(deferred),
@@ -739,6 +740,36 @@ def test_compose_book_rejects_missing_voice_diagnostics(tmp_path):
     assert not (workspace / "audiocompose" / variant / "chapter-0005.wav").exists()
 
 
+@pytest.mark.parametrize(
+    "artifact_policy",
+    ["voicerender.trailing-silence.v1", None],
+)
+def test_compose_book_rejects_unsupported_audio_artifact_policy_before_writing(
+    tmp_path, artifact_policy
+):
+    from audiocompose import compose_book
+
+    workspace, variant, _, chapters = _fixture_book(tmp_path, source_numbers=(5,))
+    diagnostics_path = (
+        workspace / "voicerender" / variant / chapters[0].id / RENDER_DIAGNOSTICS_FILENAME
+    )
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    if artifact_policy is None:
+        diagnostics.pop("audio_artifact_policy")
+    else:
+        diagnostics["audio_artifact_policy"] = artifact_policy
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    result = compose_book(workspace, variant=variant)
+    outcome = result.outcomes[0]
+    assert outcome.status == "failed"
+    assert outcome.error_code == "handoff.invalid"
+    assert "re-render with VoiceRender >=0.2.11" in outcome.error_message
+    output_dir = workspace / "audiocompose" / variant
+    assert not (output_dir / "chapter-0005.wav").exists()
+    assert not (output_dir / "chapter-0005.audiojob").exists()
+
+
 def test_installed_package_metadata_has_supported_producer_floors():
     from importlib.metadata import requires
 
@@ -758,8 +789,8 @@ def test_installed_package_metadata_has_supported_producer_floors():
     assert Version("0.6.12") in utterplan.specifier
     assert Version("0.7.0") not in utterplan.specifier
 
-    assert Version("0.2.7") not in voicerender.specifier
-    assert Version("0.2.8") in voicerender.specifier
+    assert Version("0.2.10") not in voicerender.specifier
+    assert Version("0.2.11") in voicerender.specifier
     assert Version("0.3.0") not in voicerender.specifier
 
 

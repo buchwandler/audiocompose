@@ -103,6 +103,7 @@ def _book_handoff(
     emphasis_count = sum(control.name == "emphasis" for control in speech.controls)
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
+        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if emphasis_count else "reject",
         "pending_composition": bool(emphasis_count),
@@ -171,6 +172,8 @@ def test_released_public_book_handoff_materializes_audiojob(tmp_path):
     assert job.source["render_manifest.manifest_id"] == manifest.manifest_id
     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
     assert job.source[VOICERENDER_DIAGNOSTICS_SCHEMA] == "voicerender.render-diagnostics.v1"
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert diagnostics["audio_artifact_policy"] == "voicerender.raw-synthesis.v1"
     assert (
         job.source[VOICERENDER_DIAGNOSTICS_SHA256]
         == "sha256:" + hashlib.sha256(diagnostics_path.read_bytes()).hexdigest()
@@ -304,6 +307,32 @@ def test_voicerender_handoff_rejects_missing_diagnostics(tmp_path):
     (render_dir / "render-diagnostics.json").unlink()
 
     with pytest.raises(HandoffValidationError, match="Cannot read VoiceRender diagnostics"):
+        materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
+
+
+@pytest.mark.parametrize(
+    ("artifact_policy", "include_policy"),
+    [
+        ("voicerender.trailing-silence.v1", True),
+        (None, False),
+    ],
+)
+def test_voicerender_handoff_rejects_stale_or_missing_audio_artifact_policy(
+    tmp_path, artifact_policy, include_policy
+):
+    _, _, source, plan, manifest, render_dir = _book_handoff(tmp_path, producer_version="0.2.11")
+    diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    if include_policy:
+        diagnostics["audio_artifact_policy"] = artifact_policy
+    else:
+        diagnostics.pop("audio_artifact_policy")
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    with pytest.raises(
+        HandoffValidationError,
+        match="re-render with VoiceRender >=0\\.2\\.11 before composition",
+    ):
         materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
 
 

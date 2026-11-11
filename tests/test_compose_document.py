@@ -141,6 +141,7 @@ def _document_render_workspace(
             )
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
+        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if deferred else "reject",
         "pending_composition": bool(deferred),

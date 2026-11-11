@@ -100,7 +100,7 @@ jobs:
                   Requirement(value) for value in metadata.get_all("Requires-Dist", [])
               ]
               assert has_minimum(requirements, "numpy", "1.23")
-              assert has_minimum(requirements, "audiosig", "0.1.9")
+              assert has_minimum(requirements, "audiosig", "0.1.11")
               renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
               assert Version("0.2.0") not in renderplan.specifier
               assert Version("0.2.1") in renderplan.specifier
@@ -112,8 +112,8 @@ jobs:
               assert Version("0.7.0") not in utterplan.specifier
 
               voicerender = optional_requirement(requirements, "voicerender", "voicerender")
-              assert Version("0.2.7") not in voicerender.specifier
-              assert Version("0.2.8") in voicerender.specifier
+              assert Version("0.2.10") not in voicerender.specifier
+              assert Version("0.2.11") in voicerender.specifier
               assert Version("0.3.0") not in voicerender.specifier
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY

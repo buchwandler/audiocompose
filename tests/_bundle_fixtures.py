@@ -129,6 +129,7 @@ def two_chapter_book(tmp_path: Path) -> tuple[Path, str]:
             save_manifest(render_manifest, render_dir / "render-manifest.toml")
             diagnostics = {
                 "schema": "voicerender.render-diagnostics.v1",
+                "audio_artifact_policy": "voicerender.raw-synthesis.v1",
                 "render_plan_id": plan.plan_id or plan.computed_id(),
                 "emphasis_policy": "reject",
                 "pending_composition": False,

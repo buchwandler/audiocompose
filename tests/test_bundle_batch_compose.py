@@ -702,6 +702,7 @@ def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
         json.dumps(
             {
                 "schema": "voicerender.render-diagnostics.v1",
+                "audio_artifact_policy": "voicerender.raw-synthesis.v1",
                 "render_plan_id": plan.plan_id or plan.computed_id(),
                 "emphasis_policy": "reject",
                 "pending_composition": False,
