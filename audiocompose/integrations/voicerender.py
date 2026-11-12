@@ -16,6 +16,7 @@ import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -24,10 +25,17 @@ from ..errors import HandoffValidationError, IntegrationError, PausePolicyError
 from ..model import OutputPolicy, Silence
 from .renderplan import (
     MediaResolver,
+    _pause_durations,
     _ValidatedControlOwnership,
     materialize_renderplan_job,
 )
-from .renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+from .renderplan_metadata import (
+    AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS,
+    AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS,
+    AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS,
+    AUDIOCOMPOSE_PAUSE_TARGET_SECONDS,
+    RENDER_DIAGNOSTICS_FILENAME,
+)
 
 EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
 _VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.render-diagnostics.v1"
@@ -530,8 +538,8 @@ def _apply_pause_policy(
             items.append(job_item)
             continue
         reason = plan_item.reason
-        seconds = job_item.seconds
-        if reason in PAUSE_CLASSES and reason != "timed":
+        target_seconds = float(job_item.metadata[AUDIOCOMPOSE_PAUSE_TARGET_SECONDS])
+        if reason in PAUSE_CLASSES:
             use_policy = provenance == "explicit" or reason in source_intents
             use_policy = (
                 use_policy
@@ -540,21 +548,29 @@ def _apply_pause_policy(
             )
             if use_policy:
                 role = _render_pause_role(flow, index, default_role)
-                seconds = policy.resolve(
+                target_seconds = policy.resolve(
                     reason,
                     role=role,
                     where=f"RenderPlan pause {plan_item.pause_id or index}",
                 )
-        if seconds != job_item.seconds:
-            from dataclasses import replace as dataclass_replace
-
-            items.append(dataclass_replace(job_item, seconds=seconds))
-        else:
-            items.append(job_item)
+        estimated_tail_seconds = float(
+            job_item.metadata.get(AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS, 0.0)
+        )
+        applied_credit_seconds, generated_seconds = _pause_durations(
+            target_seconds, estimated_tail_seconds
+        )
+        metadata = dict(job_item.metadata)
+        metadata.update(
+            {
+                AUDIOCOMPOSE_PAUSE_TARGET_SECONDS: target_seconds,
+                AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS: applied_credit_seconds,
+                AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS: generated_seconds,
+            }
+        )
+        items.append(dataclass_replace(job_item, seconds=generated_seconds, metadata=metadata))
     source = dict(job.source)
     source["audiocompose.pause_policy_id"] = policy.policy_id
     source["audiocompose.pause_policy_provenance"] = provenance
-    from dataclasses import replace as dataclass_replace
 
     result = dataclass_replace(job, items=tuple(items), job_id=None, source=source)
     result.validate(verify_sources=True)

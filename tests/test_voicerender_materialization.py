@@ -38,6 +38,9 @@ def _book_handoff(
     producer_name: str = "voicerender",
     producer_version: str | None = "0.2.0",
     manifest_complete: bool = True,
+    pause_duration_ms: int | None = None,
+    speech_audio: np.ndarray | None = None,
+    sample_rate: int = 16_000,
 ):
     workspace = tmp_path / "book.ssmd-bundle"
     utterplan_dir = workspace / "utterplan"
@@ -73,23 +76,29 @@ def _book_handoff(
         controls=tuple(controls),
         source=(renderplan.SourceSpan("chapter-0001.md", 0, 19),),
     ).with_identity()
+    flow = (speech,)
+    if pause_duration_ms is not None:
+        flow += (
+            renderplan.PauseItem(duration_ms=pause_duration_ms, reason="strong").with_identity(),
+        )
     plan = renderplan.RenderPlan(
         source_plan_id=source.plan_id,
         render_profile_id=profile_id,
-        flow=(speech,),
+        flow=flow,
     ).with_identity()
     plan_path = variant_plan_dir / f"{chapter_id}.renderplan.toml"
     renderplan.save_plan(plan, plan_path)
 
     wav_path = chapter_render_dir / speech.wav
-    write_wav(wav_path, np.zeros(64, dtype=np.float32), 16_000)
+    audio = speech_audio if speech_audio is not None else np.zeros(64, dtype=np.float32)
+    write_wav(wav_path, audio, sample_rate)
     artifact = renderplan.SpeechArtifact(
         segment_number=speech.number,
         segment_id=speech.segment_id or speech.computed_id(),
         wav=speech.wav,
         sha256="sha256:" + hashlib.sha256(wav_path.read_bytes()).hexdigest(),
-        frames=64,
-        sample_rate=16_000,
+        frames=len(audio),
+        sample_rate=sample_rate,
         channels=1,
     )
     manifest = renderplan.RenderManifest(
@@ -275,6 +284,59 @@ def test_pause_policy_profile_derivation_and_strict_explicit_loader(tmp_path):
     symlink.symlink_to(path)
     with pytest.raises(PausePolicyError, match="must not be a symlink"):
         PausePolicy.load(symlink)
+
+
+def test_pause_policy_resolves_final_target_before_credit_and_is_idempotent(tmp_path):
+    from audiocompose.integrations.renderplan_metadata import (
+        AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS,
+        AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS,
+        AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS,
+        AUDIOCOMPOSE_PAUSE_TARGET_SECONDS,
+    )
+    from audiocompose.integrations.voicerender import PausePolicy
+
+    audio = np.concatenate(
+        (np.full(300, 0.5, dtype=np.float32), np.full(100, 0.0001, dtype=np.float32))
+    )
+    _, _, source, plan, manifest, render_dir = _book_handoff(
+        tmp_path,
+        pause_duration_ms=300,
+        speech_audio=audio,
+        sample_rate=1_000,
+    )
+    policy = PausePolicy.from_mapping(
+        {
+            "schema": "audiocompose.pause-policy.v1",
+            "merge": "max",
+            "default": {"strong": "500ms"},
+        }
+    )
+
+    job = materialize_voicerender_job(
+        source,
+        plan,
+        manifest,
+        render_dir=render_dir,
+        pause_policy=policy,
+    )
+    silence = job.items[-1]
+    assert silence.seconds == pytest.approx(0.4)
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_TARGET_SECONDS] == 0.5
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS] == 0.1
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS] == 0.1
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS] == pytest.approx(0.4)
+
+    reapplied = voicerender_integration._apply_pause_policy(
+        job,
+        plan,
+        policy,
+        source_intents=set(),
+        provenance="explicit",
+        default_role="narrator",
+    )
+    reapplied_silence = reapplied.items[-1]
+    assert reapplied_silence.seconds == silence.seconds
+    assert reapplied_silence.metadata == silence.metadata
 
 
 def test_voicerender_v020_handoff_accepts_native_controls_and_applies_deferred_emphasis(tmp_path):

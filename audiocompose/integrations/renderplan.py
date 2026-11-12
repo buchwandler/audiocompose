@@ -20,7 +20,11 @@ from ..job import validate_clip_geometry
 from ..model import AudioClip, AudioJob, OutputPolicy, Silence
 from ..operations import Gain
 from ..sources import AudioBufferSource, AudioSource, RenderedAudioBuffer
-from ..speech_boundaries import SPEECH_BOUNDARY_POLICY_ID, condition_speech_tail
+from ..speech_boundaries import (
+    _PAUSE_CREDIT_MAX_SECONDS,
+    SPEECH_BOUNDARY_POLICY_ID,
+    condition_speech_tail,
+)
 from ..wav import read_wav, sha256_file, wav_info
 from .media import (
     LocalWavResolver,
@@ -33,12 +37,24 @@ from .renderplan_metadata import (
     AUDIOCOMPOSE_MATERIALIZER,
     AUDIOCOMPOSE_MEDIA_IDENTITY,
     AUDIOCOMPOSE_MEDIA_METADATA,
+    AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS,
+    AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS,
+    AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS,
+    AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY,
+    AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE,
+    AUDIOCOMPOSE_PAUSE_TARGET_SECONDS,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_FRAMES,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_CONFIRMED,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_START_SAMPLE,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_CONFIRMED,
     AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE,
+    AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_SILENCE_START_SAMPLE,
     MANIFEST_CHANNELS,
     MANIFEST_FRAMES,
     MANIFEST_ID,
@@ -66,6 +82,8 @@ from .renderplan_metadata import (
 )
 
 MANIFEST_FILENAME = "render-manifest.toml"
+
+PAUSE_TAIL_CREDIT_POLICY_ID = "audiocompose.pause-tail-credit.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +465,18 @@ def _materialize_speech(
             AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES: boundary.output_frames,
             AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES: boundary.removed_frames,
             AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS: boundary.removed_seconds,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_CONFIRMED: boundary.trim_confirmed,
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_SILENCE_START_SAMPLE: (
+                boundary.trim_silence_start_sample
+            ),
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_CONFIRMED: (
+                boundary.tail_estimate_confirmed
+            ),
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_START_SAMPLE: (
+                boundary.tail_estimate_start_sample
+            ),
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_FRAMES: (boundary.estimated_tail_frames),
+            AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS: (boundary.estimated_tail_seconds),
             AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE: boundary.trim_end_sample,
         }
     )
@@ -470,19 +500,46 @@ def _materialize_speech(
     )
 
 
-def _materialize_pause(item: PauseItem, plan_id: str, flow_index: int) -> Silence:
+def _pause_durations(
+    target_seconds: float, estimated_preceding_tail_seconds: float
+) -> tuple[float, float]:
+    applied_credit_seconds = min(
+        target_seconds,
+        estimated_preceding_tail_seconds,
+        _PAUSE_CREDIT_MAX_SECONDS,
+    )
+    generated_seconds = max(0.0, target_seconds - applied_credit_seconds)
+    return applied_credit_seconds, generated_seconds
+
+
+def _materialize_pause(
+    item: PauseItem,
+    plan_id: str,
+    flow_index: int,
+    *,
+    preceding_tail_seconds: float,
+) -> Silence:
     pause_id = item.pause_id or item.computed_id()
+    target_seconds = item.duration_ms / 1000.0
+    applied_credit_seconds, generated_seconds = _pause_durations(
+        target_seconds, preceding_tail_seconds
+    )
     metadata: dict[str, Any] = {
         "kind": "pause",
         RENDERPLAN_PLAN_ID: plan_id,
         RENDERPLAN_PAUSE_ID: pause_id,
         RENDERPLAN_PAUSE_REASON: item.reason,
+        AUDIOCOMPOSE_PAUSE_TARGET_SECONDS: target_seconds,
+        AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS: preceding_tail_seconds,
+        AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS: applied_credit_seconds,
+        AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS: generated_seconds,
+        AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY: PAUSE_TAIL_CREDIT_POLICY_ID,
     }
     if item.source:
         metadata[RENDERPLAN_PAUSE_SOURCE] = [span.to_dict() for span in item.source]
     return Silence(
         id=f"pause:{flow_index + 1:06d}:{pause_id}",
-        seconds=item.duration_ms / 1000.0,
+        seconds=generated_seconds,
         metadata=metadata,
     )
 
@@ -623,35 +680,47 @@ def materialize_renderplan_job(
     )
 
     items: list[AudioClip | Silence] = []
+    previous_speech_tail_seconds = 0.0
     for flow_index, item in enumerate(plan.flow):
         if isinstance(item, SpeechItem):
             occurrence = (item.number, item.segment_id or item.computed_id())
-            items.append(
-                _materialize_speech(
-                    item,
-                    plan_id,
-                    manifest_id=manifest_id,
-                    verified_speech=(verified[item.number] if rendered_speech is None else None),
-                    rendered_audio=(
-                        rendered_speech[occurrence] if rendered_speech is not None else None
-                    ),
-                    emphasis_policy=emphasis_policy,
-                    control_ownership=_control_ownership,
-                )
+            clip = _materialize_speech(
+                item,
+                plan_id,
+                manifest_id=manifest_id,
+                verified_speech=(verified[item.number] if rendered_speech is None else None),
+                rendered_audio=(
+                    rendered_speech[occurrence] if rendered_speech is not None else None
+                ),
+                emphasis_policy=emphasis_policy,
+                control_ownership=_control_ownership,
+            )
+            items.append(clip)
+            previous_speech_tail_seconds = float(
+                clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS]
             )
         elif isinstance(item, PauseItem):
-            items.append(_materialize_pause(item, plan_id, flow_index))
+            items.append(
+                _materialize_pause(
+                    item,
+                    plan_id,
+                    flow_index,
+                    preceding_tail_seconds=previous_speech_tail_seconds,
+                )
+            )
+            previous_speech_tail_seconds = 0.0
         elif isinstance(item, AudioItem):
             items.append(_materialize_audio(item, flow_index, plan_id, resolved_audio[flow_index]))
+            previous_speech_tail_seconds = 0.0
         else:  # RenderPlan validation should make this unreachable.
             raise HandoffValidationError(f"Unsupported RenderPlan flow item: {type(item).__name__}")
-
     source_metadata: dict[str, Any] = {
         RENDERPLAN_PLAN_ID: plan_id,
         RENDERPLAN_SOURCE_PLAN_ID: plan.source_plan_id,
         RENDERPLAN_PROFILE_ID: plan.render_profile_id,
-        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v2",
+        AUDIOCOMPOSE_MATERIALIZER: "renderplan.v3",
         AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY: SPEECH_BOUNDARY_POLICY_ID,
+        AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE: PAUSE_TAIL_CREDIT_POLICY_ID,
     }
     if manifest_id is not None:
         source_metadata[MANIFEST_ID] = manifest_id
@@ -675,13 +744,13 @@ def materialize_renderplan_job(
         job.validate(verify_sources=False)
         for flow_index, flow_item in enumerate(plan.flow):
             if isinstance(flow_item, AudioItem):
-                clip = job.items[flow_index]
-                if not isinstance(clip, AudioClip):
+                materialized_item = job.items[flow_index]
+                if not isinstance(materialized_item, AudioClip):
                     raise HandoffValidationError(
                         "external RenderPlan media did not materialize as an AudioClip"
                     )
-                audio, _ = clip.source.load()
-                validate_clip_geometry(clip, audio)
+                audio, _ = materialized_item.source.load()
+                validate_clip_geometry(materialized_item, audio)
     except Exception as exc:
         raise HandoffValidationError(f"Materialized AudioJob failed validation: {exc}") from exc
     return job

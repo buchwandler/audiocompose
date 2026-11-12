@@ -891,6 +891,8 @@ def test_audioitem_pause_speech_order_and_pause_reason_are_literal(tmp_path):
     ]
     assert isinstance(job.items[1], Silence) and isinstance(job.items[3], Silence)
     assert job.items[1].seconds == job.items[3].seconds == 0.5
+    assert job.items[1].metadata["audiocompose.pause.estimated_preceding_tail_seconds"] == 0
+    assert job.items[1].metadata["audiocompose.pause.generated_seconds"] == 0.5
     assert job.items[1].metadata["renderplan.pause_reason"] == "sentence"
     assert job.items[3].metadata["renderplan.pause_reason"] == "capacity"
     composition = Composer().compose(job)
@@ -998,7 +1000,7 @@ def test_producer_stack_is_an_optional_extra_not_a_base_dependency():
     extra_dependencies = project["project"]["optional-dependencies"]["voicerender"]
 
     assert any(item.startswith("renderplan>=0.2.1,<0.3") for item in base_dependencies)
-    assert any(item.startswith("audiosig>=0.1.11,<0.2") for item in base_dependencies)
+    assert any(item.startswith("audiosig>=0.1.12,<0.2") for item in base_dependencies)
     assert not any(
         item.lower().startswith(("voicerender", "utterplan")) for item in base_dependencies
     )
@@ -1012,12 +1014,18 @@ def test_persisted_speech_conditions_verified_samples_without_reloading_wav(
 ) -> None:
     from audiocompose.integrations import renderplan as adapter
     from audiocompose.integrations.renderplan_metadata import (
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_FRAMES,
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS,
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_CONFIRMED,
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_START_SAMPLE,
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_CONFIRMED,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE,
+        AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_SILENCE_START_SAMPLE,
     )
     from audiocompose.sources import AudioBufferSource, RenderedAudioBuffer
 
@@ -1057,18 +1065,24 @@ def test_persisted_speech_conditions_verified_samples_without_reloading_wav(
     assert isinstance(persisted_clip.source, AudioBufferSource)
     persisted_audio, actual_rate = persisted_clip.source.load()
     assert actual_rate == sample_rate
-    assert len(persisted_audio) == 500
-    np.testing.assert_array_equal(persisted_audio, audio[:500])
+    assert len(persisted_audio) == 650
+    np.testing.assert_array_equal(persisted_audio, audio[:650])
     assert persisted_clip.metadata["render_manifest.frames"] == 900
     assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
-        "audiocompose.trailing-silence.v1"
+        "audiocompose.trailing-silence.v2"
     )
     assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_INPUT_FRAMES] == 900
-    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES] == 500
-    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES] == 400
-    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS] == 0.4
-    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE] == 500
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES] == 650
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES] == 250
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS] == 0.25
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE] == 650
 
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_CONFIRMED] is True
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_SILENCE_START_SAMPLE] == 500
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_CONFIRMED] is True
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_START_SAMPLE] == 500
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_FRAMES] == 150
+    assert persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS] == 0.15
     occurrence = (speech.number, speech.segment_id or speech.computed_id())
     rendered = RenderedAudioBuffer(audio, sample_rate)
     in_memory = materialize_renderplan_job(plan, rendered_speech={occurrence: rendered})
@@ -1077,6 +1091,11 @@ def test_persisted_speech_conditions_verified_samples_without_reloading_wav(
     in_memory_audio, memory_rate = in_memory_clip.source.load()
     assert memory_rate == actual_rate
     np.testing.assert_array_equal(in_memory_audio, persisted_audio)
+
+    assert (
+        in_memory_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS]
+        == (persisted_clip.metadata[AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS])
+    )
 
 
 def test_word_timings_overlapping_removed_tail_are_preserved_verbatim(tmp_path: Path) -> None:
@@ -1106,8 +1125,8 @@ def test_word_timings_overlapping_removed_tail_are_preserved_verbatim(tmp_path: 
 @pytest.mark.parametrize(
     "timing",
     [
-        {"word": "Hello", "start_sample": 501, "end_sample": 600},
-        {"word": "Hello", "start_seconds": 0.501, "end_seconds": 0.6},
+        {"word": "Hello", "start_sample": 651, "end_sample": 700},
+        {"word": "Hello", "start_seconds": 0.651, "end_seconds": 0.7},
     ],
 )
 def test_word_timing_start_beyond_conditioned_endpoint_is_rejected(
@@ -1138,6 +1157,7 @@ def test_policy_and_materializer_versions_change_audiojob_identity(
     from audiocompose.integrations import renderplan as adapter
     from audiocompose.integrations.renderplan_metadata import (
         AUDIOCOMPOSE_MATERIALIZER,
+        AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE,
         AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY,
     )
 
@@ -1146,9 +1166,12 @@ def test_policy_and_materializer_versions_change_audiojob_identity(
     plan = _plan(speech)
     manifest = _manifest(plan, [artifact])
     original = materialize_renderplan_job(plan, manifest, render_dir=tmp_path)
-    assert original.source[AUDIOCOMPOSE_MATERIALIZER] == "renderplan.v2"
+    assert original.source[AUDIOCOMPOSE_MATERIALIZER] == "renderplan.v3"
     assert original.source[AUDIOCOMPOSE_SPEECH_BOUNDARY_POLICY] == (
-        "audiocompose.trailing-silence.v1"
+        "audiocompose.trailing-silence.v2"
+    )
+    assert original.source[AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE] == (
+        "audiocompose.pause-tail-credit.v1"
     )
 
     monkeypatch.setattr(adapter, "SPEECH_BOUNDARY_POLICY_ID", "audiocompose.trailing-silence.test")
@@ -1171,7 +1194,7 @@ def test_policy_and_materializer_versions_change_audiojob_identity(
     ).job_id
     older_materializer = replace(
         original,
-        source={**original.source, AUDIOCOMPOSE_MATERIALIZER: "renderplan.v1"},
+        source={**original.source, AUDIOCOMPOSE_MATERIALIZER: "renderplan.v2"},
     )
     older_materializer_id = AudioJob.load(
         older_materializer.save(tmp_path / "older-materializer.audiojob")
@@ -1212,13 +1235,232 @@ def test_explicit_pause_uses_conditioned_speech_boundary_and_estimate_matches(
     composition = Composer().compose(job)
     estimate = estimate_composition(job)
 
-    assert estimate.item_output_frames == (200, 500, 100)
+    assert estimate.item_output_frames == (350, 350, 100)
     assert estimate.total_output_frames == len(composition.audio) == 800
     assert [(item.start_sample, item.end_sample) for item in composition.items] == [
-        (0, 200),
-        (200, 700),
+        (0, 350),
+        (350, 700),
         (700, 800),
     ]
+
+
+@pytest.mark.parametrize(
+    (
+        "tail_frames",
+        "target_ms",
+        "reason",
+        "expected_tail_seconds",
+        "expected_credit_seconds",
+        "expected_generated_seconds",
+        "expected_conditioned_frames",
+    ),
+    [
+        (100, 500, "sentence", 0.1, 0.1, 0.4, 400),
+        (100, 500, "timed", 0.1, 0.1, 0.4, 400),
+        (150, 500, "sentence", 0.15, 0.15, 0.35, 450),
+        (400, 500, "sentence", 0.15, 0.15, 0.35, 450),
+        (0, 500, "sentence", 0.0, 0.0, 0.5, 300),
+        (150, 100, "sentence", 0.15, 0.1, 0.0, 450),
+        (150, 0, "sentence", 0.15, 0.0, 0.0, 450),
+    ],
+)
+def test_speech_tail_credit_targets_pause_gap(
+    tail_frames: int,
+    target_ms: int,
+    reason: str,
+    expected_tail_seconds: float,
+    expected_credit_seconds: float,
+    expected_generated_seconds: float,
+    expected_conditioned_frames: int,
+) -> None:
+    from audiocompose.integrations.renderplan_metadata import (
+        AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS,
+        AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS,
+        AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS,
+        AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY,
+        AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE,
+        AUDIOCOMPOSE_PAUSE_TARGET_SECONDS,
+    )
+    from audiocompose.sources import RenderedAudioBuffer
+
+    sample_rate = 1_000
+    speech = _speech()
+    pause = PauseItem(duration_ms=target_ms, reason=reason).with_identity()
+    plan = _plan(speech, pause)
+    original_flow = plan.flow
+    tail = np.full(tail_frames, 0.0001, dtype=np.float32)
+    audio = np.concatenate((np.full(300, 0.5, dtype=np.float32), tail))
+    occurrence = (speech.number, speech.segment_id or speech.computed_id())
+
+    job = materialize_renderplan_job(
+        plan,
+        rendered_speech={occurrence: RenderedAudioBuffer(audio, sample_rate)},
+        output_policy=OutputPolicy(sample_rate=sample_rate),
+    )
+    assert plan.flow == original_flow
+    assert pause.duration_ms == target_ms
+
+    speech_clip, silence = job.items
+    assert isinstance(speech_clip, AudioClip)
+    conditioned, _ = speech_clip.source.load()
+    assert len(conditioned) == expected_conditioned_frames
+    assert isinstance(silence, Silence)
+    assert silence.seconds == expected_generated_seconds
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_TARGET_SECONDS] == target_ms / 1000
+    assert (
+        silence.metadata[AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS]
+        == expected_tail_seconds
+    )
+    assert (
+        silence.metadata[AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS] == expected_credit_seconds
+    )
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS] == expected_generated_seconds
+    assert silence.metadata[AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY] == (
+        "audiocompose.pause-tail-credit.v1"
+    )
+    assert job.source[AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE] == (
+        "audiocompose.pause-tail-credit.v1"
+    )
+
+
+def test_pause_tail_credit_is_immediate_and_consumed_once() -> None:
+    from audiocompose.sources import RenderedAudioBuffer
+
+    sample_rate = 1_000
+    speech = _speech()
+    leading = PauseItem(duration_ms=200, reason="leading").with_identity()
+    first_pause = PauseItem(duration_ms=300, reason="sentence").with_identity()
+    second_pause = PauseItem(duration_ms=200, reason="capacity").with_identity()
+    plan = _plan(leading, speech, first_pause, second_pause)
+    audio = np.concatenate(
+        (np.full(300, 0.5, dtype=np.float32), np.full(100, 0.0001, dtype=np.float32))
+    )
+    occurrence = (speech.number, speech.segment_id or speech.computed_id())
+
+    job = materialize_renderplan_job(
+        plan,
+        rendered_speech={occurrence: RenderedAudioBuffer(audio, sample_rate)},
+        output_policy=OutputPolicy(sample_rate=sample_rate),
+    )
+
+    leading_silence, _, credited_silence, following_silence = job.items
+    assert isinstance(leading_silence, Silence) and leading_silence.seconds == 0.2
+    assert leading_silence.metadata["audiocompose.pause.applied_tail_credit_seconds"] == 0
+    assert isinstance(credited_silence, Silence) and credited_silence.seconds == pytest.approx(0.2)
+    assert credited_silence.metadata["audiocompose.pause.estimated_preceding_tail_seconds"] == 0.1
+    assert credited_silence.metadata["audiocompose.pause.applied_tail_credit_seconds"] == 0.1
+    assert isinstance(following_silence, Silence) and following_silence.seconds == 0.2
+    assert following_silence.metadata["audiocompose.pause.estimated_preceding_tail_seconds"] == 0
+    assert following_silence.metadata["audiocompose.pause.applied_tail_credit_seconds"] == 0
+
+
+def test_external_audio_between_speech_and_pause_blocks_tail_credit(tmp_path: Path) -> None:
+    from audiocompose.sources import RenderedAudioBuffer
+
+    sample_rate = 1_000
+    speech = _speech()
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    write_wav(media_root / "music.wav", np.full(100, 0.2, dtype=np.float32), sample_rate)
+    pause = PauseItem(duration_ms=500, reason="sentence").with_identity()
+    plan = _plan(speech, _audio("music.wav"), pause)
+    audio = np.concatenate(
+        (np.full(300, 0.5, dtype=np.float32), np.full(100, 0.0001, dtype=np.float32))
+    )
+    occurrence = (speech.number, speech.segment_id or speech.computed_id())
+
+    job = materialize_renderplan_job(
+        plan,
+        rendered_speech={occurrence: RenderedAudioBuffer(audio, sample_rate)},
+        media_root=media_root,
+        output_policy=OutputPolicy(sample_rate=sample_rate),
+    )
+
+    silence = job.items[-1]
+    assert isinstance(silence, Silence)
+    assert silence.seconds == 0.5
+    assert silence.metadata["audiocompose.pause.estimated_preceding_tail_seconds"] == 0
+    assert silence.metadata["audiocompose.pause.applied_tail_credit_seconds"] == 0
+
+
+def test_adjacent_speech_items_do_not_create_pause_or_trim_tail_again() -> None:
+    from audiocompose.sources import RenderedAudioBuffer
+
+    sample_rate = 1_000
+    first = _speech(1)
+    second = _speech(2, text="World")
+    plan = _plan(first, second)
+    audio = np.concatenate(
+        (np.full(300, 0.5, dtype=np.float32), np.full(400, 0.0001, dtype=np.float32))
+    )
+    rendered = {
+        (item.number, item.segment_id or item.computed_id()): RenderedAudioBuffer(
+            audio, sample_rate
+        )
+        for item in (first, second)
+    }
+
+    job = materialize_renderplan_job(
+        plan,
+        rendered_speech=rendered,
+        output_policy=OutputPolicy(sample_rate=sample_rate),
+    )
+
+    assert len(job.items) == 2
+    assert all(isinstance(item, AudioClip) for item in job.items)
+    conditioned, _ = job.items[0].source.load()
+    assert len(conditioned) == 450
+
+
+def test_persisted_and_in_memory_pause_tail_credit_match(tmp_path: Path) -> None:
+    from audiocompose import Composer, estimate_composition
+    from audiocompose.sources import RenderedAudioBuffer
+    from audiocompose.wav import read_wav
+
+    sample_rate = 1_000
+    speech = _speech()
+    pause = PauseItem(duration_ms=500, reason="sentence").with_identity()
+    plan = _plan(speech, pause)
+    audio = np.concatenate(
+        (np.full(300, 0.5, dtype=np.float32), np.full(100, 0.0001, dtype=np.float32))
+    )
+    wav_path = tmp_path / speech.wav
+    write_wav(wav_path, audio, sample_rate)
+    persisted_input, persisted_sample_rate = read_wav(wav_path)
+    artifact = _artifact(speech, wav_path, frames=len(audio), sample_rate=sample_rate)
+    manifest = _manifest(plan, [artifact])
+    output_policy = OutputPolicy(sample_rate=sample_rate)
+
+    persisted = materialize_renderplan_job(
+        plan, manifest, render_dir=tmp_path, output_policy=output_policy
+    )
+    occurrence = (speech.number, speech.segment_id or speech.computed_id())
+    in_memory = materialize_renderplan_job(
+        plan,
+        rendered_speech={occurrence: RenderedAudioBuffer(persisted_input, persisted_sample_rate)},
+        output_policy=output_policy,
+    )
+
+    persisted_speech, persisted_pause = persisted.items
+    memory_speech, memory_pause = in_memory.items
+    assert isinstance(persisted_speech, AudioClip)
+    assert isinstance(memory_speech, AudioClip)
+    persisted_audio, _ = persisted_speech.source.load()
+    memory_audio, _ = memory_speech.source.load()
+    np.testing.assert_array_equal(persisted_audio, memory_audio)
+    assert persisted_speech.metadata["audiocompose.speech_boundary.estimated_tail_seconds"] == 0.1
+    assert memory_speech.metadata["audiocompose.speech_boundary.estimated_tail_seconds"] == 0.1
+    assert isinstance(persisted_pause, Silence)
+    assert isinstance(memory_pause, Silence)
+    assert persisted_pause.seconds == memory_pause.seconds == 0.4
+    assert persisted_pause.metadata == memory_pause.metadata
+
+    persisted_composition = Composer().compose(persisted)
+    memory_composition = Composer().compose(in_memory)
+    np.testing.assert_array_equal(persisted_composition.audio, memory_composition.audio)
+    assert persisted_composition.audio.size == memory_composition.audio.size == 800
+    assert estimate_composition(persisted).total_output_frames == 800
+    assert estimate_composition(in_memory).total_output_frames == 800
 
 
 def test_external_audio_with_silence_is_not_speech_conditioned(tmp_path: Path) -> None:

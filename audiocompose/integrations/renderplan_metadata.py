@@ -30,6 +30,30 @@ AUDIOCOMPOSE_SPEECH_BOUNDARY_OUTPUT_FRAMES = "audiocompose.speech_boundary.outpu
 AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_FRAMES = "audiocompose.speech_boundary.removed_frames"
 AUDIOCOMPOSE_SPEECH_BOUNDARY_REMOVED_SECONDS = "audiocompose.speech_boundary.removed_seconds"
 AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_END_SAMPLE = "audiocompose.speech_boundary.trim_end_sample"
+AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_CONFIRMED = "audiocompose.speech_boundary.trim_confirmed"
+AUDIOCOMPOSE_SPEECH_BOUNDARY_TRIM_SILENCE_START_SAMPLE = (
+    "audiocompose.speech_boundary.trim_silence_start_sample"
+)
+AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_CONFIRMED = (
+    "audiocompose.speech_boundary.tail_estimate_confirmed"
+)
+AUDIOCOMPOSE_SPEECH_BOUNDARY_TAIL_ESTIMATE_START_SAMPLE = (
+    "audiocompose.speech_boundary.tail_estimate_start_sample"
+)
+AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_FRAMES = (
+    "audiocompose.speech_boundary.estimated_tail_frames"
+)
+AUDIOCOMPOSE_SPEECH_BOUNDARY_ESTIMATED_TAIL_SECONDS = (
+    "audiocompose.speech_boundary.estimated_tail_seconds"
+)
+AUDIOCOMPOSE_PAUSE_TARGET_SECONDS = "renderplan.pause.target_seconds"
+AUDIOCOMPOSE_PAUSE_ESTIMATED_PRECEDING_TAIL_SECONDS = (
+    "audiocompose.pause.estimated_preceding_tail_seconds"
+)
+AUDIOCOMPOSE_PAUSE_APPLIED_TAIL_CREDIT_SECONDS = "audiocompose.pause.applied_tail_credit_seconds"
+AUDIOCOMPOSE_PAUSE_GENERATED_SECONDS = "audiocompose.pause.generated_seconds"
+AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY = "audiocompose.pause.tail_credit_policy"
+AUDIOCOMPOSE_PAUSE_TAIL_CREDIT_POLICY_SOURCE = "audiocompose.pause_tail_credit_policy"
 
 RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
 VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.diagnostics_schema"
