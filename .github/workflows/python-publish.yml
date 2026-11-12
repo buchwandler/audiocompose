@@ -100,7 +100,7 @@ jobs:
                   Requirement(value) for value in metadata.get_all("Requires-Dist", [])
               ]
               assert has_minimum(requirements, "numpy", "1.23")
-              assert has_minimum(requirements, "audiosig", "0.1.11")
+              assert has_minimum(requirements, "audiosig", "0.1.12")
               renderplan = next(requirement for requirement in requirements if requirement.name == "renderplan")
               assert Version("0.2.0") not in renderplan.specifier
               assert Version("0.2.1") in renderplan.specifier
