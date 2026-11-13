@@ -113,7 +113,8 @@ jobs:
 
               voicerender = optional_requirement(requirements, "voicerender", "voicerender")
               assert Version("0.2.10") not in voicerender.specifier
-              assert Version("0.2.11") in voicerender.specifier
+              assert Version("0.2.11") not in voicerender.specifier
+              assert Version("0.2.12") in voicerender.specifier
               assert Version("0.3.0") not in voicerender.specifier
               assert any(name.endswith("audiocompose/py.typed") for name in archive.namelist())
           PY

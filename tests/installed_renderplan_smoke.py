@@ -408,7 +408,7 @@ def main() -> None:
     )
     document_result = _compose_installed_document(root, profile)
     assert document_result.document_id == "document-0001"
-    print("installed VoiceRender v0.2.11 artifact -> AudioCompose book and document smoke passed")
+    print("installed VoiceRender >=0.2.12 artifact -> AudioCompose book and document smoke passed")
 
 
 if __name__ == "__main__":
