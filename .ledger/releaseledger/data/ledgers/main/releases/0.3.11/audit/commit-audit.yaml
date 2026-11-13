@@ -1,0 +1,79 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.3.11
+git_base_ref: v0.3.10
+git_base_sha: 73fe24e83ce9d84cb3faccd4719fda1b5b8084c6
+git_head_ref: v0.3.11
+git_head_sha: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+git_range: 73fe24e83ce9d84cb3faccd4719fda1b5b8084c6..b9d1f0fb4489622b83531e7851c6c2c07d19217a
+commit_count: 2
+rows:
+  - sha: 585344251340b372ef880df0a2c6767a96070b07
+    source_ref: git:585344251340b372ef880df0a2c6767a96070b07
+    short_sha: "5853442"
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/entries/entry-0001.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/release.md
+      - README.md
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/speech_boundaries.py
+      - docs/architecture.md
+      - docs/changelog.md
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+      - tests/test_voicerender_materialization.py
+    stats:
+      files_changed: 14
+      insertions: 679
+      deletions: 70
+    inspected: true
+    inspected_paths:
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/speech_boundaries.py
+      - README.md
+      - docs/architecture.md
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior:
+      Conditions synthesized speech while retaining a bounded tail,
+      credits confirmed retained tail toward adjacent pause targets, and records pause
+      target, credit, and generated silence separately.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: improved silence handling"
+    target_entry_id: entry-0001
+    notes: This behavior is covered by the existing speech-adjacent pause release note.
+  - sha: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+    source_ref: git:b9d1f0fb4489622b83531e7851c6c2c07d19217a
+    short_sha: b9d1f0f
+    changed_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    stats:
+      files_changed: 2
+      insertions: 5
+      deletions: 5
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    observed_behavior:
+      Adjusted CI workflow configuration for test and package publishing
+      jobs; no product behavior changed.
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    notes: CI-only changes are internal and do not need a public release note.

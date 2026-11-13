@@ -3,15 +3,16 @@ schema_version: 2
 object_type: release_entry
 versioning:
   schema_version: 1
-  revision: 2
+  revision: 4
 entry_id: entry-0003
-release_version: v0.3.11
+release_version: v0.3.12
 kind: fixed
 summary: Fixed recomposition of stale handoff failures after VoiceRender rerender
 status: accepted
 audience: null
 scopes: []
-source_refs: []
+source_refs:
+  - git:0999dd767cc0105c153fcefd0a0aabff7949c807
 paths:
   - audiocompose/variants.py
   - audiocompose/bundle_batch.py

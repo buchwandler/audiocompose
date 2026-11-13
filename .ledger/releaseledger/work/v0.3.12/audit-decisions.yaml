@@ -1,0 +1,31 @@
+rows:
+  - sha: 1e3750d705a3bfbea591a2bdac0e0d6746c24aec
+    inspected: true
+    inspected_paths:
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/variants.py
+      - audiocompose/bundle_batch.py
+      - audiocompose/errors.py
+      - pyproject.toml
+      - docs/architecture.md
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior: "Requires VoiceRender >=0.2.12,<0.3 and preserve-silence.v3 artifacts, and exposes structured rerender recovery for incompatible handoffs."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: entry-0002
+    notes: "The existing accepted entry describes the public handoff contract and structured recovery behavior."
+  - sha: 0999dd767cc0105c153fcefd0a0aabff7949c807
+    inspected: true
+    inspected_paths:
+      - audiocompose/variants.py
+      - tests/test_variants.py
+    observed_behavior: "After a valid rerender, recognizes the matching prior handoff failure as recompose work; unrelated failures remain fail-closed."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: entry-0003
+    notes: "The existing accepted fixed entry describes stale handoff recovery after rerender."

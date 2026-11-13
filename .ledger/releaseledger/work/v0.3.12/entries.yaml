@@ -1,0 +1,60 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.3.12
+git_base_ref: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+git_base_sha: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+git_head_ref: 0999dd767cc0105c153fcefd0a0aabff7949c807
+git_head_sha: 0999dd767cc0105c153fcefd0a0aabff7949c807
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: ""
+    status: draft
+    source_refs:
+      - git:1e3750d705a3bfbea591a2bdac0e0d6746c24aec
+    paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/entries/entry-0003.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/release.md
+      - README.md
+      - audiocompose/book.py
+      - audiocompose/bundle_batch.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/errors.py
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/variants.py
+      - docs/architecture.md
+      - docs/changelog.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    sources:
+      - git:1e3750d705a3bfbea591a2bdac0e0d6746c24aec
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: ""
+    status: draft
+    source_refs:
+      - git:0999dd767cc0105c153fcefd0a0aabff7949c807
+    paths:
+      - audiocompose/variants.py
+      - tests/test_variants.py
+    sources:
+      - git:0999dd767cc0105c153fcefd0a0aabff7949c807
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

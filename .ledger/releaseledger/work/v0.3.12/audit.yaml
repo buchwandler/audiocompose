@@ -1,0 +1,68 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.3.12
+git_base_ref: v0.3.11
+git_base_sha: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+git_head_ref: HEAD
+git_head_sha: 0999dd767cc0105c153fcefd0a0aabff7949c807
+git_range: b9d1f0fb4489622b83531e7851c6c2c07d19217a..0999dd767cc0105c153fcefd0a0aabff7949c807
+commit_count: 2
+rows:
+  - sha: 1e3750d705a3bfbea591a2bdac0e0d6746c24aec
+    source_ref: git:1e3750d705a3bfbea591a2bdac0e0d6746c24aec
+    short_sha: 1e3750d
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/entries/entry-0003.md
+      - .ledger/releaseledger/data/ledgers/main/releases/v0.3.11/release.md
+      - README.md
+      - audiocompose/book.py
+      - audiocompose/bundle_batch.py
+      - audiocompose/cli.py
+      - audiocompose/document.py
+      - audiocompose/errors.py
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/variants.py
+      - docs/architecture.md
+      - docs/changelog.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/_bundle_fixtures.py
+      - tests/test_bundle_batch_compose.py
+      - tests/test_compose_book.py
+      - tests/test_compose_document.py
+      - tests/test_renderplan_materialization.py
+      - tests/test_variants.py
+      - tests/test_voicerender_materialization.py
+    stats:
+      files_changed: 23
+      insertions: 830
+      deletions: 71
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: voicerender handoff and recovery"
+  - sha: 0999dd767cc0105c153fcefd0a0aabff7949c807
+    source_ref: git:0999dd767cc0105c153fcefd0a0aabff7949c807
+    short_sha: 0999dd7
+    changed_paths:
+      - audiocompose/variants.py
+      - tests/test_variants.py
+    stats:
+      files_changed: 2
+      insertions: 345
+      deletions: 38
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: improve recovery action"

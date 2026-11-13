@@ -3,9 +3,9 @@ schema_version: 2
 object_type: release_entry
 versioning:
   schema_version: 1
-  revision: 6
+  revision: 8
 entry_id: entry-0002
-release_version: v0.3.11
+release_version: v0.3.12
 kind: changed
 summary:
   Changed VoiceRender to require >=0.2.12,<0.3 and voicerender.preserve-silence.v3,
@@ -13,7 +13,8 @@ summary:
 status: accepted
 audience: null
 scopes: []
-source_refs: []
+source_refs:
+  - git:1e3750d705a3bfbea591a2bdac0e0d6746c24aec
 paths:
   - audiocompose/integrations/voicerender.py
   - audiocompose/variants.py

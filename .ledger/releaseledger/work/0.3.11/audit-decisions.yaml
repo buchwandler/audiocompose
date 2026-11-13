@@ -1,0 +1,31 @@
+rows:
+  - sha: 585344251340b372ef880df0a2c6767a96070b07
+    inspected: true
+    inspected_paths:
+      - audiocompose/integrations/renderplan.py
+      - audiocompose/integrations/renderplan_metadata.py
+      - audiocompose/integrations/voicerender.py
+      - audiocompose/speech_boundaries.py
+      - README.md
+      - docs/architecture.md
+      - pyproject.toml
+      - tests/test_renderplan_materialization.py
+      - tests/test_speech_boundaries.py
+      - tests/test_voicerender_materialization.py
+    observed_behavior: "Conditions synthesized speech while retaining a bounded tail, credits confirmed retained tail toward adjacent pause targets, and records pause target, credit, and generated silence separately."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: "This behavior is covered by the existing speech-adjacent pause release note."
+  - sha: b9d1f0fb4489622b83531e7851c6c2c07d19217a
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    observed_behavior: "Adjusted CI workflow configuration for test and package publishing jobs; no product behavior changed."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "CI-only changes are internal and do not need a public release note."
