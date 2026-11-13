@@ -59,6 +59,7 @@ VariantState = Literal[
     "unknown",
 ]
 UnitKind = Literal["chapters", "documents"]
+RecoveryAction = Literal["rerender", "recompose"]
 
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 SET_FILENAME = "renderplan-set.toml"
@@ -95,7 +96,7 @@ class BundleVariant:
     render_error: str | None = None
     render_warning: str | None = None
     compose_error: str | None = None
-    recovery_action: Literal["rerender", "recompose"] | None = None
+    recovery_action: RecoveryAction | None = None
     recovery_reason: str | None = None
     automatic_convergence_safe: bool = False
     required_audio_artifact_policy: str | None = None
@@ -184,6 +185,11 @@ class BundleCompositionInspection:
     reason: str | None = None
     force_required: bool = False
     replacement_safe: bool = False
+    recovery_action: RecoveryAction | None = None
+    recovery_reason: str | None = None
+    automatic_convergence_safe: bool = False
+    required_audio_artifact_policy: str | None = None
+    required_voicerender: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +204,11 @@ class BundleCompositionInspection:
             "reason": self.reason,
             "force_required": self.force_required,
             "replacement_safe": self.replacement_safe,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
+            "automatic_convergence_safe": self.automatic_convergence_safe,
+            "required_audio_artifact_policy": self.required_audio_artifact_policy,
+            "required_voicerender": self.required_voicerender,
         }
 
 
@@ -242,6 +253,15 @@ class _ComposeInspection:
     complete_units: tuple[str, ...] = ()
     missing_units: tuple[str, ...] = ()
     stale_units: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryInspection:
+    action: RecoveryAction | None = None
+    reason: str | None = None
+    automatic_convergence_safe: bool = False
+    required_audio_artifact_policy: str | None = None
+    required_voicerender: str | None = None
 
 
 def _abs(path: str | Path) -> Path:
@@ -836,25 +856,79 @@ def _recoverable_voicerender_failure(item: dict[str, Any]) -> bool:
 
 
 def _failure_matches_repaired_handoff(
-    item: dict[str, Any], current: dict[str, str | None], render: _RenderInspection
-) -> bool:
-    if render.status != "complete" or not render.ready:
-        return False
+    item: dict[str, Any],
+    current: dict[str, str | None] | None,
+    render: _RenderInspection,
+    unit_id: str,
+) -> tuple[bool, str]:
+    if render.status == "incompatible":
+        return False, f"{unit_id}: {render.error or 'current VoiceRender handoff is incompatible'}"
+    if render.status == "unknown" and render.error and "diagnostic" in render.error.casefold():
+        return (
+            False,
+            f"{unit_id}: current VoiceRender diagnostics are missing/invalid: {render.error}",
+        )
+    if current is None:
+        return False, f"current VoiceRender identity missing for {unit_id}"
+    if current.get("render_diagnostics_sha256") is None:
+        return False, f"current VoiceRender diagnostics are missing/invalid for {unit_id}"
+    if render.status != "complete":
+        reason = f"current VoiceRender status is '{render.status}'"
+        if render.error:
+            reason = f"{reason}: {render.error}"
+        return False, f"{unit_id}: {reason}"
+    if not render.ready:
+        return False, f"{unit_id}: current VoiceRender handoff is not ready"
     if not _recoverable_voicerender_failure(item):
-        return False
+        return (
+            False,
+            f"{unit_id}: persisted failure is not a recognized recoverable handoff failure",
+        )
     if _legacy_voicerender_policy_failure(item):
-        return True
+        return True, ""
     previous_manifest = item.get("manifest_sha256")
     previous_diagnostics = item.get("render_diagnostics_sha256")
     current_manifest = current.get("manifest_sha256")
     current_diagnostics = current.get("render_diagnostics_sha256")
-    return (
-        isinstance(previous_manifest, str)
-        and isinstance(previous_diagnostics, str)
-        and isinstance(current_manifest, str)
-        and isinstance(current_diagnostics, str)
-        and (previous_manifest != current_manifest or previous_diagnostics != current_diagnostics)
-    )
+    if not all(
+        isinstance(value, str)
+        for value in (
+            previous_manifest,
+            previous_diagnostics,
+            current_manifest,
+            current_diagnostics,
+        )
+    ):
+        return (
+            False,
+            f"{unit_id}: persisted failure has missing or invalid VoiceRender identity diagnostics",
+        )
+    if previous_manifest == current_manifest and previous_diagnostics == current_diagnostics:
+        return False, (
+            f"{unit_id}: current handoff identity has not changed for a structured "
+            "rerender-required failure"
+        )
+    return True, ""
+
+
+def _recovery_for(
+    render: _RenderInspection, composition: _ComposeInspection
+) -> _RecoveryInspection:
+    if render.status == "incompatible":
+        return _RecoveryInspection(
+            action="rerender",
+            reason=render.error,
+            automatic_convergence_safe=True,
+            required_audio_artifact_policy="voicerender.preserve-silence.v3",
+            required_voicerender=">=0.2.12,<0.3",
+        )
+    if composition.status == "stale" and render.status == "complete" and render.ready:
+        return _RecoveryInspection(
+            action="recompose",
+            reason=composition.error,
+            automatic_convergence_safe=True,
+        )
+    return _RecoveryInspection()
 
 
 def _inspect_book_compose(
@@ -935,12 +1009,15 @@ def _inspect_book_compose(
                 continue
             if item.get("status") == "failed":
                 current = render.identities.get(unit.id)
-                if current is None or not _failure_matches_repaired_handoff(item, current, render):
+                matched, failure_reason = _failure_matches_repaired_handoff(
+                    item, current, render, unit.id
+                )
+                if not matched:
                     return _ComposeInspection(
                         "failed",
                         len(complete_units),
                         report_path,
-                        "AudioCompose report records failed selected work",
+                        failure_reason,
                     )
                 stale_reasons.append(
                     f"{unit.id} previous VoiceRender handoff failure is stale after rerender"
@@ -1146,17 +1223,7 @@ def _inspect_candidate(
     else:
         composition = _inspect_document_compose(candidate.name, plan, render, output_root)
     state = _derive_state("valid", render.status, composition.status)
-    recovery_action: Literal["rerender", "recompose"] | None = None
-    recovery_reason: str | None = None
-    automatic_convergence_safe = False
-    if render.status == "incompatible":
-        recovery_action = "rerender"
-        recovery_reason = render.error
-        automatic_convergence_safe = True
-    elif composition.status == "stale" and render.status == "complete" and render.ready:
-        recovery_action = "recompose"
-        recovery_reason = composition.error
-        automatic_convergence_safe = True
+    recovery = _recovery_for(render, composition)
     return BundleVariant(
         name=candidate.name,
         profile_id=plan.profile_id,
@@ -1174,13 +1241,11 @@ def _inspect_candidate(
         render_error=render.error,
         render_warning=render.warning,
         compose_error=composition.error,
-        recovery_action=recovery_action,
-        recovery_reason=recovery_reason,
-        automatic_convergence_safe=automatic_convergence_safe,
-        required_audio_artifact_policy=(
-            "voicerender.preserve-silence.v3" if recovery_action == "rerender" else None
-        ),
-        required_voicerender=">=0.2.12,<0.3" if recovery_action == "rerender" else None,
+        recovery_action=recovery.action,
+        recovery_reason=recovery.reason,
+        automatic_convergence_safe=recovery.automatic_convergence_safe,
+        required_audio_artifact_policy=recovery.required_audio_artifact_policy,
+        required_voicerender=recovery.required_voicerender,
         voicerender_report_path=render.report_path,
         compose_report_path=composition.report_path,
     )
@@ -1312,16 +1377,29 @@ def inspect_bundle_composition(
         "failed": "error",
         "unknown": "error",
     }
+    recovery = _recovery_for(render, composition)
+    state = states[composition.status]
+    reason = composition.error
+    if recovery.action == "rerender":
+        state = "error"
+        reason = recovery.reason or composition.error
+    elif recovery.action == "recompose":
+        state = "stale"
     return BundleCompositionInspection(
         variant=variant,
-        state=states[composition.status],
+        state=state,
         selected=tuple(unit.id for unit in plan.units),
         complete=composition.complete_units,
         missing=composition.missing_units,
         stale=composition.stale_units,
-        reason=composition.error,
-        force_required=composition.status == "stale",
-        replacement_safe=states[composition.status] in {"complete", "partial", "stale"},
+        reason=reason,
+        force_required=state == "stale",
+        replacement_safe=state in {"complete", "partial", "stale"},
+        recovery_action=recovery.action,
+        recovery_reason=recovery.reason,
+        automatic_convergence_safe=recovery.automatic_convergence_safe,
+        required_audio_artifact_policy=recovery.required_audio_artifact_policy,
+        required_voicerender=recovery.required_voicerender,
     )
 
 

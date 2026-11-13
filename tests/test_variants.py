@@ -21,6 +21,7 @@ from renderplan import (
 )
 
 from audiocompose.variants import (
+    BundleCompositionInspection,
     BundleVariantsResult,
     _derive_state,
     _inspect_bundle_variants,
@@ -268,6 +269,141 @@ def _write_failed_book_compose_report(
     report_path = output_dir / "compose-report.toml"
     report_path.write_text(chr(10).join(top + ["", "[[item]]", *item]) + chr(10), encoding="utf-8")
     return report_path
+
+
+LEGACY_VOICERENDER_POLICY_ERROR = (
+    "VoiceRender artifacts use an unsupported audio artifact policy; "
+    "re-render with VoiceRender >=0.2.11 before composition"
+)
+
+
+def _write_multi_chapter_failure_report(
+    root: Path,
+    variant: str,
+    profile_id: str,
+    unit_ids: tuple[str, ...],
+    *,
+    error_code: str = "handoff.invalid",
+    error_message: str = LEGACY_VOICERENDER_POLICY_ERROR,
+) -> Path:
+    output_dir = root / "audiocompose" / variant
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        'format = "audiocompose-book-report"',
+        "version = 1",
+        f"variant = {json.dumps(variant)}",
+        f"render_profile_id = {json.dumps(profile_id)}",
+        'audiocompose_version = "0.3.11.dev0+fixture"',
+        'emphasis_policy = "segment_fallback"',
+        'pause_policy_provenance = "renderprofile"',
+        f"requested = {len(unit_ids)}",
+        "written = 0",
+        "reused = 0",
+        f"failed = {len(unit_ids)}",
+        "skipped = 0",
+    ]
+    for unit_id in unit_ids:
+        lines.extend(
+            [
+                "",
+                "[[item]]",
+                f"id = {json.dumps(unit_id)}",
+                f"source_number = {int(unit_id[-4:])}",
+                'status = "failed"',
+                f"error_code = {json.dumps(error_code)}",
+                f"error_message = {json.dumps(error_message)}",
+            ]
+        )
+    report_path = output_dir / "compose-report.toml"
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
+def _legacy_multi_chapter_bundle(tmp_path: Path):
+    from dataclasses import replace
+
+    root = _bundle(tmp_path / "historical.ssmd-bundle")
+    profile = _profile()
+    profile_id = profile.profile_id or profile.computed_id()
+    fingerprint = profile_id.removeprefix("sha256:")[:12]
+    label = "narrator--pt-engaging-v1"
+    variant = f"{label}--{fingerprint}"
+    variant_dir = root / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    save_profile(profile, variant_dir / "renderprofile.toml")
+
+    chapters = []
+    artifacts = {}
+    for source_number in range(5, 18):
+        unit_id = f"chapter-{source_number:04d}"
+        plan = RenderPlan(
+            source_plan_id=f"sha256:{source_number:064x}",
+            render_profile_id=profile_id,
+            flow=(PauseItem(duration_ms=0, reason="leading").with_identity(),),
+        ).with_identity()
+        plan_name = f"{unit_id}.renderplan.toml"
+        save_plan(plan, variant_dir / plan_name)
+        chapters.append(
+            RenderPlanSetChapter(
+                id=unit_id,
+                source_number=source_number,
+                source=f"../../chapters/{unit_id}.md",
+                utterplan=f"../../utterplan/{unit_id}.toml",
+                source_plan_id=plan.source_plan_id,
+                renderplan=plan_name,
+                render_plan_id=plan.plan_id or plan.computed_id(),
+            )
+        )
+        manifest, render_dir = _write_render(root, variant, unit_id, plan)
+        manifest_path = render_dir / "render-manifest.toml"
+        diagnostics_path = render_dir / "render-diagnostics.json"
+        historical_manifest = replace(
+            manifest,
+            producer=Producer(name="voicerender", version="0.2.11"),
+            manifest_id=None,
+        ).with_identity()
+        save_manifest(historical_manifest, manifest_path)
+        diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+        diagnostics["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+        diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+        artifacts[unit_id] = (manifest, manifest_path, diagnostics_path)
+
+    save_renderplan_set(
+        variant_dir / "renderplan-set.toml",
+        RenderPlanSet(
+            variant=label,
+            profile_fingerprint=fingerprint,
+            producer_version="0.2.0",
+            manifest="../../manifest.json",
+            utterplan_dir="../../utterplan",
+            profile_id=profile_id,
+            snapshot="renderprofile.toml",
+            source_profile="../../narration.renderprofile.toml",
+            chapters=tuple(chapters),
+        ),
+    )
+    unit_ids = tuple(f"chapter-{source_number:04d}" for source_number in range(5, 18))
+    report_path = _write_multi_chapter_failure_report(root, variant, profile_id, unit_ids)
+    return root, variant, profile_id, unit_ids, artifacts, report_path
+
+
+def _repair_multi_chapter_renders(artifacts) -> None:
+    for manifest, manifest_path, diagnostics_path in artifacts.values():
+        save_manifest(manifest, manifest_path)
+        diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+        diagnostics["audio_artifact_policy"] = "voicerender.preserve-silence.v3"
+        diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+
+def _bundle_snapshot(root: Path):
+    return {
+        path.relative_to(root): (
+            path.lstat().st_mode,
+            path.lstat().st_mtime_ns,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in root.rglob("*")
+    }
 
 
 def test_selection_scoped_inspection_keeps_global_variant_listing_whole(tmp_path: Path) -> None:
@@ -678,6 +814,99 @@ def test_exact_legacy_handoff_failure_recovers_after_current_handoff(tmp_path: P
     assert recovered.recovery_action == "recompose"
     assert recovered.automatic_convergence_safe
     assert recovered.compose_report_path == report_path
+
+
+def test_public_composition_inspector_exposes_legacy_multichapter_recovery(
+    tmp_path: Path,
+) -> None:
+    root, variant, _, unit_ids, artifacts, report_path = _legacy_multi_chapter_bundle(tmp_path)
+    historical_report = report_path.read_text(encoding="utf-8")
+    assert 'variant = "' + variant + '"' in historical_report
+    assert 'audiocompose_version = "0.3.11.dev0+fixture"' in historical_report
+    assert 'emphasis_policy = "segment_fallback"' in historical_report
+    assert 'pause_policy_provenance = "renderprofile"' in historical_report
+    assert "requested = 13" in historical_report
+    assert "written = 0" in historical_report
+    assert "reused = 0" in historical_report
+    assert "failed = 13" in historical_report
+    assert "skipped = 0" in historical_report
+    assert 'id = "chapter-0005"' in historical_report
+    assert 'id = "chapter-0017"' in historical_report
+    legacy_defaults = BundleCompositionInspection(variant, "error", ())
+    assert legacy_defaults.recovery_action is None
+    assert not legacy_defaults.automatic_convergence_safe
+
+    before = _bundle_snapshot(root)
+    rich = list_bundle_variants(root).variants[0]
+    assert _bundle_snapshot(root) == before
+    rerender = inspect_bundle_composition(root, variant=variant, chapters="5-17")
+    assert _bundle_snapshot(root) == before
+    assert rich.recovery_action == rerender.recovery_action == "rerender"
+    assert rich.automatic_convergence_safe == rerender.automatic_convergence_safe is True
+    assert rerender.state == "error"
+    assert rerender.selected == unit_ids
+    assert rerender.force_required is False
+    assert rerender.replacement_safe is False
+    assert rerender.required_audio_artifact_policy == "voicerender.preserve-silence.v3"
+    assert rerender.required_voicerender == ">=0.2.12,<0.3"
+    assert "VoiceRender" in (rerender.reason or "")
+    assert "audio artifact policy" in (rerender.reason or "")
+    assert rerender.recovery_reason == rich.recovery_reason
+    serialized = rerender.to_dict()
+    assert serialized["version"] == 1
+    assert serialized["recovery_action"] == "rerender"
+    assert serialized["recovery_reason"] == rerender.recovery_reason
+    assert serialized["automatic_convergence_safe"] is True
+    assert serialized["required_audio_artifact_policy"] == "voicerender.preserve-silence.v3"
+    assert serialized["required_voicerender"] == ">=0.2.12,<0.3"
+    assert "failed selected work" not in (rerender.reason or "")
+
+    original_report = report_path.read_bytes()
+    _repair_multi_chapter_renders(artifacts)
+    assert report_path.read_bytes() == original_report
+    before = _bundle_snapshot(root)
+    rich = list_bundle_variants(root).variants[0]
+    assert _bundle_snapshot(root) == before
+    repaired = inspect_bundle_composition(root, variant=variant, chapters="5-17")
+    assert _bundle_snapshot(root) == before
+    assert rich.recovery_action == repaired.recovery_action == "recompose"
+    assert rich.automatic_convergence_safe == repaired.automatic_convergence_safe is True
+    assert repaired.state == "stale"
+    assert repaired.selected == repaired.stale == unit_ids
+    assert repaired.force_required
+    assert repaired.replacement_safe
+
+
+def test_public_composition_inspector_blocks_unrelated_multichapter_failures(
+    tmp_path: Path,
+) -> None:
+    root, variant, profile_id, unit_ids, artifacts, _ = _legacy_multi_chapter_bundle(tmp_path)
+    _repair_multi_chapter_renders(artifacts)
+    unrelated = (
+        ("compose.failed", "renderer composition failed"),
+        ("handoff.invalid", "an unrelated handoff validation error"),
+    )
+    for error_code, error_message in unrelated:
+        _write_multi_chapter_failure_report(
+            root,
+            variant,
+            profile_id,
+            unit_ids,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        before = _bundle_snapshot(root)
+        rich = list_bundle_variants(root).variants[0]
+        assert _bundle_snapshot(root) == before
+        result = inspect_bundle_composition(root, variant=variant, chapters="5-17")
+        assert _bundle_snapshot(root) == before
+        assert result.state == "error"
+        assert result.recovery_action is None
+        assert not result.automatic_convergence_safe
+        assert rich.recovery_action is None
+        assert not rich.automatic_convergence_safe
+        assert "chapter-0005" in (result.reason or "")
+        assert "recognized recoverable handoff failure" in (result.reason or "")
 
 
 @pytest.mark.parametrize(
