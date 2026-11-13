@@ -40,12 +40,14 @@ class DocumentComposeError(AudioComposeError):
         document_id: str | None = None,
         variant: str | None = None,
         details: Mapping[str, Any] | None = None,
+        recovery_action: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.document_id = document_id
         self.variant = variant
         self.details = dict(details or {})
+        self.recovery_action = recovery_action
 
 
 class AudioValidationError(AudioComposeError, ValueError):
@@ -62,6 +64,19 @@ class IntegrationError(AudioComposeError):
 
 class HandoffValidationError(IntegrationError):
     """An upstream handoff or its source artifacts are invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "handoff.invalid",
+        details: Mapping[str, Any] | None = None,
+        recovery_action: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+        self.recovery_action = recovery_action
 
 
 class PausePolicyError(IntegrationError, ValueError):

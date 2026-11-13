@@ -72,7 +72,7 @@ def _write_voice_diagnostics(render_dir: Path, plan: RenderPlan) -> None:
             )
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
-        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+        "audio_artifact_policy": "voicerender.preserve-silence.v3",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if deferred else "reject",
         "pending_composition": bool(deferred),
@@ -176,7 +176,7 @@ def _fixture_book(
             render_plan_id=plan.plan_id or plan.computed_id(),
             speech=(artifact,),
             complete=True,
-            producer=Producer(name="voicerender", version="0.2.0"),
+            producer=Producer(name="voicerender", version="0.2.12"),
         ).with_identity()
         save_manifest(manifest, render_dir / "render-manifest.toml")
         _write_voice_diagnostics(render_dir, plan)
@@ -742,7 +742,13 @@ def test_compose_book_rejects_missing_voice_diagnostics(tmp_path):
 
 @pytest.mark.parametrize(
     "artifact_policy",
-    ["voicerender.trailing-silence.v1", None],
+    [
+        "voicerender.trailing-silence.v1",
+        "voicerender.raw-synthesis.v1",
+        "voicerender.raw-synthesis.v2",
+        "voicerender.future-policy.v9",
+        None,
+    ],
 )
 def test_compose_book_rejects_unsupported_audio_artifact_policy_before_writing(
     tmp_path, artifact_policy
@@ -763,11 +769,24 @@ def test_compose_book_rejects_unsupported_audio_artifact_policy_before_writing(
     result = compose_book(workspace, variant=variant)
     outcome = result.outcomes[0]
     assert outcome.status == "failed"
-    assert outcome.error_code == "handoff.invalid"
-    assert "re-render with VoiceRender >=0.2.11" in outcome.error_message
+    assert outcome.error_code == "handoff.voicerender_rerender_required"
+    assert outcome.failure_stage == "handoff"
+    assert outcome.recovery_action == "rerender"
+    assert outcome.required_audio_artifact_policy == "voicerender.preserve-silence.v3"
+    assert outcome.required_voicerender == ">=0.2.12,<0.3"
+    assert outcome.manifest_sha256.startswith("sha256:")
+    assert outcome.render_diagnostics_sha256.startswith("sha256:")
+    assert "re-render with VoiceRender >=0.2.12" in outcome.error_message
     output_dir = workspace / "audiocompose" / variant
     assert not (output_dir / "chapter-0005.wav").exists()
     assert not (output_dir / "chapter-0005.audiojob").exists()
+    report_text = result.report_path.read_text(encoding="utf-8")
+    assert 'failure_stage = "handoff"' in report_text
+    assert 'recovery_action = "rerender"' in report_text
+    assert 'required_audio_artifact_policy = "voicerender.preserve-silence.v3"' in report_text
+    assert 'required_voicerender = ">=0.2.12,<0.3"' in report_text
+    assert 'manifest_sha256 = "sha256:' in report_text
+    assert 'render_diagnostics_sha256 = "sha256:' in report_text
 
 
 def test_installed_package_metadata_has_supported_producer_floors():
@@ -790,7 +809,8 @@ def test_installed_package_metadata_has_supported_producer_floors():
     assert Version("0.7.0") not in utterplan.specifier
 
     assert Version("0.2.10") not in voicerender.specifier
-    assert Version("0.2.11") in voicerender.specifier
+    assert Version("0.2.11") not in voicerender.specifier
+    assert Version("0.2.12") in voicerender.specifier
     assert Version("0.3.0") not in voicerender.specifier
 
 
@@ -1162,7 +1182,7 @@ def test_manifest_change_invalidates_reuse_and_force_recomposes(tmp_path, capsys
         render_plan_id=chapters[0].render_plan_id,
         speech=(artifact,),
         complete=True,
-        producer=Producer(name="voicerender", version="0.2.0"),
+        producer=Producer(name="voicerender", version="0.2.12"),
     ).with_identity()
     save_manifest(replacement, render_dir / "render-manifest.toml")
 
@@ -1397,7 +1417,7 @@ def test_external_audio_and_output_policy_match_direct_compose_renderplan(tmp_pa
             render_plan_id=plan.plan_id or plan.computed_id(),
             speech=(),
             complete=True,
-            producer=Producer(name="voicerender", version="0.2.0"),
+            producer=Producer(name="voicerender", version="0.2.12"),
         ).with_identity(),
         render_dir / "render-manifest.toml",
     )

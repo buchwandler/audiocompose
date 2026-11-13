@@ -60,6 +60,16 @@ class BundleVariantComposeOutcome:
     render_error: str | None = None
     render_warning: str | None = None
     compose_error: str | None = None
+    initial_recovery_action: Literal["rerender", "recompose"] | None = None
+    initial_recovery_reason: str | None = None
+    initial_automatic_convergence_safe: bool = False
+    initial_required_audio_artifact_policy: str | None = None
+    initial_required_voicerender: str | None = None
+    recovery_action: Literal["rerender", "recompose"] | None = None
+    recovery_reason: str | None = None
+    automatic_convergence_safe: bool = False
+    required_audio_artifact_policy: str | None = None
+    required_voicerender: str | None = None
     result: BundleComposeResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +93,16 @@ class BundleVariantComposeOutcome:
             "render_error": self.render_error,
             "render_warning": self.render_warning,
             "compose_error": self.compose_error,
+            "initial_recovery_action": self.initial_recovery_action,
+            "initial_recovery_reason": self.initial_recovery_reason,
+            "initial_automatic_convergence_safe": self.initial_automatic_convergence_safe,
+            "initial_required_audio_artifact_policy": self.initial_required_audio_artifact_policy,
+            "initial_required_voicerender": self.initial_required_voicerender,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
+            "automatic_convergence_safe": self.automatic_convergence_safe,
+            "required_audio_artifact_policy": self.required_audio_artifact_policy,
+            "required_voicerender": self.required_voicerender,
             "result": self.result.to_dict() if self.result is not None else None,
         }
 
@@ -221,6 +241,16 @@ def _initial_outcome(variant: BundleVariant, *, force: bool) -> BundleVariantCom
         render_error=variant.render_error,
         render_warning=variant.render_warning,
         compose_error=variant.compose_error,
+        initial_recovery_action=variant.recovery_action,
+        initial_recovery_reason=variant.recovery_reason,
+        initial_automatic_convergence_safe=variant.automatic_convergence_safe,
+        initial_required_audio_artifact_policy=variant.required_audio_artifact_policy,
+        initial_required_voicerender=variant.required_voicerender,
+        recovery_action=variant.recovery_action,
+        recovery_reason=variant.recovery_reason,
+        automatic_convergence_safe=variant.automatic_convergence_safe,
+        required_audio_artifact_policy=variant.required_audio_artifact_policy,
+        required_voicerender=variant.required_voicerender,
     )
 
 
@@ -486,6 +516,11 @@ def compose_bundle_batch(
             validation_error=final.validation_error,
             render_error=final.render_error,
             compose_error=final.compose_error,
+            recovery_action=final.recovery_action,
+            recovery_reason=final.recovery_reason,
+            automatic_convergence_safe=final.automatic_convergence_safe,
+            required_audio_artifact_policy=final.required_audio_artifact_policy,
+            required_voicerender=final.required_voicerender,
         )
 
     final_outcomes = tuple(outcomes)

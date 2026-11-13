@@ -128,6 +128,12 @@ class ChapterComposeOutcome:
     duration_seconds: float | None = None
     error_code: str | None = None
     error_message: str | None = None
+    failure_stage: str | None = None
+    recovery_action: str | None = None
+    observed_audio_artifact_policy: str | None = None
+    observed_voicerender: str | None = None
+    required_audio_artifact_policy: str | None = None
+    required_voicerender: str | None = None
     index: int | None = None
     source_plan_id: str | None = None
     render_profile_id: str | None = None
@@ -181,6 +187,12 @@ class ChapterComposeOutcome:
             "duration_seconds",
             "error_code",
             "error_message",
+            "failure_stage",
+            "recovery_action",
+            "observed_audio_artifact_policy",
+            "observed_voicerender",
+            "required_audio_artifact_policy",
+            "required_voicerender",
             "output_policy_id",
             "emphasis_warning",
             "audiojob",
@@ -1089,9 +1101,11 @@ def _chapter_error(exc: Exception) -> tuple[str, str]:
         return "media.invalid", str(exc)
     if isinstance(exc, HandoffValidationError):
         message = str(exc)
+        if exc.code != "handoff.invalid":
+            return exc.code, message
         if "incomplete" in message.lower() or "must be complete" in message.lower():
             return "manifest.incomplete", message
-        return "handoff.invalid", message
+        return exc.code, message
     if isinstance(exc, OSError):
         return "output.write_failed", str(exc)
     return "compose.failed", str(exc)
@@ -1292,13 +1306,23 @@ def _compose_resolved_book(
             except BookComposeError as exc:
                 raise BookComposeError("manifest.missing", str(exc)) from exc
             try:
-                _regular_file(
+                diagnostics_path = _regular_file(
                     paths.diagnostics_path,
                     label="VoiceRender diagnostics",
                     code="diagnostics.missing",
                 )
             except BookComposeError as exc:
                 raise BookComposeError("diagnostics.missing", str(exc)) from exc
+            manifest_hash_started = time.perf_counter()
+            manifest_sha256 = "sha256:" + sha256_file(manifest_path)
+            diagnostics_sha256 = "sha256:" + sha256_file(diagnostics_path)
+            runtime_timings["render_manifest_hash_seconds"] = (
+                time.perf_counter() - manifest_hash_started
+            )
+            entry.update(
+                manifest_sha256=manifest_sha256,
+                render_diagnostics_sha256=diagnostics_sha256,
+            )
             media_root = context.explicit_media_root
             job = materialize_voicerender_job(
                 paths.utterplan_path,
@@ -1351,11 +1375,6 @@ def _compose_resolved_book(
                 )
             manifest_id = handoff.manifest_id
 
-            manifest_hash_started = time.perf_counter()
-            manifest_sha256 = "sha256:" + sha256_file(manifest_path)
-            runtime_timings["render_manifest_hash_seconds"] = (
-                time.perf_counter() - manifest_hash_started
-            )
             entry.update(
                 manifest_id=manifest_id,
                 manifest_sha256=manifest_sha256,
@@ -1508,6 +1527,19 @@ def _compose_resolved_book(
             elif entry.get("status") == "reused":
                 reused -= 1
             entry.update(status="failed", error_code=code, error_message=message)
+            if isinstance(exc, HandoffValidationError):
+                entry["failure_stage"] = "handoff"
+                if exc.recovery_action is not None:
+                    entry["recovery_action"] = exc.recovery_action
+                for detail_name, report_name in (
+                    ("observed_audio_artifact_policy", "observed_audio_artifact_policy"),
+                    ("observed_version", "observed_voicerender"),
+                    ("required_audio_artifact_policy", "required_audio_artifact_policy"),
+                    ("required_version", "required_voicerender"),
+                ):
+                    detail_value = exc.details.get(detail_name)
+                    if isinstance(detail_value, str):
+                        entry[report_name] = detail_value
             failed += 1
             stop = fail_fast or code == "progress.callback_failed"
         results.append(entry)
@@ -1644,6 +1676,12 @@ def _chapter_outcome(entry: Mapping[str, Any], context: BookContext) -> ChapterC
         duration_seconds=entry.get("duration_seconds"),
         error_code=entry.get("error_code"),
         error_message=entry.get("error_message"),
+        failure_stage=entry.get("failure_stage"),
+        recovery_action=entry.get("recovery_action"),
+        observed_audio_artifact_policy=entry.get("observed_audio_artifact_policy"),
+        observed_voicerender=entry.get("observed_voicerender"),
+        required_audio_artifact_policy=entry.get("required_audio_artifact_policy"),
+        required_voicerender=entry.get("required_voicerender"),
         index=entry.get("index"),
         source_plan_id=entry.get("source_plan_id"),
         render_profile_id=entry.get("render_profile_id"),

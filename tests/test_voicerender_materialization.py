@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -36,7 +37,7 @@ def _book_handoff(
     controls=(),
     diagnostics_overrides: dict | None = None,
     producer_name: str = "voicerender",
-    producer_version: str | None = "0.2.0",
+    producer_version: str | None = "0.2.12",
     manifest_complete: bool = True,
     pause_duration_ms: int | None = None,
     speech_audio: np.ndarray | None = None,
@@ -112,7 +113,7 @@ def _book_handoff(
     emphasis_count = sum(control.name == "emphasis" for control in speech.controls)
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
-        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+        "audio_artifact_policy": "voicerender.preserve-silence.v3",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if emphasis_count else "reject",
         "pending_composition": bool(emphasis_count),
@@ -182,7 +183,7 @@ def test_released_public_book_handoff_materializes_audiojob(tmp_path):
     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
     assert job.source[VOICERENDER_DIAGNOSTICS_SCHEMA] == "voicerender.render-diagnostics.v1"
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
-    assert diagnostics["audio_artifact_policy"] == "voicerender.raw-synthesis.v1"
+    assert diagnostics["audio_artifact_policy"] == "voicerender.preserve-silence.v3"
     assert (
         job.source[VOICERENDER_DIAGNOSTICS_SHA256]
         == "sha256:" + hashlib.sha256(diagnostics_path.read_bytes()).hexdigest()
@@ -376,13 +377,16 @@ def test_voicerender_handoff_rejects_missing_diagnostics(tmp_path):
     ("artifact_policy", "include_policy"),
     [
         ("voicerender.trailing-silence.v1", True),
+        ("voicerender.raw-synthesis.v1", True),
+        ("voicerender.raw-synthesis.v2", True),
+        ("voicerender.future-policy.v9", True),
         (None, False),
     ],
 )
 def test_voicerender_handoff_rejects_stale_or_missing_audio_artifact_policy(
     tmp_path, artifact_policy, include_policy
 ):
-    _, _, source, plan, manifest, render_dir = _book_handoff(tmp_path, producer_version="0.2.11")
+    _, _, source, plan, manifest, render_dir = _book_handoff(tmp_path)
     diagnostics_path = render_dir / RENDER_DIAGNOSTICS_FILENAME
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     if include_policy:
@@ -392,10 +396,17 @@ def test_voicerender_handoff_rejects_stale_or_missing_audio_artifact_policy(
     diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
 
     with pytest.raises(
-        HandoffValidationError,
-        match="re-render with VoiceRender >=0\\.2\\.11 before composition",
-    ):
+        HandoffValidationError, match="unsupported audio artifact policy"
+    ) as exc_info:
         materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
+
+    assert exc_info.value.code == "handoff.voicerender_rerender_required"
+    assert exc_info.value.recovery_action == "rerender"
+    assert exc_info.value.details["observed_audio_artifact_policy"] == artifact_policy
+    assert exc_info.value.details["required_audio_artifact_policy"] == (
+        "voicerender.preserve-silence.v3"
+    )
+    assert exc_info.value.details["required_version"] == ">=0.2.12,<0.3"
 
 
 @pytest.mark.parametrize(
@@ -475,20 +486,80 @@ def test_voicerender_handoff_rejects_wrong_deferred_segment_id(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("producer_name", "producer_version", "message"),
+    ("producer_name", "producer_version", "message", "code", "recovery_action"),
     [
-        ("another-producer", "0.2.0", "produced by 'voicerender'"),
-        ("voicerender", "0.1.1", "incompatible; AudioCompose v0.3 supports 0.2.x"),
+        ("another-producer", "0.2.12", "produced by 'voicerender'", "handoff.invalid", None),
+        (
+            "voicerender",
+            "0.2.11",
+            "is incompatible",
+            "handoff.voicerender_version_unsupported",
+            "rerender",
+        ),
+        (
+            "voicerender",
+            "0.2.10",
+            "is incompatible",
+            "handoff.voicerender_version_unsupported",
+            "rerender",
+        ),
+        (
+            "voicerender",
+            "0.2.0",
+            "is incompatible",
+            "handoff.voicerender_version_unsupported",
+            "rerender",
+        ),
+        (
+            "voicerender",
+            "0.1.9",
+            "is incompatible",
+            "handoff.voicerender_version_unsupported",
+            "rerender",
+        ),
+        (
+            "voicerender",
+            "0.3.0",
+            "is incompatible",
+            "handoff.voicerender_version_unsupported",
+            None,
+        ),
+        (
+            "voicerender",
+            "not-a-version",
+            "is malformed",
+            "handoff.voicerender_version_unsupported",
+            None,
+        ),
     ],
 )
 def test_voicerender_handoff_rejects_incompatible_manifest_producer(
-    tmp_path, producer_name, producer_version, message
+    tmp_path, producer_name, producer_version, message, code, recovery_action
 ):
     _, _, source, plan, manifest, render_dir = _book_handoff(
         tmp_path, producer_name=producer_name, producer_version=producer_version
     )
-    with pytest.raises(HandoffValidationError, match=message):
+    with pytest.raises(HandoffValidationError, match=message) as exc_info:
         materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
+
+    assert exc_info.value.code == code
+    assert exc_info.value.recovery_action == recovery_action
+
+
+@pytest.mark.parametrize("producer_version", ["0.2.12", "0.2.13", "0.2.99"])
+def test_voicerender_handoff_accepts_supported_producer_versions(tmp_path, producer_version):
+    _, _, source, plan, manifest, render_dir = _book_handoff(
+        tmp_path, producer_version=producer_version
+    )
+    job = materialize_voicerender_job(source, plan, manifest, render_dir=render_dir)
+
+    assert job.source["render_manifest.manifest_id"] == manifest.manifest_id
+
+
+def test_missing_voicerender_producer_version_is_rejected():
+    manifest = SimpleNamespace(producer=SimpleNamespace(name="voicerender", version=None))
+    with pytest.raises(HandoffValidationError, match="version None is malformed"):
+        voicerender_integration._validate_voicerender_producer(manifest)
 
 
 def test_voicerender_handoff_rejects_incomplete_manifest(tmp_path):

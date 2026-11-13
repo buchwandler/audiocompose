@@ -39,7 +39,12 @@ from .renderplan_metadata import (
 
 EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
 _VOICERENDER_DIAGNOSTICS_SCHEMA = "voicerender.render-diagnostics.v1"
-_VOICERENDER_AUDIO_ARTIFACT_POLICY = "voicerender.raw-synthesis.v1"
+_VOICERENDER_AUDIO_ARTIFACT_POLICY = "voicerender.preserve-silence.v3"
+_VOICERENDER_MIN_VERSION = (0, 2, 12)
+_VOICERENDER_MAX_VERSION = (0, 3, 0)
+_VOICERENDER_VERSION = re.compile(
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?"
+)
 _VOICERENDER_EMPHASIS_POLICIES = frozenset({"reject", "defer-to-compose"})
 
 
@@ -93,14 +98,31 @@ def _validate_voicerender_producer(manifest: Any) -> None:
             "VoiceRender diagnostics can only be trusted with a RenderManifest produced by 'voicerender'"
         )
     version = getattr(producer, "version", None)
-    if version is None:
-        return
-    if not isinstance(version, str):
-        raise HandoffValidationError("RenderManifest VoiceRender producer version must be a string")
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[.+-][0-9A-Za-z.+-]+)?", version)
-    if match is None or (int(match.group(1)), int(match.group(2))) != (0, 2):
+    match = _VOICERENDER_VERSION.fullmatch(version) if isinstance(version, str) else None
+    if match is None:
         raise HandoffValidationError(
-            f"VoiceRender producer version {version!r} is incompatible; AudioCompose v0.3 supports 0.2.x"
+            f"VoiceRender producer version {version!r} is malformed; "
+            "AudioCompose requires >=0.2.12,<0.3",
+            code="handoff.voicerender_version_unsupported",
+            details={
+                "producer": "voicerender",
+                "observed_version": version,
+                "required_version": ">=0.2.12,<0.3",
+            },
+        )
+    parsed_version = tuple(int(component) for component in match.groups()[:3])
+    if not _VOICERENDER_MIN_VERSION <= parsed_version < _VOICERENDER_MAX_VERSION:
+        below_floor = parsed_version < _VOICERENDER_MIN_VERSION
+        raise HandoffValidationError(
+            f"VoiceRender producer version {version!r} is incompatible; "
+            "AudioCompose requires >=0.2.12,<0.3",
+            code="handoff.voicerender_version_unsupported",
+            details={
+                "producer": "voicerender",
+                "observed_version": version,
+                "required_version": ">=0.2.12,<0.3",
+            },
+            recovery_action="rerender" if below_floor else None,
         )
 
 
@@ -115,7 +137,16 @@ def _validate_render_diagnostics(
     if artifact_policy != _VOICERENDER_AUDIO_ARTIFACT_POLICY:
         raise HandoffValidationError(
             "VoiceRender artifacts use an unsupported audio artifact policy; "
-            "re-render with VoiceRender >=0.2.11 before composition"
+            "re-render with VoiceRender >=0.2.12 using "
+            "voicerender.preserve-silence.v3 before composition",
+            code="handoff.voicerender_rerender_required",
+            details={
+                "producer": "voicerender",
+                "observed_audio_artifact_policy": artifact_policy,
+                "required_audio_artifact_policy": _VOICERENDER_AUDIO_ARTIFACT_POLICY,
+                "required_version": ">=0.2.12,<0.3",
+            },
+            recovery_action="rerender",
         )
     plan_id = plan.plan_id or plan.computed_id()
     if diagnostics.get("render_plan_id") != plan_id:
@@ -644,11 +675,11 @@ def materialize_voicerender_job(
     except Exception as exc:
         raise HandoffValidationError(f"RenderManifest handoff is invalid: {exc}") from exc
 
-    _validate_voicerender_producer(manifest)
     diagnostics, diagnostics_sha256 = _load_render_diagnostics(
         Path(render_dir).expanduser() / RENDER_DIAGNOSTICS_FILENAME
     )
     control_ownership = _validate_render_diagnostics(plan, diagnostics, diagnostics_sha256)
+    _validate_voicerender_producer(manifest)
     job = materialize_renderplan_job(
         plan,
         manifest,

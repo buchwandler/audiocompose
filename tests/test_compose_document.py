@@ -122,7 +122,7 @@ def _document_render_workspace(
         render_plan_id=plan.plan_id or plan.computed_id(),
         speech=(artifact,),
         complete=True,
-        producer=Producer(name="voicerender", version="0.2.4"),
+        producer=Producer(name="voicerender", version="0.2.12"),
     ).with_identity()
     save_manifest(manifest, render_dir / "render-manifest.toml")
     deferred = []
@@ -141,7 +141,7 @@ def _document_render_workspace(
             )
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
-        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+        "audio_artifact_policy": "voicerender.preserve-silence.v3",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "defer-to-compose" if deferred else "reject",
         "pending_composition": bool(deferred),
@@ -454,6 +454,32 @@ def test_compose_document_rejects_incomplete_manifest(tmp_path: Path) -> None:
     with pytest.raises(DocumentComposeError) as exc_info:
         compose_document(workspace, variant=variant)
     assert exc_info.value.code == "handoff.invalid"
+
+
+def test_document_handoff_error_preserves_structured_rerender_metadata(tmp_path: Path) -> None:
+    from audiocompose.document import compose_document
+    from audiocompose.errors import DocumentComposeError
+    from audiocompose.integrations.renderplan_metadata import RENDER_DIAGNOSTICS_FILENAME
+
+    workspace, variant = _document_render_workspace(tmp_path / "story.ssmd-bundle")
+    diagnostics_path = (
+        workspace / "voicerender" / variant / DOCUMENT_ID / RENDER_DIAGNOSTICS_FILENAME
+    )
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    diagnostics["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    with pytest.raises(DocumentComposeError) as exc_info:
+        compose_document(workspace, variant=variant)
+
+    error = exc_info.value
+    assert error.code == "handoff.voicerender_rerender_required"
+    assert error.recovery_action == "rerender"
+    assert error.details["observed_audio_artifact_policy"] == "voicerender.raw-synthesis.v2"
+    assert error.details["required_audio_artifact_policy"] == "voicerender.preserve-silence.v3"
+    assert error.details["required_version"] == ">=0.2.12,<0.3"
+    assert not (workspace / "audiocompose" / variant / f"{DOCUMENT_ID}.wav").exists()
+    assert not list(workspace.rglob("*.audiojob"))
 
 
 def test_resolve_document_rejects_renderplan_and_source_identity_mismatches(

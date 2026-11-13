@@ -114,12 +114,12 @@ def _write_render(root: Path, variant: str, unit_id: str, plan: RenderPlan, *, c
         render_plan_id=plan.plan_id or plan.computed_id(),
         speech=(),
         complete=complete,
-        producer=Producer(name="voicerender", version="0.2.0"),
+        producer=Producer(name="voicerender", version="0.2.12"),
     ).with_identity()
     save_manifest(manifest, render_dir / "render-manifest.toml")
     diagnostics = {
         "schema": "voicerender.render-diagnostics.v1",
-        "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+        "audio_artifact_policy": "voicerender.preserve-silence.v3",
         "render_plan_id": plan.plan_id or plan.computed_id(),
         "emphasis_policy": "reject",
         "pending_composition": False,
@@ -212,6 +212,61 @@ def _write_document_compose_report(
     ]
     report_path = output_dir / "compose-report.toml"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
+def _write_failed_book_compose_report(
+    root: Path,
+    variant: str,
+    profile_id: str,
+    plan: RenderPlan,
+    manifest_path: Path,
+    diagnostics_path: Path,
+    *,
+    error_code: str,
+    error_message: str,
+    failure_stage: str | None = None,
+    recovery_action: str | None = None,
+    include_identity: bool = True,
+) -> Path:
+    import hashlib
+
+    output_dir = root / "audiocompose" / variant
+    output_dir.mkdir(parents=True, exist_ok=True)
+    top = [
+        'format = "audiocompose-book-report"',
+        "version = 1",
+        f"variant = {json.dumps(variant)}",
+        f"render_profile_id = {json.dumps(profile_id)}",
+        "requested = 1",
+        "written = 0",
+        "reused = 0",
+        "failed = 1",
+        "skipped = 0",
+    ]
+    item = [
+        'id = "chapter-0001"',
+        "source_number = 1",
+        f"render_plan_id = {json.dumps(plan.plan_id or plan.computed_id())}",
+        'status = "failed"',
+        f"error_code = {json.dumps(error_code)}",
+        f"error_message = {json.dumps(error_message)}",
+    ]
+    if failure_stage is not None:
+        item.append(f"failure_stage = {json.dumps(failure_stage)}")
+    if recovery_action is not None:
+        item.append(f"recovery_action = {json.dumps(recovery_action)}")
+    if include_identity:
+        item.extend(
+            (
+                "manifest_sha256 = "
+                + json.dumps("sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()),
+                "render_diagnostics_sha256 = "
+                + json.dumps("sha256:" + hashlib.sha256(diagnostics_path.read_bytes()).hexdigest()),
+            )
+        )
+    report_path = output_dir / "compose-report.toml"
+    report_path.write_text(chr(10).join(top + ["", "[[item]]", *item]) + chr(10), encoding="utf-8")
     return report_path
 
 
@@ -529,6 +584,133 @@ def test_compose_report_current_output_is_complete_and_upstream_change_is_stale(
     stale = list_bundle_variants(root).variants[0]
     assert stale.compose_status == "stale"
     assert stale.state == "stale"
+
+
+def test_failed_handoff_becomes_recomposable_after_real_voicerender_repair(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, profile_id, plan = _book_variant(root)
+    manifest, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    manifest_path = render_dir / "render-manifest.toml"
+    diagnostics_path = render_dir / "render-diagnostics.json"
+
+    old_manifest = replace(
+        manifest,
+        producer=Producer(name="voicerender", version="0.2.11"),
+        manifest_id=None,
+    ).with_identity()
+    save_manifest(old_manifest, manifest_path)
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    diagnostics["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+    report_path = _write_failed_book_compose_report(
+        root,
+        variant,
+        profile_id,
+        plan,
+        manifest_path,
+        diagnostics_path,
+        error_code="handoff.voicerender_rerender_required",
+        error_message="rerender required",
+        failure_stage="handoff",
+        recovery_action="rerender",
+    )
+
+    incompatible = list_bundle_variants(root).variants[0]
+    assert incompatible.render_status == "incompatible"
+    assert incompatible.compose_status == "failed"
+    assert incompatible.state == "render_incompatible"
+    assert not incompatible.ready_to_compose
+    assert incompatible.recovery_action == "rerender"
+    assert incompatible.automatic_convergence_safe
+    assert incompatible.to_dict()["recovery_action"] == "rerender"
+    assert incompatible.required_audio_artifact_policy == "voicerender.preserve-silence.v3"
+    assert incompatible.required_voicerender == ">=0.2.12,<0.3"
+    assert incompatible.to_dict()["required_audio_artifact_policy"] == (
+        "voicerender.preserve-silence.v3"
+    )
+    assert incompatible.to_dict()["required_voicerender"] == ">=0.2.12,<0.3"
+
+    repaired_manifest = replace(
+        old_manifest,
+        producer=Producer(name="voicerender", version="0.2.12"),
+        manifest_id=None,
+    ).with_identity()
+    save_manifest(repaired_manifest, manifest_path)
+    diagnostics["audio_artifact_policy"] = "voicerender.preserve-silence.v3"
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    repaired = list_bundle_variants(root).variants[0]
+    assert repaired.render_status == "complete"
+    assert repaired.compose_status == "stale"
+    assert repaired.state == "stale"
+    assert repaired.ready_to_compose
+    assert repaired.recovery_action == "recompose"
+    assert repaired.automatic_convergence_safe
+    assert repaired.compose_report_path == report_path
+    assert "handoff.voicerender_rerender_required" in report_path.read_text(encoding="utf-8")
+
+
+def test_exact_legacy_handoff_failure_recovers_after_current_handoff(tmp_path: Path) -> None:
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, profile_id, plan = _book_variant(root)
+    _, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    report_path = _write_failed_book_compose_report(
+        root,
+        variant,
+        profile_id,
+        plan,
+        render_dir / "render-manifest.toml",
+        render_dir / "render-diagnostics.json",
+        error_code="handoff.invalid",
+        error_message=(
+            "VoiceRender artifacts use an unsupported audio artifact policy; "
+            "re-render with VoiceRender >=0.2.11 before composition"
+        ),
+        include_identity=False,
+    )
+
+    recovered = list_bundle_variants(root).variants[0]
+    assert recovered.render_status == "complete"
+    assert recovered.compose_status == "stale"
+    assert recovered.ready_to_compose
+    assert recovered.recovery_action == "recompose"
+    assert recovered.automatic_convergence_safe
+    assert recovered.compose_report_path == report_path
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("compose.failed", "renderer composition failed"),
+        ("handoff.invalid", "an unrelated handoff validation error"),
+    ],
+)
+def test_unrelated_failed_compose_reports_remain_fail_closed(
+    tmp_path: Path, error_code: str, error_message: str
+) -> None:
+    root = _bundle(tmp_path / "book.ssmd-bundle")
+    variant, profile_id, plan = _book_variant(root)
+    _, render_dir = _write_render(root, variant, "chapter-0001", plan)
+    _write_failed_book_compose_report(
+        root,
+        variant,
+        profile_id,
+        plan,
+        render_dir / "render-manifest.toml",
+        render_dir / "render-diagnostics.json",
+        error_code=error_code,
+        error_message=error_message,
+        failure_stage="handoff" if error_code == "handoff.invalid" else None,
+    )
+
+    failed = list_bundle_variants(root).variants[0]
+    assert failed.render_status == "complete"
+    assert failed.compose_status == "failed"
+    assert failed.state == "compose_failed"
+    assert failed.recovery_action is None
+    assert not failed.automatic_convergence_safe
 
 
 def test_missing_output_for_owned_compose_report_is_unknown(tmp_path: Path) -> None:

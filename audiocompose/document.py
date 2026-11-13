@@ -6,6 +6,7 @@ import importlib
 import os
 import stat
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
@@ -34,8 +35,17 @@ def _error(
     *,
     document_id: str | None = DOCUMENT_ID,
     variant: str | None = None,
+    details: Mapping[str, Any] | None = None,
+    recovery_action: str | None = None,
 ) -> DocumentComposeError:
-    return DocumentComposeError(code, message, document_id=document_id, variant=variant)
+    return DocumentComposeError(
+        code,
+        message,
+        document_id=document_id,
+        variant=variant,
+        details=details,
+        recovery_action=recovery_action,
+    )
 
 
 def _safe_path(path: Path, *, label: str, variant: str) -> Path:
@@ -238,7 +248,13 @@ def resolve_document(
 
         source_plan = load_source_plan(utterplan_path)
     except HandoffValidationError as exc:
-        raise _error("handoff.invalid", str(exc), variant=variant) from exc
+        raise _error(
+            exc.code,
+            str(exc),
+            variant=variant,
+            details=exc.details,
+            recovery_action=exc.recovery_action,
+        ) from exc
     except IntegrationError as exc:
         raise _error(
             "dependency.api_incompatible",
@@ -747,7 +763,13 @@ def compose_document(
     except MediaResolutionError as exc:
         raise _error("handoff.invalid", str(exc), variant=variant) from exc
     except HandoffValidationError as exc:
-        raise _error("handoff.invalid", str(exc), variant=variant) from exc
+        raise _error(
+            exc.code,
+            str(exc),
+            variant=variant,
+            details=exc.details,
+            recovery_action=exc.recovery_action,
+        ) from exc
     except IntegrationError as exc:
         raise _error("dependency.api_incompatible", str(exc), variant=variant) from exc
 

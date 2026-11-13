@@ -695,14 +695,14 @@ def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
         render_plan_id=plan.plan_id or plan.computed_id(),
         speech=tuple(speech_artifacts),
         complete=True,
-        producer=Producer(name="voicerender", version="0.2.0"),
+        producer=Producer(name="voicerender", version="0.2.12"),
     ).with_identity()
     save_manifest(manifest, render_dir / "render-manifest.toml")
     (render_dir / "render-diagnostics.json").write_text(
         json.dumps(
             {
                 "schema": "voicerender.render-diagnostics.v1",
-                "audio_artifact_policy": "voicerender.raw-synthesis.v1",
+                "audio_artifact_policy": "voicerender.preserve-silence.v3",
                 "render_plan_id": plan.plan_id or plan.computed_id(),
                 "emphasis_policy": "reject",
                 "pending_composition": False,
@@ -738,6 +738,99 @@ def test_batch_compose_resumes_matching_outputs_with_oversized_voice_report(
     assert report_items["chapter-0005"]["status"] == "reused"
     assert report_items["chapter-0006"]["status"] == "written"
     assert (workspace / "audiocompose" / variant / "chapter-0006.wav").is_file()
+
+
+def test_batch_converges_after_real_voicerender_handoff_repair(tmp_path: Path, capsys) -> None:
+    import hashlib
+    import json
+    from dataclasses import replace
+
+    import numpy as np
+    from renderplan import Producer, load_manifest, save_manifest
+
+    from audiocompose import compose_book
+    from audiocompose.cli import main
+    from audiocompose.variants import _inspect_bundle_variants
+    from audiocompose.wav import write_wav
+
+    workspace, variant = two_chapter_book(tmp_path)
+    render_dir = workspace / "voicerender" / variant / "chapter-0005"
+    manifest_path = render_dir / "render-manifest.toml"
+    diagnostics_path = render_dir / "render-diagnostics.json"
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    diagnostics["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    failed = compose_book(workspace, variant=variant, chapters="5")
+    assert failed.exit_code == 2
+    assert failed.outcomes[0].error_code == "handoff.voicerender_rerender_required"
+    output_dir = workspace / "audiocompose" / variant
+    assert not (output_dir / "chapter-0005.wav").exists()
+    assert not (output_dir / "chapter-0005.audiojob").exists()
+
+    command = ["bundle", "compose", str(workspace), "--chapters", "5"]
+    assert main(command) == 0
+    human_output = capsys.readouterr().out
+    assert "recovery: rerender" in human_output
+    assert "required audio policy: voicerender.preserve-silence.v3" in human_output
+    assert "required VoiceRender: >=0.2.12,<0.3" in human_output
+
+    assert main([*command, "--json"]) == 0
+    blocked = json.loads(capsys.readouterr().out)
+    blocked_variant = blocked["variants"][0]
+    assert blocked_variant["status"] == "skipped_not_ready"
+    assert blocked_variant["recovery_action"] == "rerender"
+    assert blocked_variant["automatic_convergence_safe"]
+    assert blocked_variant["required_audio_artifact_policy"] == "voicerender.preserve-silence.v3"
+    assert blocked_variant["required_voicerender"] == ">=0.2.12,<0.3"
+    assert blocked_variant["initial_render_status"] == "incompatible"
+    assert not (output_dir / "chapter-0005.wav").exists()
+
+    old_manifest = load_manifest(manifest_path)
+    artifact = old_manifest.speech[0]
+    wav_path = render_dir / artifact.wav
+    samples = np.full(1600, 0.05, dtype=np.float32)
+    write_wav(wav_path, samples, 16_000)
+    rerendered_artifact = replace(
+        artifact,
+        sha256="sha256:" + hashlib.sha256(wav_path.read_bytes()).hexdigest(),
+        frames=len(samples),
+        sample_rate=16_000,
+        channels=1,
+    )
+    rerendered_manifest = replace(
+        old_manifest,
+        speech=(rerendered_artifact,),
+        producer=Producer(name="voicerender", version="0.2.12"),
+        manifest_id=None,
+    ).with_identity()
+    save_manifest(rerendered_manifest, manifest_path)
+    diagnostics["audio_artifact_policy"] = "voicerender.preserve-silence.v3"
+    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+    repaired = _inspect_bundle_variants(workspace, chapter_selector="5").variants[0]
+    assert repaired.render_status == "complete"
+    assert repaired.compose_status == "stale"
+    assert repaired.recovery_action == "recompose"
+    assert repaired.automatic_convergence_safe
+    assert repaired.ready_to_compose
+
+    assert main([*command, "--json"]) == 0
+    converged = json.loads(capsys.readouterr().out)
+    converged_variant = converged["variants"][0]
+    assert converged["force"] is False
+    assert converged["summary"]["completed"] == 1
+    assert converged_variant["initial_state"] == "stale"
+    assert converged_variant["initial_recovery_action"] == "recompose"
+    assert converged_variant["status"] == "complete"
+    assert converged_variant["final_state"] == "complete"
+    assert converged_variant["recovery_action"] is None
+    assert not converged_variant["automatic_convergence_safe"]
+    assert (output_dir / "chapter-0005.wav").is_file()
+    assert (output_dir / "chapter-0005.audiojob").is_dir()
+    final_variant = _inspect_bundle_variants(workspace, chapter_selector="5").variants[0]
+    assert final_variant.state == "complete"
+    assert final_variant.recovery_action is None
 
 
 @pytest.mark.parametrize("kind", ["book", "document"])

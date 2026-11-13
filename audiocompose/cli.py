@@ -421,6 +421,17 @@ def _print_bundle_variants(result: Any) -> None:
                 print(f"  {label}: {variant.name}")
                 print(f"    error: {error}")
 
+        if variant.recovery_action:
+            print(f"  recovery: {variant.recovery_action}")
+            if variant.recovery_reason:
+                print(f"    reason: {variant.recovery_reason}")
+            if variant.automatic_convergence_safe:
+                print("    automatic convergence: safe")
+            if variant.required_audio_artifact_policy:
+                print(f"    required audio policy: {variant.required_audio_artifact_policy}")
+            if variant.required_voicerender:
+                print(f"    required VoiceRender: {variant.required_voicerender}")
+
 
 class _BundleProgressAdapter:
     """Route unchanged progress events and expose batch variant context."""
@@ -514,6 +525,31 @@ def _print_bundle_batch_result(result: Any) -> None:
             print(f"  render warning: {outcome.render_warning}")
         if outcome.compose_error:
             print(f"  compose error: {outcome.compose_error}")
+        recovery_action = getattr(outcome, "recovery_action", None)
+        if recovery_action:
+            print(f"  recovery: {recovery_action}")
+        elif getattr(outcome, "initial_recovery_action", None) and outcome.status == "complete":
+            print(f"  recovery: {outcome.initial_recovery_action} completed")
+        recovery_reason = getattr(outcome, "recovery_reason", None) or getattr(
+            outcome, "initial_recovery_reason", None
+        )
+        if recovery_reason and recovery_action:
+            print(f"  recovery reason: {recovery_reason}")
+        convergence_safe = getattr(outcome, "automatic_convergence_safe", False) or getattr(
+            outcome, "initial_automatic_convergence_safe", False
+        )
+        if convergence_safe:
+            print("  automatic convergence: safe")
+        required_policy = getattr(outcome, "required_audio_artifact_policy", None) or getattr(
+            outcome, "initial_required_audio_artifact_policy", None
+        )
+        if required_policy:
+            print(f"  required audio policy: {required_policy}")
+        required_voicerender = getattr(outcome, "required_voicerender", None) or getattr(
+            outcome, "initial_required_voicerender", None
+        )
+        if required_voicerender:
+            print(f"  required VoiceRender: {required_voicerender}")
         if outcome.result is not None and result.kind == "book":
             value = outcome.result.value
             print(f"  written: {getattr(value, 'written', 0)}")

@@ -36,19 +36,20 @@ from .document_contract import (
     DocumentWorkspaceContractError,
     read_document_workspace,
 )
-from .errors import BookComposeError
+from .errors import BookComposeError, HandoffValidationError
 from .integrations.voicerender import (
     _validate_render_diagnostics,
     _validate_voicerender_producer,
 )
 
 PlanStatus = Literal["valid", "invalid"]
-RenderStatus = Literal["not_rendered", "partial", "complete", "failed", "unknown"]
+RenderStatus = Literal["not_rendered", "partial", "complete", "failed", "incompatible", "unknown"]
 ComposeStatus = Literal["not_composed", "partial", "complete", "failed", "stale", "unknown"]
 VariantState = Literal[
     "invalid",
     "not_rendered",
     "render_partial",
+    "render_incompatible",
     "render_failed",
     "ready",
     "compose_partial",
@@ -64,6 +65,11 @@ SET_FILENAME = "renderplan-set.toml"
 DIAGNOSTICS_FILENAME = "render-diagnostics.json"
 BOOK_REPORT_FORMAT = "audiocompose-book-report"
 DOCUMENT_REPORT_FORMAT = "audiocompose-document-report"
+
+LEGACY_VOICERENDER_POLICY_ERROR = (
+    "VoiceRender artifacts use an unsupported audio artifact policy; "
+    "re-render with VoiceRender >=0.2.11 before composition"
+)
 
 
 class _VariantInspectionError(ValueError):
@@ -89,6 +95,11 @@ class BundleVariant:
     render_error: str | None = None
     render_warning: str | None = None
     compose_error: str | None = None
+    recovery_action: Literal["rerender", "recompose"] | None = None
+    recovery_reason: str | None = None
+    automatic_convergence_safe: bool = False
+    required_audio_artifact_policy: str | None = None
+    required_voicerender: str | None = None
     voicerender_report_path: Path | None = None
     compose_report_path: Path | None = None
 
@@ -111,6 +122,11 @@ class BundleVariant:
             "render_error": self.render_error,
             "render_warning": self.render_warning,
             "compose_error": self.compose_error,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
+            "automatic_convergence_safe": self.automatic_convergence_safe,
+            "required_audio_artifact_policy": self.required_audio_artifact_policy,
+            "required_voicerender": self.required_voicerender,
             "voicerender_report_path": (
                 str(self.voicerender_report_path)
                 if self.voicerender_report_path is not None
@@ -627,7 +643,6 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             if manifest.manifest_id is not None and manifest.manifest_id != manifest.computed_id():
                 raise _VariantInspectionError(f"RenderManifest identity is invalid for {unit.id}")
             manifest.validate_against(unit.plan)
-            _validate_voicerender_producer(manifest)
             _manifest_speech_paths(manifest, render_dir, voice_root)
             rendered_units += 1
             available_speech += len(manifest.speech)
@@ -635,16 +650,11 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
             manifest_sha = "sha256:" + hashlib.sha256(manifest_raw).hexdigest()
             diagnostics_path = render_dir / DIAGNOSTICS_FILENAME
             diagnostics_hash: str | None = None
+            diagnostics: dict[str, Any] | None = None
             if diagnostics_path.exists() or diagnostics_path.is_symlink():
                 diagnostics, diagnostics_hash = _read_json(
                     diagnostics_path, root=voice_root, label="VoiceRender diagnostics"
                 )
-                try:
-                    _validate_render_diagnostics(unit.plan, diagnostics, diagnostics_hash)
-                except Exception as exc:
-                    raise _VariantInspectionError(
-                        f"invalid VoiceRender diagnostics for {unit.id}: {exc}"
-                    ) from exc
             else:
                 diagnostics_ready = False
             identities[unit.id] = {
@@ -655,6 +665,24 @@ def _inspect_render(variant: str, plan: _ValidatedPlan, voice_root: Path) -> _Re
                 "manifest_sha256": manifest_sha,
                 "render_diagnostics_sha256": diagnostics_hash,
             }
+            try:
+                if diagnostics is not None:
+                    _validate_render_diagnostics(unit.plan, diagnostics, diagnostics_hash or "")
+                _validate_voicerender_producer(manifest)
+            except HandoffValidationError as exc:
+                if exc.recovery_action == "rerender":
+                    return _RenderInspection(
+                        "incompatible",
+                        rendered_units,
+                        available_speech,
+                        False,
+                        report_path,
+                        str(exc),
+                        identities,
+                        warning=report_warning,
+                        inspected_unit_ids=frozenset(inspected_unit_ids),
+                    )
+                raise
             if manifest.complete is True:
                 complete_units += 1
     except Exception as exc:
@@ -786,6 +814,49 @@ def _report_common(
         raise _VariantInspectionError("AudioCompose report identity or format is invalid")
 
 
+def _legacy_voicerender_policy_failure(item: dict[str, Any]) -> bool:
+    return (
+        item.get("error_code") == "handoff.invalid"
+        and item.get("error_message") == LEGACY_VOICERENDER_POLICY_ERROR
+    )
+
+
+def _recoverable_voicerender_failure(item: dict[str, Any]) -> bool:
+    if _legacy_voicerender_policy_failure(item):
+        return True
+    return (
+        item.get("failure_stage") == "handoff"
+        and item.get("recovery_action") == "rerender"
+        and item.get("error_code")
+        in {
+            "handoff.voicerender_rerender_required",
+            "handoff.voicerender_version_unsupported",
+        }
+    )
+
+
+def _failure_matches_repaired_handoff(
+    item: dict[str, Any], current: dict[str, str | None], render: _RenderInspection
+) -> bool:
+    if render.status != "complete" or not render.ready:
+        return False
+    if not _recoverable_voicerender_failure(item):
+        return False
+    if _legacy_voicerender_policy_failure(item):
+        return True
+    previous_manifest = item.get("manifest_sha256")
+    previous_diagnostics = item.get("render_diagnostics_sha256")
+    current_manifest = current.get("manifest_sha256")
+    current_diagnostics = current.get("render_diagnostics_sha256")
+    return (
+        isinstance(previous_manifest, str)
+        and isinstance(previous_diagnostics, str)
+        and isinstance(current_manifest, str)
+        and isinstance(current_diagnostics, str)
+        and (previous_manifest != current_manifest or previous_diagnostics != current_diagnostics)
+    )
+
+
 def _inspect_book_compose(
     variant: str, plan: _ValidatedPlan, render: _RenderInspection, output_root: Path
 ) -> _ComposeInspection:
@@ -827,10 +898,9 @@ def _inspect_book_compose(
         failed = report.get("failed", 0)
         if isinstance(failed, bool) or not isinstance(failed, int) or failed < 0:
             raise _VariantInspectionError("AudioCompose book report failed count is invalid")
+        failed_items = [item for item in items if item.get("status") == "failed"]
         if not plan.selection_scoped and (
-            failed > 0
-            or report.get("progress_error") is not None
-            or any(item.get("status") == "failed" for item in items)
+            report.get("progress_error") is not None or failed != len(failed_items)
         ):
             return _ComposeInspection(
                 "failed", 0, report_path, "AudioCompose report records failed work"
@@ -854,17 +924,30 @@ def _inspect_book_compose(
             raise _VariantInspectionError(
                 "AudioCompose book report contains an unsupported selected item status"
             )
-        if any(item.get("status") == "failed" for item in selected_items.values()):
-            return _ComposeInspection(
-                "failed", 0, report_path, "AudioCompose report records failed selected work"
-            )
         complete_units: list[str] = []
         missing_units: list[str] = []
         stale_units: list[str] = []
         stale_reasons: list[str] = []
         for unit in plan.units:
             item = selected_items.get(unit.id)
-            if item is None or item.get("status") not in {"written", "reused"}:
+            if item is None:
+                missing_units.append(unit.id)
+                continue
+            if item.get("status") == "failed":
+                current = render.identities.get(unit.id)
+                if current is None or not _failure_matches_repaired_handoff(item, current, render):
+                    return _ComposeInspection(
+                        "failed",
+                        len(complete_units),
+                        report_path,
+                        "AudioCompose report records failed selected work",
+                    )
+                stale_reasons.append(
+                    f"{unit.id} previous VoiceRender handoff failure is stale after rerender"
+                )
+                stale_units.append(unit.id)
+                continue
+            if item.get("status") not in {"written", "reused"}:
                 missing_units.append(unit.id)
                 continue
             _output_file(output_root, variant_dir, unit.id, item.get("output"))
@@ -989,6 +1072,8 @@ def _derive_state(
         return "invalid"
     if render_status == "failed":
         return "render_failed"
+    if render_status == "incompatible":
+        return "render_incompatible"
     if render_status == "unknown":
         return "unknown"
     if render_status == "not_rendered":
@@ -1061,6 +1146,17 @@ def _inspect_candidate(
     else:
         composition = _inspect_document_compose(candidate.name, plan, render, output_root)
     state = _derive_state("valid", render.status, composition.status)
+    recovery_action: Literal["rerender", "recompose"] | None = None
+    recovery_reason: str | None = None
+    automatic_convergence_safe = False
+    if render.status == "incompatible":
+        recovery_action = "rerender"
+        recovery_reason = render.error
+        automatic_convergence_safe = True
+    elif composition.status == "stale" and render.status == "complete" and render.ready:
+        recovery_action = "recompose"
+        recovery_reason = composition.error
+        automatic_convergence_safe = True
     return BundleVariant(
         name=candidate.name,
         profile_id=plan.profile_id,
@@ -1078,6 +1174,13 @@ def _inspect_candidate(
         render_error=render.error,
         render_warning=render.warning,
         compose_error=composition.error,
+        recovery_action=recovery_action,
+        recovery_reason=recovery_reason,
+        automatic_convergence_safe=automatic_convergence_safe,
+        required_audio_artifact_policy=(
+            "voicerender.preserve-silence.v3" if recovery_action == "rerender" else None
+        ),
+        required_voicerender=">=0.2.12,<0.3" if recovery_action == "rerender" else None,
         voicerender_report_path=render.report_path,
         compose_report_path=composition.report_path,
     )

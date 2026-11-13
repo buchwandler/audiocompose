@@ -182,7 +182,13 @@ audiocompose bundle variants project.ssmd-bundle --json
 
 `bundle variants` is read-only: it lists direct RenderPlan variant directories and reports plan validity, VoiceRender availability, AudioCompose composition status, and whether the handoff is ready. It supports book and document bundles, isolates malformed candidates, accepts `--renderplan-root`, `--voicerender-root`, and `--output-root` overrides, and does not render, compose, create output directories, or require a TTS engine.
 
-The overall state is `not_rendered` when no VoiceRender output is present, `render_partial` when rendering is incomplete, `ready` when the render handoff is complete and there is no current composition, `complete` when AudioCompose output is current, and `stale` when composition provenance no longer matches upstream artifacts. `invalid`, `render_failed`, `compose_partial`, `compose_failed`, and `unknown` identify invalid or contradictory stage results. Check `ready_to_compose` in JSON when a complete manifest may still be missing required diagnostics.
+The overall state is `not_rendered` when no VoiceRender output is present, `render_partial` when rendering is incomplete, `ready` when the render handoff is complete and there is no current composition, `complete` when AudioCompose output is current, and `stale` when composition provenance no longer matches upstream artifacts. `invalid`, `render_incompatible`, `render_failed`, `compose_partial`, `compose_failed`, and `unknown` identify invalid or contradictory stage results. Check `ready_to_compose` in JSON when a complete manifest may still be missing required diagnostics.
+
+### VoiceRender handoff and recovery
+
+The optional VoiceRender adapter requires `voicerender.preserve-silence.v3` from VoiceRender `>=0.2.12,<0.3`. VoiceRender may apply renderer-specific semantics, including configured crops and calibration, but preserves generic leading and trailing silence for AudioCompose. AudioCompose retains synthesized-speech boundary conditioning, the existing 150 ms tail reserve, retained-tail pause credit, pause insertion, boundary shaping, crossfades, and final composition.
+
+When a handoff is incompatible, variant and batch diagnostics expose `recovery_action: rerender`, the required policy and producer range, and whether automatic convergence is safe. Batch composition skips that variant and never invokes VoiceRender. After a genuine upstream rerender produces a current manifest and diagnostics, inspection can expose `recovery_action: recompose`; normal batch composition then retries the stale handoff failure without `--force`. Unrelated failures remain fail-closed.
 
 From inside a bundle, `.` is a valid spelling for the canonical workspace root:
 
